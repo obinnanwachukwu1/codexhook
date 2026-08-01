@@ -20,4 +20,24 @@ test("the published single-file runtime starts and exposes only public commands"
   assert.doesNotMatch(stdout, /codexhook ensure/);
   assert.doesNotMatch(stdout, /codexhook service/);
   assert.doesNotMatch(stdout, /codexhook serve/);
+  assert.doesNotMatch(stdout, /CODEXHOOK_HOME/);
+  assert.doesNotMatch(stdout, /--prepend-body/);
+
+  const urlHelp = await execFileAsync(
+    process.execPath,
+    [runtime, "url"],
+    { timeout: 5_000 },
+  );
+  assert.equal(urlHelp.stderr, "");
+  assert.match(urlHelp.stdout, /codexhook url --id <id>/);
+  assert.match(urlHelp.stdout, /--prepend-body/);
+  assert.match(urlHelp.stdout, /--max-deliveries/);
+
+  const version = await execFileAsync(
+    process.execPath,
+    [runtime, "--version"],
+    { timeout: 5_000 },
+  );
+  assert.equal(version.stderr, "");
+  assert.match(version.stdout, /^codexhook \d+\.\d+\.\d+\n$/);
 });
