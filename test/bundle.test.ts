@@ -20,5 +20,4 @@ test("the published single-file runtime starts and exposes only public commands"
   assert.doesNotMatch(stdout, /codexhook ensure/);
   assert.doesNotMatch(stdout, /codexhook service/);
   assert.doesNotMatch(stdout, /codexhook serve/);
-  assert.match(stdout, /not affiliated with OpenAI/);
 });

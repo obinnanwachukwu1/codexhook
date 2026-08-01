@@ -33,8 +33,6 @@ Environment:
   CODEXHOOK_CODEX_PATH
   CODEXHOOK_DESKTOP_IPC_PATH
   CODEX_THREAD_ID
-
-Codexhook is an independent project and is not affiliated with OpenAI.
 `;
 
 async function main(): Promise<void> {
