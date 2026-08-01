@@ -1,0 +1,115 @@
+name: Clean macOS install
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/clean-install.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/**"
+      - "skills/**"
+      - "src/**"
+      - "test/**"
+      - "tsconfig.json"
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clean-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    runs-on: macos-15
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Test source
+        run: |
+          npm ci
+          npm run check
+
+      - name: Pack the release artifact
+        id: pack
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          package="$RUNNER_TEMP/codexhook-$version.tgz"
+          npm pack --pack-destination "$RUNNER_TEMP"
+          test -f "$package"
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+
+      - name: Install from the tarball
+        run: |
+          npm exec --yes --package="${{ steps.pack.outputs.package }}" -- \
+            codexhook setup
+
+      - name: Check the installation
+        run: |
+          test -x "$HOME/.local/share/codexhook/current/codexhook.mjs"
+          test -L "$HOME/.local/bin/codexhook"
+          test -f "$HOME/.codex/skills/codexhook/SKILL.md"
+          test -f "$HOME/Library/LaunchAgents/dev.codexhook.daemon.plist"
+          launchctl print "gui/$(id -u)/dev.codexhook.daemon"
+          "$HOME/.local/bin/codexhook" doctor --json > "$RUNNER_TEMP/doctor.json"
+          node -e "
+            const report = require(process.env.RUNNER_TEMP + '/doctor.json');
+            if (!report.ok || report.daemon.state !== 'running') process.exit(1);
+          "
+
+      - name: Exercise a one-shot webhook
+        run: |
+          url="$(
+            CODEX_THREAD_ID=clean-install-smoke \
+              "$HOME/.local/bin/codexhook" url \
+              --id one-shot \
+              --expires-in 5m \
+              --max-deliveries 1
+          )"
+          status="$(
+            curl --silent --show-error \
+              --output "$RUNNER_TEMP/first-response.json" \
+              --write-out "%{http_code}" \
+              --data-binary "clean install smoke test" \
+              "$url"
+          )"
+          test "$status" = "202"
+          status="$(
+            curl --silent \
+              --output "$RUNNER_TEMP/second-response.json" \
+              --write-out "%{http_code}" \
+              --data-binary "second hit" \
+              "$url"
+          )"
+          test "$status" = "404"
+
+      - name: Recover after the daemon is killed
+        run: |
+          launchctl kill SIGKILL "gui/$(id -u)/dev.codexhook.daemon"
+          CODEX_THREAD_ID=clean-install-smoke \
+            "$HOME/.local/bin/codexhook" url \
+            --id recovered \
+            --expires-in 5m \
+            --max-deliveries 1 > "$RUNNER_TEMP/recovered-url"
+          "$HOME/.local/bin/codexhook" revoke recovered
+
+      - name: Uninstall and check cleanup
+        run: |
+          "$HOME/.local/bin/codexhook" uninstall --purge
+          test ! -e "$HOME/.local/share/codexhook"
+          test ! -e "$HOME/.local/bin/codexhook"
+          test ! -e "$HOME/.codex/skills/codexhook"
+          test ! -e "$HOME/Library/LaunchAgents/dev.codexhook.daemon.plist"
+          test ! -e "$HOME/.codexhook"
+          ! launchctl print "gui/$(id -u)/dev.codexhook.daemon"

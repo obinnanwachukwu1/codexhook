@@ -1,160 +1,160 @@
 # codexhook
 
-Give a Codex task an HTTP address.
+Let CI jobs, deploys, scripts, and monitors send messages to a Codex task.
 
 > Codexhook is an independent, unofficial project. It is not affiliated with,
 > endorsed by, or sponsored by OpenAI.
 
-Codexhook is an opaque-token reverse map: a webhook URL identifies one Codex
-task plus a small delivery policy. A local background listener accepts the
-request, atomically consumes its allowance, and submits its body to Codex.
+Codexhook gives a task a webhook URL. When something posts to that URL, the
+body arrives in the task as a message. The task can wait for work happening
+outside Codex and continue when the result is ready.
 
-## Install
+## Quick start
 
-macOS and Node.js 24 or newer are required for v1.
-
-```sh
-npx codexhook@latest setup
-```
-
-This one command installs:
-
-- a bundled, versioned runtime in `~/.local/share/codexhook/`;
-- a launcher at `~/.local/bin/codexhook`;
-- the Codex skill at `~/.codex/skills/codexhook/`;
-- a per-user launchd service.
-
-No terminal stays open and no sudo access is needed. launchd keeps the small
-HTTP/SQLite listener available; Codex transports are opened only for a
-delivery.
-
-Setup is also update and repair:
+Codexhook 0.1 requires macOS and Node.js 24 or newer.
 
 ```sh
 npx codexhook@latest setup
 ```
 
-Reinstall a known version to roll back:
+Setup installs the Codex skill and starts a per-user background service.
+launchd keeps it running after the setup command exits.
 
-```sh
-npx codexhook@0.1.0 setup
+Ask Codex for a webhook:
+
+```text
+Create a one-shot webhook named build-result that expires in one hour.
 ```
 
-The installer retains the current and previous runtime directories. It never
-runs the service from npm's temporary npx cache.
+Codex returns a URL and a command to hit it:
 
-## Create a webhook
+```sh
+curl --data-binary 'build passed on main' '<url>'
+```
 
-Within a Codex task, `CODEX_THREAD_ID` supplies the task automatically:
+The task receives:
+
+```text
+Webhook build-result:
+
+build passed on main
+```
+
+You can also create the URL directly:
 
 ```sh
 codexhook url \
-  --id deploy-finished \
+  --id build-result \
   --expires-in 1h \
   --max-deliveries 1
 ```
 
-The command prints one bearer-secret URL. POST any UTF-8 body up to 128 KiB:
+`CODEX_THREAD_ID` selects the current task. Use `--thread <id>` when running
+the command elsewhere.
+
+## Control a webhook
+
+Hooks expire after 24 hours by default and can be used any number of times.
+Set a shorter lifetime or a delivery limit for callbacks that should not stay
+active:
 
 ```sh
-curl --data-binary 'deployment succeeded' '<url>'
+codexhook url \
+  --id deploy-finished \
+  --expires-in 30m \
+  --max-deliveries 1
 ```
 
-The listener returns `202` after accepting the hit. Delivery continues in the
-background.
+Expiry accepts minutes, hours, days, and weeks, such as `30m`, `1h`, `7d`, and
+`2w`. Use `never` or `unlimited` when the hook should have no corresponding
+limit.
 
-Available policy:
+Queue mode is the default. A message waits for the current turn to finish, then
+starts the next turn. Use `--mode steer` when the message should enter a turn
+that is already running.
 
-```text
---thread <id>             defaults to CODEX_THREAD_ID
---mode queue|steer        queue by default
---prepend-body <text>     defaults to "Webhook {hookId}:\n\n"
---expires-in <duration>   positive m/h/d/w duration or never; default 24h
---max-deliveries <count>  positive integer or unlimited
-```
+Each message starts with `Webhook {hookId}:`. Pass `--prepend-body ""` to send
+the body without that prefix.
 
-`--prepend-body ""` sends the body without a provenance prefix. Queue mode is
-FIFO per task. Steer mode targets an active turn when possible.
+Reusing an ID for the same task replaces the old URL. An ID that belongs to
+another task is rejected.
 
-Reusing an ID for the same task replaces the registration and invalidates its
-old URL. An ID already owned by another task is rejected.
+## Reach the listener
 
-## Advertised URL
+Codexhook listens on `127.0.0.1:9465`. Local scripts can use the URL as printed.
 
-The listener always binds to `127.0.0.1:9465`. Configure a Tailscale or
-reverse-proxy address as a machine-level advertised URL:
+For another machine or hosted service, forward that address with Tailscale or a
+reverse proxy and record the external address:
 
 ```sh
 npx codexhook@latest setup \
-  --base-url https://machine.example.ts.net/codexhook
+  --base-url https://mac.example.ts.net/codexhook
 ```
 
-This changes returned URLs only. It does not expose another network listener.
-`CODEXHOOK_BASE_URL` remains an environment override.
+Future hooks use the recorded address. Codexhook keeps listening on loopback;
+Tailscale or the proxy handles the network connection.
 
-## Manage and diagnose
+## Delivery behavior
+
+The webhook responds with `202` after accepting a hit. Delivery continues in
+the background.
+
+Queue delivery is FIFO for each task. Steer delivery targets the active turn.
+When Codex Desktop is open, the message and turn appear in the open task. If
+Desktop is closed, codexhook can deliver through another local Codex runtime.
+The task may need a refresh when Desktop opens again.
+
+Delivery is best effort and has no retry queue. A limited-use hook is spent
+when its HTTP request is accepted, even when the message later fails to arrive.
+This avoids duplicate turns after an uncertain delivery result.
+
+## Manage hooks
 
 ```sh
 codexhook list
-codexhook revoke deploy-finished
+codexhook revoke build-result
 codexhook revoke --thread "$CODEX_THREAD_ID"
 codexhook revoke --all
 codexhook doctor
 ```
 
-`url` checks the listener before writing a registration. If it is down, the
-command asks launchd to start it and waits for up to three seconds. It never
-leaves an unusable hook row after a failed start.
+`doctor` checks the installation, background service, and available Codex
+connections. Use `doctor --json` for structured output.
 
-`doctor` checks the durable runtime, recorded Node executable, installed skill,
-launchd listener, and available Codex transports. Codex being temporarily
-closed is reported as degraded availability, not a broken installation.
+Run setup again to update or repair codexhook:
 
-Remove the service, runtime, launcher, and skill:
+```sh
+npx codexhook@latest setup
+```
+
+Install a known version to roll back:
+
+```sh
+npx codexhook@0.1.0 setup
+```
+
+Remove codexhook with:
 
 ```sh
 codexhook uninstall
 ```
 
-The webhook registry and logs are preserved. Delete them too with
-`codexhook uninstall --purge`.
+Uninstall keeps the webhook registry and logs. Add `--purge` to delete them.
 
-## Delivery and co-presence
+## Security
 
-Codexhook prefers the private, user-owned Desktop IPC router and the thread
-follower protocol used by Desktop windows. This provides co-presence: a
-connected open UI observes the turn.
+A webhook URL is a password. Anyone who has it can send text to its Codex task,
+and the body arrives as untrusted external data.
 
-If Desktop is closed or cleanly rejects an incompatible request, delivery
-falls back in order to:
+- Tokens contain 256 random bits.
+- The registry stores token hashes.
+- Expired, revoked, and used-up URLs return `404`.
+- Request bodies are limited to 128 KiB.
+- Accepted hits are limited to 10 per task per minute.
+- Codexhook declines approval requests from delivered turns.
 
-1. an already-running Codex app-server daemon;
-2. the app-server binary bundled with ChatGPT Desktop;
-3. `codex` on the service `PATH`.
-
-A fallback can update the persisted task without making an already-open UI
-render the turn immediately.
-
-Fallback is governed by the submission boundary. Failures proven to happen
-before submission try the next transport. A timeout, disconnect, malformed
-success, or unknown error after a request is written is ambiguous and stops.
-Codexhook never retries an ambiguous request because that could duplicate a
-turn.
-
-Limited-use URLs are consumed when the HTTP request is accepted, even if later
-delivery fails. Delivery is best effort and has no retry queue.
-
-## Security model
-
-- Tokens contain 256 random bits; SQLite stores only SHA-256 digests.
-- Expired, revoked, and fully consumed registrations are deleted.
-- Request bodies are capped at 128 KiB.
-- Delivery is rate-limited to 10 accepted hits per task per minute.
-- App-server approval requests are declined.
-- The listener is loopback-only.
-
-Runtime data and JSON logs live under `~/.codexhook/` by default. Set
-`CODEXHOOK_HOME` before setup to relocate them.
+The listener stays on loopback unless you forward it yourself. Runtime data and
+logs live in `~/.codexhook/`. Set `CODEXHOOK_HOME` before setup to move them.
 
 ## Development
 
@@ -163,10 +163,11 @@ npm install
 npm run check
 ```
 
-`npm run build` emits normal TypeScript output for tests and a hermetic bundled
-runtime at `dist/codexhook.mjs`. The npm package contains that one runtime file,
-the skill, and user documentation—never `node_modules`.
+`npm run check` builds the package and runs the test suite. The clean-install
+workflow also installs the packed release on a fresh macOS runner, exercises a
+webhook, tests daemon recovery, and checks uninstall.
 
-Authored source, tests, scripts, and documentation have a hard 400-line limit
-per file. Treat 300 lines as the extraction warning. `npm run check` enforces
-the limit.
+Authored files have a hard limit of 400 lines. Consider splitting a file at
+300 lines.
+
+MIT licensed.
