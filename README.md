@@ -135,14 +135,6 @@ Run setup again to update or repair codexhook:
 npx codexhook@latest setup
 ```
 
-Install a known version to roll back:
-
-```sh
-npx codexhook@<version> setup
-```
-
-Use version 0.1.1 or newer when codexhook selected a port other than 9465.
-
 Remove codexhook with:
 
 ```sh
