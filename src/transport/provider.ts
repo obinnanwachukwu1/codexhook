@@ -1,0 +1,56 @@
+import { Context, Effect, Layer, Option, Scope } from "effect";
+import { Logger } from "../logger.js";
+import { discoverStandalone } from "./discovery.js";
+import { connectDesktop, desktopProbe } from "./desktop.js";
+import {
+  TransportIncompatible,
+  TransportUnavailable,
+} from "./errors.js";
+import { spawnChildPeer } from "./child-peer.js";
+import type { AppServerPeer } from "./rpc.js";
+import { connectUnixPeer } from "./unix-peer.js";
+import type { TransportSpec } from "./spec.js";
+
+export interface TransportProviderService {
+  readonly candidates: Effect.Effect<ReadonlyArray<TransportSpec>>;
+  readonly connect: (
+    spec: TransportSpec,
+  ) => Effect.Effect<
+    AppServerPeer,
+    TransportUnavailable | TransportIncompatible,
+    Scope.Scope
+  >;
+}
+
+export class TransportProvider extends Context.Tag(
+  "codexhook/TransportProvider",
+)<TransportProvider, TransportProviderService>() {}
+
+export function TransportProviderLive(
+  logger = new Logger(),
+): Layer.Layer<TransportProvider> {
+  return Layer.effect(
+    TransportProvider,
+    Effect.gen(function* () {
+      const probeDesktop = yield* Effect.cachedWithTTL(
+        desktopProbe,
+        "2 seconds",
+      );
+      return TransportProvider.of({
+        candidates: Effect.gen(function* () {
+          const desktop = yield* probeDesktop;
+          const standalone = yield* Effect.promise(() =>
+            discoverStandalone(),
+          );
+          return [...Option.toArray(desktop), ...standalone];
+        }),
+        connect: (spec) =>
+          spec._tag === "Desktop"
+            ? connectDesktop(spec)
+            : spec._tag === "UnixSocket"
+              ? connectUnixPeer(spec, logger)
+              : spawnChildPeer(spec, logger),
+      });
+    }),
+  );
+}

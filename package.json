@@ -1,0 +1,56 @@
+{
+  "name": "codexhook",
+  "version": "0.1.0",
+  "description": "Unofficial webhook URLs for Codex tasks; not affiliated with OpenAI.",
+  "keywords": [
+    "codex",
+    "webhook",
+    "automation",
+    "openai"
+  ],
+  "homepage": "https://github.com/obinnanwachukwu1/codexhook#readme",
+  "bugs": {
+    "url": "https://github.com/obinnanwachukwu1/codexhook/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/obinnanwachukwu1/codexhook.git"
+  },
+  "author": "Obinna Nwachukwu",
+  "type": "module",
+  "bin": {
+    "codexhook": "dist/codexhook.mjs"
+  },
+  "files": [
+    "dist/codexhook.mjs",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node scripts/build-runtime.mjs",
+    "check:lines": "node scripts/check-file-lines.mjs",
+    "check": "npm run check:lines && npm run build && npm test",
+    "prepack": "npm run build",
+    "test": "node --test dist/test/*.test.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "os": [
+    "darwin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "effect": "^3.22.1",
+    "esbuild": "^0.28.1",
+    "typescript": "^5.9.0",
+    "ws": "^8.21.1"
+  },
+  "license": "MIT"
+}

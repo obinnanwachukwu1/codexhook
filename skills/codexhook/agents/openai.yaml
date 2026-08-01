@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codexhook"
+  short_description: "Unofficial webhook URLs for Codex tasks"
+  default_prompt: "Use $codexhook to mint a one-shot webhook URL for this task."
