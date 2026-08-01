@@ -92,19 +92,23 @@ export async function desktopSocketIsPrivate(
   socketPath: string,
 ): Promise<boolean> {
   if (process.platform === "win32") return true;
-  const [info, parent] = await Promise.all([
-    lstat(socketPath),
-    stat(path.dirname(socketPath)),
-  ]);
-  return (
-    info.isSocket() &&
-    !info.isSymbolicLink() &&
-    process.getuid?.() === info.uid &&
-    (info.mode & 0o077) === 0 &&
-    parent.isDirectory() &&
-    parent.uid === info.uid &&
-    (parent.mode & 0o077) === 0
-  );
+  try {
+    const [info, parent] = await Promise.all([
+      lstat(socketPath),
+      stat(path.dirname(socketPath)),
+    ]);
+    return (
+      info.isSocket() &&
+      !info.isSymbolicLink() &&
+      process.getuid?.() === info.uid &&
+      (info.mode & 0o077) === 0 &&
+      parent.isDirectory() &&
+      parent.uid === info.uid &&
+      (parent.mode & 0o077) === 0
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function probe(socketPath: string): Promise<boolean> {
@@ -115,7 +119,7 @@ async function probe(socketPath: string): Promise<boolean> {
 }
 
 export const desktopProbe: Effect.Effect<Option.Option<TransportSpec>> =
-  Effect.promise(async () => {
+  Effect.tryPromise(async () => {
     const socketPath =
       process.env.CODEXHOOK_DESKTOP_IPC_PATH ?? defaultSocketPath();
     return (await probe(socketPath))
