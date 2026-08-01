@@ -7,6 +7,7 @@ import {
   setup,
   uninstall,
 } from "./commands/system.js";
+import { VERSION } from "./version.js";
 
 const HELP = `codexhook — give a Codex task an HTTP address
 
@@ -19,20 +20,6 @@ Usage:
   codexhook revoke --all
   codexhook doctor [--json]
   codexhook uninstall [--purge]
-
-URL options:
-  --thread <id>               Defaults to CODEX_THREAD_ID
-  --mode <queue|steer>        Default: queue
-  --prepend-body <text>       Default: "Webhook {hookId}:\\n\\n"
-  --expires-in <duration>     1h, 7d, 30d, or never; default: 24h
-  --max-deliveries <count>    Positive integer or unlimited
-
-Environment:
-  CODEXHOOK_HOME
-  CODEXHOOK_BASE_URL
-  CODEXHOOK_CODEX_PATH
-  CODEXHOOK_DESKTOP_IPC_PATH
-  CODEX_THREAD_ID
 `;
 
 async function main(): Promise<void> {
@@ -58,6 +45,10 @@ async function main(): Promise<void> {
       break;
     case "serve":
       await serve(arguments_);
+      break;
+    case "--version":
+    case "-v":
+      process.stdout.write(`codexhook ${VERSION}\n`);
       break;
     case "help":
     case "--help":

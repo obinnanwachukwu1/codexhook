@@ -13,6 +13,18 @@ import { readInstallManifest } from "../installation.js";
 import { WebhookRegistry } from "../registry.js";
 import type { DeliveryMode } from "../types.js";
 
+const URL_HELP = `Usage:
+  codexhook url --id <id> [options]
+
+Options:
+  --thread <id>               Defaults to the current Codex task
+  --mode <queue|steer>        Default: queue
+  --prepend-body <text>       Default: "Webhook {hookId}:\\n\\n"
+  --expires-in <duration>     1h, 7d, 30d, or never; default: 24h
+  --max-deliveries <count>    Positive integer or unlimited
+  --json                      Print structured output
+`;
+
 function registry(): WebhookRegistry {
   return new WebhookRegistry(databasePath(dataDirectory()));
 }
@@ -26,6 +38,14 @@ function advertisedBaseUrl(): string {
 }
 
 export async function createUrl(arguments_: string[]): Promise<void> {
+  if (
+    arguments_.length === 0 ||
+    (arguments_.length === 1 &&
+      (arguments_[0] === "--help" || arguments_[0] === "-h"))
+  ) {
+    process.stdout.write(URL_HELP);
+    return;
+  }
   const { values } = parseArgs({
     args: arguments_,
     strict: true,
