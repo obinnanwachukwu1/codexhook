@@ -135,12 +135,6 @@ Run setup again to update or repair codexhook:
 npx codexhook@latest setup
 ```
 
-Install a known version to roll back:
-
-```sh
-npx codexhook@<version> setup
-```
-
 Remove codexhook with:
 
 ```sh

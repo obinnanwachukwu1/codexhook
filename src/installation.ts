@@ -359,8 +359,8 @@ export function uninstallInstallation(
   rmSync(paths.launchAgent, { force: true });
   rmSync(paths.shim, { force: true });
   rmSync(paths.skill, { recursive: true, force: true });
-  rmSync(paths.runtimeRoot, { recursive: true, force: true });
   if (options.purge === true) {
+    rmSync(paths.runtimeRoot, { recursive: true, force: true });
     rmSync(
       options.purgeDataDirectory ??
         manifest?.dataDirectory ??
@@ -368,8 +368,17 @@ export function uninstallInstallation(
       {
       recursive: true,
       force: true,
-      },
+        },
     );
+  } else if (existsSync(paths.runtimeRoot)) {
+    for (const entry of readdirSync(paths.runtimeRoot)) {
+      if (entry !== path.basename(paths.manifest)) {
+        rmSync(path.join(paths.runtimeRoot, entry), {
+          recursive: true,
+          force: true,
+        });
+      }
+    }
   }
 }
 

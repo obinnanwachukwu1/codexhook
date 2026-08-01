@@ -151,16 +151,34 @@ test("uninstall preserves data unless purge is explicit", () => {
     home,
     runtimeSource: runtime,
     skillSource: skill,
+    baseUrl: "https://mac.example.test/codexhook",
+    port: 51_234,
     activate: false,
   });
+  const paths = installationPaths(home);
   const data = path.join(home, ".codexhook", "codexhook.sqlite");
   writeFileSync(data, "registry");
 
   uninstallInstallation({ home });
-  assert.equal(existsSync(installationPaths(home).runtimeRoot), false);
+  assert.equal(existsSync(paths.currentLink), false);
+  assert.equal(readInstallManifest(paths)?.port, 51_234);
+  assert.equal(
+    readInstallManifest(paths)?.baseUrl,
+    "https://mac.example.test/codexhook",
+  );
   assert.equal(readFileSync(data, "utf8"), "registry");
 
+  const reinstalled = setupInstallation({
+    home,
+    runtimeSource: runtime,
+    skillSource: skill,
+    activate: false,
+  });
+  assert.equal(reinstalled.port, 51_234);
+  assert.equal(reinstalled.baseUrl, "https://mac.example.test/codexhook");
+
   uninstallInstallation({ home, purge: true });
+  assert.equal(existsSync(paths.runtimeRoot), false);
   assert.equal(existsSync(path.dirname(data)), false);
 });
 
