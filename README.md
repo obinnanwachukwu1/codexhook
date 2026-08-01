@@ -81,7 +81,15 @@ another task is rejected.
 
 ## Reach the listener
 
-Codexhook listens on `127.0.0.1:9465`. Local scripts can use the URL as printed.
+On a fresh install, Codexhook tries `127.0.0.1:9465`. If another service is
+using it, setup selects an available high port and keeps that choice for later
+runs. Local scripts can use the URL as printed.
+
+Choose a specific local port when you need one:
+
+```sh
+npx codexhook@latest setup --port 12345
+```
 
 For another machine or hosted service, forward that address with Tailscale or a
 reverse proxy and record the external address:
@@ -130,7 +138,7 @@ npx codexhook@latest setup
 Install a known version to roll back:
 
 ```sh
-npx codexhook@0.1.0 setup
+npx codexhook@<version> setup
 ```
 
 Remove codexhook with:

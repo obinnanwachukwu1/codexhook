@@ -38,13 +38,19 @@ Logs are in `~/.codexhook/log/daemon.log`.
 
 ## Listener repeatedly exits
 
-`doctor` distinguishes a missing recorded Node binary from a port conflict.
-Setup records the current Node path again. For a port conflict, inspect the
-listener:
+`doctor --json` distinguishes a missing recorded Node binary from a port
+conflict and reports the selected port at `installation.manifest.port`. Setup
+records the current Node path again. For a port conflict, inspect that port:
 
 ```sh
-lsof -nP -iTCP:9465 -sTCP:LISTEN
+lsof -nP -iTCP:<port> -sTCP:LISTEN
 ```
+
+A fresh install tries port 9465 and automatically selects an available high
+port when necessary. Existing installs keep their selected port so active local
+URLs stay valid. If the user intentionally wants a different port, ask them to
+run `npx codexhook@latest setup --port <port>` and warn that existing local URLs
+will change.
 
 ## Codex unavailable
 

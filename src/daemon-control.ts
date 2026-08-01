@@ -60,25 +60,29 @@ export async function probeDaemon(
   }
 }
 
-async function waitForDaemon(): Promise<DaemonProbe> {
+async function waitForDaemon(origin: string): Promise<DaemonProbe> {
   const deadline = Date.now() + 3_000;
-  let result = await probeDaemon();
+  let result = await probeDaemon(origin);
   while (result.state === "down" && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 100));
-    result = await probeDaemon();
+    result = await probeDaemon(origin);
   }
   return result;
 }
 
 export async function requireDaemon(): Promise<DaemonHealth> {
-  let probe = await probeDaemon();
+  const paths = installationPaths();
+  const manifest = readInstallManifest(paths);
+  const port = manifest?.port ?? DEFAULT_PORT;
+  const origin = defaultBaseUrl(DEFAULT_HOST, port);
+  let probe = await probeDaemon(origin);
   if (probe.state === "occupied") {
-    throw new Error("port 9465 is occupied by a service that is not codexhook");
+    throw new Error(
+      `port ${port} is occupied by a service that is not codexhook`,
+    );
   }
   if (probe.state === "running") return probe.health;
 
-  const paths = installationPaths();
-  const manifest = readInstallManifest(paths);
   if (
     manifest == null ||
     !existsSync(paths.launchAgent) ||
@@ -89,9 +93,11 @@ export async function requireDaemon(): Promise<DaemonHealth> {
     );
   }
   kickstartLaunchAgent();
-  probe = await waitForDaemon();
+  probe = await waitForDaemon(origin);
   if (probe.state === "occupied") {
-    throw new Error("port 9465 is occupied by a service that is not codexhook");
+    throw new Error(
+      `port ${port} is occupied by a service that is not codexhook`,
+    );
   }
   if (probe.state === "down") {
     throw new Error(

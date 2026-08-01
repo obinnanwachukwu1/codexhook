@@ -52,8 +52,23 @@ jobs:
 
       - name: Install from the tarball
         run: |
+          node -e "
+            require('node:http')
+              .createServer((_, response) => response.end('occupied'))
+              .listen(9465, '127.0.0.1')
+          " &
+          blocker="$!"
+          trap 'kill "$blocker" 2>/dev/null || true' EXIT
+          for attempt in 1 2 3 4 5; do
+            curl --silent --max-time 1 http://127.0.0.1:9465 >/dev/null && break
+            sleep 1
+          done
           npm exec --yes --package="${{ steps.pack.outputs.package }}" -- \
             codexhook setup
+          selected_port="$(
+            node -p "require(process.env.HOME + '/.local/share/codexhook/install.json').port"
+          )"
+          test "$selected_port" -ne 9465
 
       - name: Check the installation
         run: |

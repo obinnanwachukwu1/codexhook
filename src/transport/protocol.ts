@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { VERSION } from "../version.js";
 
 export const TurnStatus = Schema.Literal(
   "completed",
@@ -54,6 +55,6 @@ export const INITIALIZE_PARAMS = {
   clientInfo: {
     name: "codexhook",
     title: "Codexhook",
-    version: "0.1.0",
+    version: VERSION,
   },
 } as const;

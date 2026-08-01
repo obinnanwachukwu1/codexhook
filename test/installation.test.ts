@@ -47,12 +47,14 @@ test("setup creates a durable runtime, shim, skill, manifest, and plist", () => 
     runtimeSource: runtime,
     skillSource: skill,
     baseUrl: "https://host.example.test/codexhook",
+    port: 51_234,
     activate: false,
   });
   const paths = installationPaths(home);
   const installed = installedRuntimePath(paths);
 
   assert.equal(manifest.baseUrl, "https://host.example.test/codexhook");
+  assert.equal(manifest.port, 51_234);
   assert.equal(readInstallManifest(paths)?.version, manifest.version);
   assert.ok(installed != null && existsSync(installed));
   assert.ok(existsSync(paths.shim));
@@ -60,6 +62,66 @@ test("setup creates a durable runtime, shim, skill, manifest, and plist", () => 
   assert.match(readFileSync(paths.launchAgent, "utf8"), /KeepAlive/);
   assert.match(readFileSync(paths.launchAgent, "utf8"), /codexhook\.mjs/);
   assert.match(readFileSync(paths.launchAgent, "utf8"), /CODEXHOOK_HOME/);
+  assert.match(
+    readFileSync(paths.launchAgent, "utf8"),
+    /<string>--port<\/string>\s*<string>51234<\/string>/,
+  );
+});
+
+test("a local base URL follows a deliberate port change", () => {
+  const { home, runtime, skill } = fixture();
+  setupInstallation({
+    home,
+    runtimeSource: runtime,
+    skillSource: skill,
+    port: 51_234,
+    activate: false,
+  });
+  const manifest = setupInstallation({
+    home,
+    runtimeSource: runtime,
+    skillSource: skill,
+    port: 51_235,
+    activate: false,
+  });
+  assert.equal(manifest.baseUrl, "http://127.0.0.1:51235");
+});
+
+test("a custom base URL survives a deliberate port change", () => {
+  const { home, runtime, skill } = fixture();
+  setupInstallation({
+    home,
+    runtimeSource: runtime,
+    skillSource: skill,
+    baseUrl: "https://mac.example.test/codexhook",
+    port: 51_234,
+    activate: false,
+  });
+  const manifest = setupInstallation({
+    home,
+    runtimeSource: runtime,
+    skillSource: skill,
+    port: 51_235,
+    activate: false,
+  });
+  assert.equal(manifest.baseUrl, "https://mac.example.test/codexhook");
+});
+
+test("legacy manifests without a port use 9465", () => {
+  const { home, runtime, skill } = fixture();
+  setupInstallation({
+    home,
+    runtimeSource: runtime,
+    skillSource: skill,
+    activate: false,
+  });
+  const paths = installationPaths(home);
+  const legacy = JSON.parse(readFileSync(paths.manifest, "utf8")) as {
+    port?: number;
+  };
+  delete legacy.port;
+  writeFileSync(paths.manifest, `${JSON.stringify(legacy)}\n`);
+  assert.equal(readInstallManifest(paths)?.port, 9465);
 });
 
 test("setup can repair in place from the durable runtime", () => {
