@@ -70,8 +70,6 @@ Ask the user to reinstall the previously working npm version:
 npx codexhook@<previous-version> setup
 ```
 
-Use version 0.1.1 or newer when the saved port is not 9465.
-
 The installer retains the current and previous runtime directories.
 
 ## A hit returned 202 but nothing arrived
