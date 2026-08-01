@@ -11,7 +11,7 @@ import {
 const HELP = `codexhook — give a Codex task an HTTP address
 
 Usage:
-  codexhook setup [--base-url <url>]
+  codexhook setup [--base-url <url>] [--port <number>]
   codexhook url --id <id> [options]
   codexhook list [--json]
   codexhook revoke <id>

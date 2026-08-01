@@ -17,7 +17,12 @@ import {
 import { homedir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { defaultBaseUrl, normalizeBaseUrl } from "./config.js";
+import {
+  DEFAULT_HOST,
+  DEFAULT_PORT,
+  defaultBaseUrl,
+  normalizeBaseUrl,
+} from "./config.js";
 import { VERSION } from "./version.js";
 
 export const LAUNCH_LABEL = "dev.codexhook.daemon";
@@ -26,6 +31,7 @@ export interface InstallManifest {
   version: string;
   nodePath: string;
   baseUrl: string;
+  port: number;
   dataDirectory: string;
   installedAt: string;
 }
@@ -74,7 +80,9 @@ export function readInstallManifest(
     ) {
       return null;
     }
-    return value as InstallManifest;
+    const port = value.port ?? DEFAULT_PORT;
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) return null;
+    return { ...value, port } as InstallManifest;
   } catch {
     return null;
   }
@@ -109,6 +117,7 @@ export function renderLaunchAgent(
   nodePath: string,
   environmentPath: string,
   dataDirectory = path.dirname(path.dirname(paths.log)),
+  port = DEFAULT_PORT,
 ): string {
   const runtime = path.join(paths.currentLink, "codexhook.mjs");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -122,6 +131,8 @@ export function renderLaunchAgent(
     <string>${xml(nodePath)}</string>
     <string>${xml(runtime)}</string>
     <string>serve</string>
+    <string>--port</string>
+    <string>${port}</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -237,6 +248,7 @@ function pruneVersions(paths: InstallPaths, keep: number): void {
 
 export interface SetupOptions {
   baseUrl?: string | undefined;
+  port?: number | undefined;
   home?: string | undefined;
   runtimeSource?: string | undefined;
   skillSource?: string | undefined;
@@ -254,8 +266,17 @@ export function setupInstallation(options: SetupOptions = {}): InstallManifest {
 
   const paths = installationPaths(options.home);
   const previous = readInstallManifest(paths);
+  const port = options.port ?? previous?.port ?? DEFAULT_PORT;
+  const previousLocalUrl =
+    previous == null
+      ? null
+      : defaultBaseUrl(DEFAULT_HOST, previous.port);
+  const preservedBaseUrl =
+    previous?.baseUrl === previousLocalUrl ? undefined : previous?.baseUrl;
   const baseUrl = normalizeBaseUrl(
-    options.baseUrl ?? previous?.baseUrl ?? defaultBaseUrl(),
+    options.baseUrl ??
+      preservedBaseUrl ??
+      defaultBaseUrl(DEFAULT_HOST, port),
   ).toString().replace(/\/$/, "");
   const runtimeSource = options.runtimeSource ?? locateRuntime();
   const skillSource = options.skillSource ?? locateSkill(runtimeSource);
@@ -289,6 +310,7 @@ export function setupInstallation(options: SetupOptions = {}): InstallManifest {
     version: VERSION,
     nodePath: process.execPath,
     baseUrl,
+    port,
     dataDirectory:
       process.env.CODEXHOOK_HOME ??
       path.join(options.home ?? homedir(), ".codexhook"),
@@ -306,6 +328,7 @@ export function setupInstallation(options: SetupOptions = {}): InstallManifest {
       process.execPath,
       environmentPath,
       manifest.dataDirectory,
+      manifest.port,
     ),
     0o600,
   );

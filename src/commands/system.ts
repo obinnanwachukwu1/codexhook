@@ -7,6 +7,7 @@ import {
   DEFAULT_PORT,
   dataDirectory,
   databasePath,
+  defaultBaseUrl,
 } from "../config.js";
 import { probeDaemon, requireDaemon } from "../daemon-control.js";
 import { DeliveryLive } from "../delivery/delivery.js";
@@ -17,6 +18,7 @@ import {
   uninstallInstallation,
 } from "../installation.js";
 import { Logger } from "../logger.js";
+import { chooseInstallationPort, parsePort } from "../port.js";
 import { WebhookRegistry } from "../registry.js";
 import { listen } from "../server.js";
 import { desktopProbe } from "../transport/desktop.js";
@@ -25,27 +27,30 @@ import { TransportProviderLive } from "../transport/provider.js";
 import { CodexTransportLive } from "../transport/transport.js";
 import { VERSION } from "../version.js";
 
-function parsePort(value: string): number {
-  const port = Number(value);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error("port must be an integer between 1 and 65535");
-  }
-  return port;
-}
-
 export async function setup(arguments_: string[]): Promise<void> {
   const { values } = parseArgs({
     args: arguments_,
     strict: true,
     options: {
       "base-url": { type: "string" },
+      port: { type: "string" },
     },
   });
-  const manifest = setupInstallation({ baseUrl: values["base-url"] });
+  const previous = readInstallManifest();
+  const requested =
+    values.port == null ? undefined : parsePort(values.port);
+  const port = await chooseInstallationPort({
+    requested,
+    previous: previous?.port,
+  });
+  const manifest = setupInstallation({
+    baseUrl: values["base-url"],
+    port,
+  });
   const health = await requireDaemon();
   process.stdout.write(`Installed codexhook ${manifest.version}.\n`);
   process.stdout.write(
-    `Daemon ${health.state}; URLs use ${manifest.baseUrl}.\n`,
+    `Daemon ${health.state} on 127.0.0.1:${manifest.port}; URLs use ${manifest.baseUrl}.\n`,
   );
   const paths = installationPaths();
   if (!(process.env.PATH ?? "").split(":").includes(paths.shim.slice(
@@ -139,7 +144,9 @@ export async function doctor(arguments_: string[]): Promise<void> {
   });
   const paths = installationPaths();
   const manifest = readInstallManifest(paths);
-  const daemon = await probeDaemon();
+  const daemon = await probeDaemon(
+    defaultBaseUrl(DEFAULT_HOST, manifest?.port ?? DEFAULT_PORT),
+  );
   const desktop = await Effect.runPromise(desktopProbe);
   const runtimes = [
     ...Option.toArray(desktop),

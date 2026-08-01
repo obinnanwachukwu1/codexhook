@@ -308,3 +308,15 @@ test("Desktop IPC rejects exposed and symlinked socket paths", async () => {
     await router.close();
   }
 });
+
+test("a missing Desktop IPC socket is normally unavailable", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codexhook-ipc-"));
+  try {
+    assert.equal(
+      await desktopSocketIsPrivate(path.join(directory, "missing.sock")),
+      false,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
