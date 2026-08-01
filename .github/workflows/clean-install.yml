@@ -63,8 +63,19 @@ jobs:
             curl --silent --max-time 1 http://127.0.0.1:9465 >/dev/null && break
             sleep 1
           done
-          npm exec --yes --package="${{ steps.pack.outputs.package }}" -- \
-            codexhook setup
+          if ! npm exec --yes --package="${{ steps.pack.outputs.package }}" -- \
+            codexhook setup; then
+            cat "$HOME/.local/share/codexhook/install.json" || true
+            cat "$HOME/Library/LaunchAgents/dev.codexhook.daemon.plist" || true
+            cat "$HOME/.codexhook/log/daemon.log" || true
+            selected_port="$(
+              node -p "require(process.env.HOME + '/.local/share/codexhook/install.json').port"
+            )"
+            curl --include --max-time 2 \
+              "http://127.0.0.1:$selected_port/healthz" || true
+            lsof -nP -iTCP:"$selected_port" -sTCP:LISTEN || true
+            exit 1
+          fi
           selected_port="$(
             node -p "require(process.env.HOME + '/.local/share/codexhook/install.json').port"
           )"
