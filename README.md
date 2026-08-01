@@ -11,7 +11,7 @@ outside Codex and continue when the result is ready.
 
 ## Quick start
 
-Codexhook 0.1 requires macOS and Node.js 24 or newer.
+Codexhook requires macOS and Node.js 24 or newer.
 
 ```sh
 npx codexhook@latest setup
