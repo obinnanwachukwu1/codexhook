@@ -106,6 +106,9 @@ test(
           child.windowsVerbatimArguments ?? false,
       },
     );
-    assert.match(stdout, /app-server --listen stdio:\/\//);
+    assert.equal(
+      stdout.trim(),
+      '"app-server" "--listen" "stdio://"',
+    );
   },
 );
