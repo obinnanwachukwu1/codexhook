@@ -40,8 +40,9 @@ export function spawnChildPeer(
         try: () =>
           spawn(spec.executable, [...spec.args], {
             env: process.env,
-            shell: spec.shell ?? false,
             stdio: ["pipe", "pipe", "pipe"],
+            windowsVerbatimArguments:
+              spec.windowsVerbatimArguments ?? false,
           }),
         catch: (cause) =>
           new TransportUnavailable({

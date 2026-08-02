@@ -40,7 +40,10 @@ function fixture(): {
   return { home, runtime, skill };
 }
 
-test("setup creates a durable runtime, shim, skill, manifest, and plist", () => {
+test(
+  "setup creates a durable runtime, shim, skill, manifest, and plist",
+  { skip: process.platform !== "darwin" },
+  () => {
   const { home, runtime, skill } = fixture();
   const manifest = setupInstallation({
     home,
@@ -66,7 +69,8 @@ test("setup creates a durable runtime, shim, skill, manifest, and plist", () => 
     readFileSync(paths.launchAgent, "utf8"),
     /<string>--port<\/string>\s*<string>51234<\/string>/,
   );
-});
+  },
+);
 
 test("Windows setup uses ordinary files and a Task Scheduler launcher", () => {
   const { home, runtime, skill } = fixture();
@@ -107,7 +111,10 @@ test("Linux setup writes a restartable systemd user service", () => {
   const paths = installationPaths(home, "linux");
   const unit = readFileSync(paths.launchAgent, "utf8");
 
-  assert.match(paths.launchAgent, /\.config\/systemd\/user/);
+  assert.equal(
+    paths.launchAgent,
+    path.join(home, ".config", "systemd", "user", "codexhook.service"),
+  );
   assert.match(unit, /Restart=on-failure/);
   assert.match(unit, /--data-directory/);
   assert.match(unit, /Environment="PATH=/);

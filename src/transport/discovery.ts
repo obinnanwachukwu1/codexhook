@@ -94,14 +94,55 @@ interface DaemonVersion {
   socketPath?: string;
 }
 
+function commandInvocation(
+  executablePath: string,
+  arguments_: ReadonlyArray<string>,
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): {
+  executable: string;
+  args: ReadonlyArray<string>;
+  windowsVerbatimArguments?: boolean;
+} {
+  if (
+    platform !== "win32" ||
+    !/\.(?:bat|cmd)$/i.test(executablePath)
+  ) {
+    return { executable: executablePath, args: arguments_ };
+  }
+  const tokens = [executablePath, ...arguments_]
+    .map((value) => `"${value.replaceAll('"', '""')}"`)
+    .join(" ");
+  const command = `"${tokens}"`;
+  return {
+    executable:
+      environment.ComSpec ?? environment.COMSPEC ?? "cmd.exe",
+    args: ["/d", "/s", "/c", command],
+    windowsVerbatimArguments: true,
+  };
+}
+
 async function runningDaemon(
   codexExecutable: string,
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
 ): Promise<TransportSpec | null> {
   try {
-    const { stdout } = await execFileAsync(
+    const command = commandInvocation(
       codexExecutable,
       ["app-server", "daemon", "version"],
-      { timeout: 2_000, maxBuffer: 64 * 1_024 },
+      environment,
+      platform,
+    );
+    const { stdout } = await execFileAsync(
+      command.executable,
+      [...command.args],
+      {
+        timeout: 2_000,
+        maxBuffer: 64 * 1_024,
+        windowsVerbatimArguments:
+          command.windowsVerbatimArguments ?? false,
+      },
     );
     const result = JSON.parse(stdout) as DaemonVersion;
     if (
@@ -141,15 +182,19 @@ export async function discoverStandalone(
   const explicit = environment.CODEXHOOK_CODEX_PATH;
   if (explicit != null && explicit.length > 0) {
     if (!(await executable(explicit))) return [];
-    const daemon = await runningDaemon(explicit);
+    const daemon = await runningDaemon(explicit, environment, platform);
+    const command = commandInvocation(
+      explicit,
+      ["app-server", "--listen", "stdio://"],
+      environment,
+      platform,
+    );
     return [
       ...(daemon == null ? [] : [daemon]),
       {
         _tag: "ChildProcess",
         id: "cli",
-        executable: explicit,
-        args: ["app-server", "--listen", "stdio://"],
-        shell: platform === "win32" && /\.(?:bat|cmd)$/i.test(explicit),
+        ...command,
         coPresence: false,
         approvals: "decline",
       },
@@ -161,7 +206,11 @@ export async function discoverStandalone(
   const cli = await commandOnPath("codex", environment, platform);
   const probeExecutable = cli ?? bundled;
   if (probeExecutable != null) {
-    const daemon = await runningDaemon(probeExecutable);
+    const daemon = await runningDaemon(
+      probeExecutable,
+      environment,
+      platform,
+    );
     if (daemon != null) specs.push(daemon);
   }
   if (bundled != null) {
@@ -175,12 +224,16 @@ export async function discoverStandalone(
     });
   }
   if (cli != null && cli !== bundled) {
+    const command = commandInvocation(
+      cli,
+      ["app-server", "--listen", "stdio://"],
+      environment,
+      platform,
+    );
     specs.push({
       _tag: "ChildProcess",
       id: "cli",
-      executable: cli,
-      args: ["app-server", "--listen", "stdio://"],
-      shell: platform === "win32" && /\.(?:bat|cmd)$/i.test(cli),
+      ...command,
       coPresence: false,
       approvals: "decline",
     });
