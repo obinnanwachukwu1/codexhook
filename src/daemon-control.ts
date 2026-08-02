@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { backgroundServiceExists } from "./background-service.js";
 import {
   DEFAULT_HOST,
   DEFAULT_PORT,
@@ -6,6 +7,7 @@ import {
 } from "./config.js";
 import {
   installationPaths,
+  installationServicePaths,
   kickstartLaunchAgent,
   readInstallManifest,
 } from "./installation.js";
@@ -85,7 +87,7 @@ export async function requireDaemon(): Promise<DaemonHealth> {
 
   if (
     manifest == null ||
-    !existsSync(paths.launchAgent) ||
+    !backgroundServiceExists(installationServicePaths(paths)) ||
     !existsSync(manifest.nodePath)
   ) {
     throw new Error(

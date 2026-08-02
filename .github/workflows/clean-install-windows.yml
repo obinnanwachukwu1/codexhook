@@ -1,0 +1,129 @@
+name: Clean Windows install
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/clean-install-windows.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/**"
+      - "skills/**"
+      - "src/**"
+      - "test/**"
+      - "tsconfig.json"
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clean-install-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    runs-on: windows-2025
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Test source
+        run: |
+          npm ci
+          npm run check
+
+      - name: Pack the release artifact
+        id: pack
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          npm pack --pack-destination $env:RUNNER_TEMP
+          $package = Join-Path $env:RUNNER_TEMP "codexhook-$version.tgz"
+          if (-not (Test-Path $package)) { throw "Package was not created" }
+          "package=$package" >> $env:GITHUB_OUTPUT
+
+      - name: Install from the tarball
+        shell: pwsh
+        run: |
+          npm exec --yes --package="${{ steps.pack.outputs.package }}" -- codexhook setup
+
+      - name: Check the installation
+        shell: pwsh
+        run: |
+          $cli = Join-Path $env:USERPROFILE ".local\bin\codexhook.cmd"
+          $runtime = Join-Path $env:USERPROFILE ".local\share\codexhook\current\codexhook.mjs"
+          $skill = Join-Path $env:USERPROFILE ".codex\skills\codexhook\SKILL.md"
+          if (-not (Test-Path $cli)) { throw "Launcher is missing" }
+          if (-not (Test-Path $runtime)) { throw "Runtime is missing" }
+          if (-not (Test-Path $skill)) { throw "Skill is missing" }
+          if ($null -eq (Get-ScheduledTask -TaskName Codexhook)) {
+            throw "Scheduled task is missing"
+          }
+          $report = (& $cli doctor --json | ConvertFrom-Json)
+          if (-not $report.ok -or $report.daemon.state -ne "running") {
+            throw "Doctor reported an unhealthy installation"
+          }
+
+      - name: Exercise a one-shot webhook
+        shell: pwsh
+        run: |
+          $cli = Join-Path $env:USERPROFILE ".local\bin\codexhook.cmd"
+          $env:CODEX_THREAD_ID = "clean-install-smoke"
+          $url = & $cli url --id one-shot --expires-in 5m --max-deliveries 1
+          $first = Invoke-WebRequest -UseBasicParsing -Method Post -Uri $url -Body "clean install smoke test"
+          if ($first.StatusCode -ne 202) { throw "First hit was not accepted" }
+          try {
+            Invoke-WebRequest -UseBasicParsing -Method Post -Uri $url -Body "second hit"
+            throw "Second hit unexpectedly succeeded"
+          } catch {
+            if ($_.Exception.Response.StatusCode.value__ -ne 404) { throw }
+          }
+
+      - name: Recover after the daemon is killed
+        shell: pwsh
+        run: |
+          $cli = Join-Path $env:USERPROFILE ".local\bin\codexhook.cmd"
+          $runtime = Join-Path $env:USERPROFILE ".local\share\codexhook\current\codexhook.mjs"
+          Get-CimInstance Win32_Process |
+            Where-Object {
+              $_.Name -eq "node.exe" -and
+              $_.CommandLine -ne $null -and
+              $_.CommandLine.Contains($runtime) -and
+              $_.CommandLine -match "\sserve(?:\s|$)"
+            } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+          $env:CODEX_THREAD_ID = "clean-install-smoke"
+          & $cli url --id recovered --expires-in 5m --max-deliveries 1 | Out-Null
+          & $cli revoke recovered
+
+      - name: Uninstall and check cleanup
+        shell: pwsh
+        run: |
+          $cli = Join-Path $env:USERPROFILE ".local\bin\codexhook.cmd"
+          & $cli uninstall --purge
+          Start-Sleep -Milliseconds 500
+          if (Test-Path (Join-Path $env:USERPROFILE ".local\share\codexhook")) {
+            throw "Runtime was not removed"
+          }
+          if (Test-Path $cli) { throw "Launcher was not removed" }
+          if (Test-Path (Join-Path $env:USERPROFILE ".codex\skills\codexhook")) {
+            throw "Skill was not removed"
+          }
+          if (Get-ScheduledTask -TaskName Codexhook -ErrorAction SilentlyContinue) {
+            throw "Scheduled task was not removed"
+          }
+          try {
+            Invoke-WebRequest -UseBasicParsing http://127.0.0.1:9465/healthz -TimeoutSec 1
+            throw "Daemon is still running"
+          } catch {
+            if ($_.Exception.Message -eq "Daemon is still running") { throw }
+          }

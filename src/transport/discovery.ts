@@ -1,11 +1,12 @@
-import { access } from "node:fs/promises";
+import { access, readdir, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { execFile } from "node:child_process";
+import os from "node:os";
 import { promisify } from "node:util";
 import path from "node:path";
 import type { TransportSpec } from "./spec.js";
 
-const DEFAULT_BUNDLED_CODEX =
+const DARWIN_BUNDLED_CODEX =
   "/Applications/ChatGPT.app/Contents/Resources/codex";
 const execFileAsync = promisify(execFile);
 
@@ -21,13 +22,71 @@ async function executable(pathname: string): Promise<boolean> {
 async function commandOnPath(
   name: string,
   environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
 ): Promise<string | null> {
+  const suffixes =
+    platform === "win32"
+      ? ["", ...(environment.PATHEXT ?? ".EXE;.CMD;.BAT")
+          .split(";")
+          .map((value) => value.toLowerCase())]
+      : [""];
   for (const directory of (environment.PATH ?? "").split(path.delimiter)) {
     if (directory.length === 0) continue;
-    const candidate = path.join(directory, name);
-    if (await executable(candidate)) return candidate;
+    for (const suffix of suffixes) {
+      const candidate = path.join(directory, `${name}${suffix}`);
+      if (await executable(candidate)) return candidate;
+    }
   }
   return null;
+}
+
+async function windowsBundledCodex(
+  environment: NodeJS.ProcessEnv,
+): Promise<string | null> {
+  const localAppData =
+    environment.LOCALAPPDATA ??
+    path.join(environment.USERPROFILE ?? os.homedir(), "AppData", "Local");
+  const directory = path.join(localAppData, "OpenAI", "Codex", "bin");
+  try {
+    const candidates = await Promise.all(
+      (await readdir(directory, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory())
+        .map(async (entry) => {
+          const executablePath = path.join(
+            directory,
+            entry.name,
+            "codex.exe",
+          );
+          if (!(await executable(executablePath))) return null;
+          return {
+            executablePath,
+            modified: (await stat(executablePath)).mtimeMs,
+          };
+        }),
+    );
+    return (
+      candidates
+        .filter((candidate) => candidate != null)
+        .sort((left, right) => right.modified - left.modified)[0]
+        ?.executablePath ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function bundledCodex(
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): Promise<string | null> {
+  if (platform === "darwin") {
+    return (await executable(DARWIN_BUNDLED_CODEX))
+      ? DARWIN_BUNDLED_CODEX
+      : null;
+  }
+  return platform === "win32"
+    ? windowsBundledCodex(environment)
+    : null;
 }
 
 interface DaemonVersion {
@@ -77,6 +136,7 @@ async function executableFile(pathname: string): Promise<boolean> {
 
 export async function discoverStandalone(
   environment: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<ReadonlyArray<TransportSpec>> {
   const explicit = environment.CODEXHOOK_CODEX_PATH;
   if (explicit != null && explicit.length > 0) {
@@ -89,6 +149,7 @@ export async function discoverStandalone(
         id: "cli",
         executable: explicit,
         args: ["app-server", "--listen", "stdio://"],
+        shell: platform === "win32" && /\.(?:bat|cmd)$/i.test(explicit),
         coPresence: false,
         approvals: "decline",
       },
@@ -96,29 +157,30 @@ export async function discoverStandalone(
   }
 
   const specs: TransportSpec[] = [];
-  const bundledAvailable = await executable(DEFAULT_BUNDLED_CODEX);
-  const cli = await commandOnPath("codex", environment);
-  const probeExecutable = cli ?? (bundledAvailable ? DEFAULT_BUNDLED_CODEX : null);
+  const bundled = await bundledCodex(environment, platform);
+  const cli = await commandOnPath("codex", environment, platform);
+  const probeExecutable = cli ?? bundled;
   if (probeExecutable != null) {
     const daemon = await runningDaemon(probeExecutable);
     if (daemon != null) specs.push(daemon);
   }
-  if (bundledAvailable) {
+  if (bundled != null) {
     specs.push({
       _tag: "ChildProcess",
       id: "app-bundled",
-      executable: DEFAULT_BUNDLED_CODEX,
+      executable: bundled,
       args: ["app-server", "--listen", "stdio://"],
       coPresence: false,
       approvals: "decline",
     });
   }
-  if (cli != null && cli !== DEFAULT_BUNDLED_CODEX) {
+  if (cli != null && cli !== bundled) {
     specs.push({
       _tag: "ChildProcess",
       id: "cli",
       executable: cli,
       args: ["app-server", "--listen", "stdio://"],
+      shell: platform === "win32" && /\.(?:bat|cmd)$/i.test(cli),
       coPresence: false,
       approvals: "decline",
     });

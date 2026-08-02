@@ -17,8 +17,9 @@ This is the one-time install command and also the update and repair command.
 
 ## Command not found
 
-Use `~/.local/bin/codexhook`. Tell the user that `~/.local/bin` is missing from
-this environment's `PATH`.
+On macOS or Linux, use `~/.local/bin/codexhook`. On Windows, use
+`%USERPROFILE%\.local\bin\codexhook.cmd`. Tell the user that the corresponding
+`.local/bin` directory is missing from this environment's `PATH`.
 
 ## Listener is down
 
@@ -31,16 +32,25 @@ npx codexhook@latest setup
 For restart without repair:
 
 ```sh
+# macOS
 launchctl kickstart -k gui/$(id -u)/dev.codexhook.daemon
+
+# Linux
+systemctl --user restart codexhook.service
+
+# Windows PowerShell
+Start-ScheduledTask -TaskName Codexhook
 ```
 
-Logs are in `~/.codexhook/log/daemon.log`.
+macOS and Windows logs are in `~/.codexhook/log/daemon.log`. On Linux, use
+`journalctl --user -u codexhook.service`.
 
 ## Listener repeatedly exits
 
 `doctor --json` distinguishes a missing recorded Node binary from a port
 conflict and reports the selected port at `installation.manifest.port`. Setup
-records the current Node path again. For a port conflict, inspect that port:
+records the current Node path again. On macOS or Linux, inspect a conflicting
+port with:
 
 ```sh
 lsof -nP -iTCP:<port> -sTCP:LISTEN
@@ -55,12 +65,11 @@ will change.
 ## Codex unavailable
 
 Hooks still accept hits, but delivery is dropped and any delivery allowance is
-spent. The machine needs Codex Desktop or `codex` on the service `PATH`.
-Re-running setup captures the current `PATH`.
+spent. The machine needs the Codex app on macOS or Windows, or `codex` on the
+service `PATH`. Re-running setup captures the current `PATH`.
 
-Closing Codex Desktop alone is supported: codexhook tries a managed app-server,
-the app-bundled binary, and then the Codex CLI. A persisted turn may require a
-Desktop refresh.
+Closing the Codex app alone is supported. A persisted turn may require an app
+refresh.
 
 ## An update broke delivery
 
@@ -74,7 +83,7 @@ The installer retains the current and previous runtime directories.
 
 ## A hit returned 202 but nothing arrived
 
-Read the newest `delivery_failed` entry in
-`~/.codexhook/log/daemon.log`. A limited-use hook is already spent. Never retry
-an ambiguous submission automatically because that can duplicate a turn; mint
-a new URL only when the user requests another attempt.
+Read the newest `delivery_failed` entry in the platform log described above. A
+limited-use hook is already spent. Never retry an ambiguous submission
+automatically because that can duplicate a turn; mint a new URL only when the
+user requests another attempt.

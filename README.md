@@ -11,14 +11,14 @@ outside Codex and continue when the result is ready.
 
 ## Quick start
 
-Codexhook requires macOS and Node.js 24 or newer.
+Codexhook requires macOS, Windows, or Linux and Node.js 24 or newer.
 
 ```sh
 npx codexhook@latest setup
 ```
 
-Setup installs the Codex skill and starts a per-user background service.
-launchd keeps it running after the setup command exits.
+Setup installs the Codex skill and starts a per-user background service. It
+runs after the setup command exits and starts again when you sign in.
 
 Ask Codex for a webhook:
 
@@ -108,9 +108,10 @@ The webhook responds with `202` after accepting a hit. Delivery continues in
 the background.
 
 Queue delivery is FIFO for each task. Steer delivery targets the active turn.
-When Codex Desktop is open, the message and turn appear in the open task. If
-Desktop is closed, codexhook can deliver through another local Codex runtime.
-The task may need a refresh when Desktop opens again.
+On macOS and Windows, codexhook uses the open Codex app when that task is
+active. If the app cannot accept the message, codexhook falls back to a local
+Codex runtime. Linux uses a running Codex app-server daemon or the Codex CLI.
+A task updated through fallback may need a refresh in an already-open app.
 
 Delivery is best effort and has no retry queue. A limited-use hook is spent
 when its HTTP request is accepted, even when the message later fails to arrive.
@@ -155,8 +156,8 @@ and the body arrives as untrusted external data.
 - Accepted hits are limited to 10 per task per minute.
 - Codexhook declines approval requests from delivered turns.
 
-The listener stays on loopback unless you forward it yourself. Runtime data and
-logs live in `~/.codexhook/`. Set `CODEXHOOK_HOME` before setup to move them.
+The listener stays on loopback unless you forward it yourself. Runtime data
+lives in `~/.codexhook/`. Set `CODEXHOOK_HOME` before setup to move it.
 
 ## Development
 
@@ -165,9 +166,9 @@ npm install
 npm run check
 ```
 
-`npm run check` builds the package and runs the test suite. The clean-install
-workflow also installs the packed release on a fresh macOS runner, exercises a
-webhook, tests daemon recovery, and checks uninstall.
+`npm run check` builds the package and runs the test suite. Clean-install
+workflows install the packed release on fresh macOS, Windows, and Linux
+runners, exercise a webhook, test daemon recovery, and check uninstall.
 
 Authored files have a hard limit of 400 lines. Consider splitting a file at
 300 lines.

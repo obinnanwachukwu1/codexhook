@@ -16,7 +16,16 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import {
+  type BackgroundServiceConfig,
+  installBackgroundService,
+  removeBackgroundService,
+  renderLaunchAgent as renderMacLaunchAgent,
+  renderSystemdService,
+  renderWindowsService,
+  SERVICE_NAME,
+  startBackgroundService,
+} from "./background-service.js";
 import {
   DEFAULT_HOST,
   DEFAULT_PORT,
@@ -25,7 +34,7 @@ import {
 } from "./config.js";
 import { VERSION } from "./version.js";
 
-export const LAUNCH_LABEL = "dev.codexhook.daemon";
+export const LAUNCH_LABEL = SERVICE_NAME;
 
 export interface InstallManifest {
   version: string;
@@ -46,20 +55,34 @@ export interface InstallPaths {
   log: string;
 }
 
-export function installationPaths(home = homedir()): InstallPaths {
+export function installationPaths(
+  home = homedir(),
+  platform: NodeJS.Platform = process.platform,
+): InstallPaths {
   const runtimeRoot = path.join(home, ".local", "share", "codexhook");
+  const service =
+    platform === "darwin"
+      ? path.join(
+          home,
+          "Library",
+          "LaunchAgents",
+          `${LAUNCH_LABEL}.plist`,
+        )
+      : platform === "linux"
+        ? path.join(home, ".config", "systemd", "user", "codexhook.service")
+        : path.join(runtimeRoot, "codexhook-service.cmd");
   return {
     runtimeRoot,
     currentLink: path.join(runtimeRoot, "current"),
     manifest: path.join(runtimeRoot, "install.json"),
-    shim: path.join(home, ".local", "bin", "codexhook"),
-    skill: path.join(home, ".codex", "skills", "codexhook"),
-    launchAgent: path.join(
+    shim: path.join(
       home,
-      "Library",
-      "LaunchAgents",
-      `${LAUNCH_LABEL}.plist`,
+      ".local",
+      "bin",
+      platform === "win32" ? "codexhook.cmd" : "codexhook",
     ),
+    skill: path.join(home, ".codex", "skills", "codexhook"),
+    launchAgent: service,
     log: path.join(home, ".codexhook", "log", "daemon.log"),
   };
 }
@@ -103,15 +126,6 @@ function replaceSymlink(target: string, link: string): void {
   renameSync(temporary, link);
 }
 
-function xml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
-}
-
 export function renderLaunchAgent(
   paths: InstallPaths,
   nodePath: string,
@@ -119,34 +133,17 @@ export function renderLaunchAgent(
   dataDirectory = path.dirname(path.dirname(paths.log)),
   port = DEFAULT_PORT,
 ): string {
-  const runtime = path.join(paths.currentLink, "codexhook.mjs");
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>${LAUNCH_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${xml(nodePath)}</string>
-    <string>${xml(runtime)}</string>
-    <string>serve</string>
-    <string>--port</string>
-    <string>${port}</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>${xml(environmentPath)}</string>
-    <key>CODEXHOOK_HOME</key><string>${xml(dataDirectory)}</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>10</integer>
-  <key>StandardOutPath</key><string>${xml(paths.log)}</string>
-  <key>StandardErrorPath</key><string>${xml(paths.log)}</string>
-</dict>
-</plist>
-`;
+  return renderMacLaunchAgent(
+    {
+      definition: paths.launchAgent,
+      runtime: path.join(paths.currentLink, "codexhook.mjs"),
+      log: paths.log,
+      nodePath,
+      dataDirectory,
+      environmentPath,
+      port,
+    },
+  );
 }
 
 function locateRuntime(entrypoint = process.argv[1]): string {
@@ -183,49 +180,30 @@ function locateSkill(runtime: string): string {
   return skill;
 }
 
-function launchctl(
-  arguments_: string[],
-  options: { ignoreFailure?: boolean } = {},
+export function installationServicePaths(paths: InstallPaths) {
+  return {
+    definition: paths.launchAgent,
+    runtime: path.join(paths.currentLink, "codexhook.mjs"),
+    log: paths.log,
+  };
+}
+
+export function kickstartLaunchAgent(
+  paths = installationPaths(),
 ): void {
-  try {
-    execFileSync("/bin/launchctl", arguments_, { stdio: "pipe" });
-  } catch (error) {
-    if (!options.ignoreFailure) {
-      const detail =
-        error instanceof Error && "stderr" in error
-          ? String(error.stderr).trim()
-          : String(error);
-      throw new Error(`launchctl ${arguments_[0]} failed: ${detail}`);
-    }
-  }
+  startBackgroundService(installationServicePaths(paths));
 }
 
-function userId(): number {
-  if (process.getuid == null) {
-    throw new Error("launchd user services require a Unix user id");
-  }
-  return process.getuid();
-}
-
-export function kickstartLaunchAgent(): void {
-  launchctl([
-    "kickstart",
-    "-k",
-    `gui/${userId()}/${LAUNCH_LABEL}`,
-  ]);
-}
-
-function loadLaunchAgent(paths: InstallPaths): void {
-  const domain = `gui/${userId()}`;
-  launchctl(["bootout", domain, paths.launchAgent], { ignoreFailure: true });
-  launchctl(["bootstrap", domain, paths.launchAgent]);
-  kickstartLaunchAgent();
-}
-
-function pruneVersions(paths: InstallPaths, keep: number): void {
+function pruneVersions(
+  paths: InstallPaths,
+  keep: number,
+  platform: NodeJS.Platform,
+): void {
   const protectedNames = new Set(["current", "install.json"]);
-  const currentTarget = readlinkSync(paths.currentLink);
-  const currentName = path.basename(currentTarget);
+  const currentName =
+    platform === "win32"
+      ? null
+      : path.basename(readlinkSync(paths.currentLink));
   const versions = readdirSync(paths.runtimeRoot, { withFileTypes: true })
     .filter(
       (entry) =>
@@ -238,7 +216,9 @@ function pruneVersions(paths: InstallPaths, keep: number): void {
       modified: lstatSync(path.join(paths.runtimeRoot, entry.name)).mtimeMs,
     }))
     .sort((left, right) => right.modified - left.modified);
-  for (const stale of versions.slice(Math.max(0, keep - 1))) {
+  const retainedVersions =
+    platform === "win32" ? keep : Math.max(0, keep - 1);
+  for (const stale of versions.slice(retainedVersions)) {
     rmSync(path.join(paths.runtimeRoot, stale.name), {
       recursive: true,
       force: true,
@@ -253,18 +233,20 @@ export interface SetupOptions {
   runtimeSource?: string | undefined;
   skillSource?: string | undefined;
   activate?: boolean | undefined;
+  platform?: NodeJS.Platform | undefined;
 }
 
 export function setupInstallation(options: SetupOptions = {}): InstallManifest {
-  if (process.platform !== "darwin" && options.activate !== false) {
-    throw new Error("v1 background installation supports macOS only");
+  const platform = options.platform ?? process.platform;
+  if (!["darwin", "linux", "win32"].includes(platform)) {
+    throw new Error(`background installation is unsupported on ${platform}`);
   }
   const major = Number(process.versions.node.split(".")[0]);
   if (!Number.isInteger(major) || major < 24) {
     throw new Error("Node.js 24 or newer is required");
   }
 
-  const paths = installationPaths(options.home);
+  const paths = installationPaths(options.home, platform);
   const previous = readInstallManifest(paths);
   const port = options.port ?? previous?.port ?? DEFAULT_PORT;
   const previousLocalUrl =
@@ -296,11 +278,21 @@ export function setupInstallation(options: SetupOptions = {}): InstallManifest {
     rmSync(versionSkill, { recursive: true, force: true });
     cpSync(skillSource, versionSkill, { recursive: true });
   }
-  replaceSymlink(versionDirectory, paths.currentLink);
-  replaceSymlink(
-    path.join(paths.currentLink, "codexhook.mjs"),
-    paths.shim,
-  );
+  if (platform === "win32") {
+    rmSync(paths.currentLink, { recursive: true, force: true });
+    cpSync(versionDirectory, paths.currentLink, { recursive: true });
+    atomicWrite(
+      paths.shim,
+      `@set "CODEXHOOK_LAUNCHER=%~f0" & "${process.execPath}" "${path.join(paths.currentLink, "codexhook.mjs")}" %* & if /i "%~1"=="uninstall" ((goto) 2>nul & del "%~f0")\r\n`,
+      0o755,
+    );
+  } else {
+    replaceSymlink(versionDirectory, paths.currentLink);
+    replaceSymlink(
+      path.join(paths.currentLink, "codexhook.mjs"),
+      paths.shim,
+    );
+  }
   rmSync(paths.skill, { recursive: true, force: true });
   mkdirSync(path.dirname(paths.skill), { recursive: true });
   cpSync(versionSkill, paths.skill, { recursive: true });
@@ -321,19 +313,24 @@ export function setupInstallation(options: SetupOptions = {}): InstallManifest {
     path.dirname(process.execPath),
     process.env.PATH ?? "",
   ].filter(Boolean).join(path.delimiter);
-  atomicWrite(
-    paths.launchAgent,
-    renderLaunchAgent(
-      paths,
-      process.execPath,
-      environmentPath,
-      manifest.dataDirectory,
-      manifest.port,
-    ),
-    0o600,
-  );
-  pruneVersions(paths, 2);
-  if (options.activate !== false) loadLaunchAgent(paths);
+  const backgroundConfig: BackgroundServiceConfig = {
+    ...installationServicePaths(paths),
+    nodePath: process.execPath,
+    dataDirectory: manifest.dataDirectory,
+    environmentPath,
+    port: manifest.port,
+  };
+  const serviceDefinition =
+    platform === "darwin"
+      ? renderMacLaunchAgent(backgroundConfig)
+      : platform === "linux"
+        ? renderSystemdService(backgroundConfig)
+        : renderWindowsService(backgroundConfig);
+  atomicWrite(paths.launchAgent, serviceDefinition, 0o600);
+  pruneVersions(paths, 2, platform);
+  if (options.activate !== false) {
+    installBackgroundService(installationServicePaths(paths), platform);
+  }
   return manifest;
 }
 
@@ -342,22 +339,21 @@ export function uninstallInstallation(
     home?: string | undefined;
     purge?: boolean | undefined;
     purgeDataDirectory?: string | undefined;
+    platform?: NodeJS.Platform | undefined;
   } = {},
 ): void {
-  const paths = installationPaths(options.home);
+  const platform = options.platform ?? process.platform;
+  const paths = installationPaths(options.home, platform);
   const manifest = readInstallManifest(paths);
-  if (process.platform === "darwin") {
-    launchctl(
-      [
-        "bootout",
-        `gui/${userId()}`,
-        paths.launchAgent,
-      ],
-      { ignoreFailure: true },
-    );
-  }
+  removeBackgroundService(installationServicePaths(paths), platform);
   rmSync(paths.launchAgent, { force: true });
-  rmSync(paths.shim, { force: true });
+  const activeWindowsLauncher =
+    platform === "win32" &&
+    process.env.CODEXHOOK_LAUNCHER?.toLowerCase() ===
+      paths.shim.toLowerCase();
+  if (!activeWindowsLauncher) {
+    rmSync(paths.shim, { force: true });
+  }
   rmSync(paths.skill, { recursive: true, force: true });
   if (options.purge === true) {
     rmSync(paths.runtimeRoot, { recursive: true, force: true });
@@ -366,9 +362,9 @@ export function uninstallInstallation(
         manifest?.dataDirectory ??
         path.join(options.home ?? homedir(), ".codexhook"),
       {
-      recursive: true,
-      force: true,
-        },
+        recursive: true,
+        force: true,
+      },
     );
   } else if (existsSync(paths.runtimeRoot)) {
     for (const entry of readdirSync(paths.runtimeRoot)) {
@@ -382,8 +378,15 @@ export function uninstallInstallation(
   }
 }
 
-export function installedRuntimePath(paths = installationPaths()): string | null {
+export function installedRuntimePath(
+  paths = installationPaths(),
+  platform: NodeJS.Platform = process.platform,
+): string | null {
   try {
+    if (platform === "win32") {
+      const runtime = path.join(paths.currentLink, "codexhook.mjs");
+      return existsSync(runtime) ? runtime : null;
+    }
     const target = readlinkSync(paths.currentLink);
     const directory = path.isAbsolute(target)
       ? target
