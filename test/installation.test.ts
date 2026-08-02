@@ -40,7 +40,10 @@ function fixture(): {
   return { home, runtime, skill };
 }
 
-test("setup creates a durable runtime, shim, skill, manifest, and plist", () => {
+test(
+  "setup creates a durable runtime, shim, skill, manifest, and plist",
+  { skip: process.platform !== "darwin" },
+  () => {
   const { home, runtime, skill } = fixture();
   const manifest = setupInstallation({
     home,
@@ -61,11 +64,61 @@ test("setup creates a durable runtime, shim, skill, manifest, and plist", () => 
   assert.ok(existsSync(path.join(paths.skill, "references", "troubleshooting.md")));
   assert.match(readFileSync(paths.launchAgent, "utf8"), /KeepAlive/);
   assert.match(readFileSync(paths.launchAgent, "utf8"), /codexhook\.mjs/);
-  assert.match(readFileSync(paths.launchAgent, "utf8"), /CODEXHOOK_HOME/);
+  assert.match(readFileSync(paths.launchAgent, "utf8"), /--data-directory/);
   assert.match(
     readFileSync(paths.launchAgent, "utf8"),
     /<string>--port<\/string>\s*<string>51234<\/string>/,
   );
+  },
+);
+
+test("Windows setup uses ordinary files and a Task Scheduler launcher", () => {
+  const { home, runtime, skill } = fixture();
+  const manifest = setupInstallation({
+    home,
+    runtimeSource: runtime,
+    skillSource: skill,
+    platform: "win32",
+    activate: false,
+  });
+  const paths = installationPaths(home, "win32");
+
+  assert.equal(path.extname(paths.shim), ".cmd");
+  assert.ok(existsSync(path.join(paths.currentLink, "codexhook.mjs")));
+  assert.equal(
+    installedRuntimePath(paths, "win32"),
+    path.join(paths.currentLink, "codexhook.mjs"),
+  );
+  assert.match(readFileSync(paths.shim, "utf8"), /codexhook\.mjs/);
+  assert.match(readFileSync(paths.shim, "utf8"), /CODEXHOOK_LAUNCHER/);
+  assert.match(readFileSync(paths.shim, "utf8"), /del "%~f0"/);
+  assert.match(readFileSync(paths.launchAgent, "utf8"), /--data-directory/);
+  assert.match(
+    readFileSync(paths.launchAgent, "utf8"),
+    new RegExp(String(manifest.port)),
+  );
+});
+
+test("Linux setup writes a restartable systemd user service", () => {
+  const { home, runtime, skill } = fixture();
+  setupInstallation({
+    home,
+    runtimeSource: runtime,
+    skillSource: skill,
+    platform: "linux",
+    activate: false,
+  });
+  const paths = installationPaths(home, "linux");
+  const unit = readFileSync(paths.launchAgent, "utf8");
+
+  assert.equal(
+    paths.launchAgent,
+    path.join(home, ".config", "systemd", "user", "codexhook.service"),
+  );
+  assert.match(unit, /Restart=on-failure/);
+  assert.match(unit, /--data-directory/);
+  assert.match(unit, /Environment="PATH=/);
+  assert.match(unit, /WantedBy=default\.target/);
 });
 
 test("a local base URL follows a deliberate port change", () => {

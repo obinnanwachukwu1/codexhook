@@ -5,7 +5,7 @@ description: Use when the user wants an external service to queue a message to o
 
 # Codexhook
 
-Use `codexhook`, or `~/.local/bin/codexhook` when it is not on `PATH`.
+Use `codexhook`. If it is not on `PATH`, read the troubleshooting reference.
 Use `npx codexhook@latest setup` only for installation, updates, or repair.
 
 ## Create a webhook

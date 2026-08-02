@@ -1,6 +1,6 @@
 {
   "name": "codexhook",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "HTTP callbacks for Codex tasks.",
   "keywords": [
     "codex",
@@ -39,7 +39,9 @@
     "node": ">=24"
   },
   "os": [
-    "darwin"
+    "darwin",
+    "linux",
+    "win32"
   ],
   "publishConfig": {
     "access": "public"

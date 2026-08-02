@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import path from "node:path";
 import { parseArgs } from "node:util";
 import { Effect, Layer, ManagedRuntime, Option } from "effect";
 import {
@@ -13,10 +14,12 @@ import { probeDaemon, requireDaemon } from "../daemon-control.js";
 import { DeliveryLive } from "../delivery/delivery.js";
 import {
   installationPaths,
+  installationServicePaths,
   readInstallManifest,
   setupInstallation,
   uninstallInstallation,
 } from "../installation.js";
+import { backgroundServiceExists } from "../background-service.js";
 import { Logger } from "../logger.js";
 import { chooseInstallationPort, parsePort } from "../port.js";
 import { WebhookRegistry } from "../registry.js";
@@ -53,12 +56,14 @@ export async function setup(arguments_: string[]): Promise<void> {
     `Daemon ${health.state} on 127.0.0.1:${manifest.port}; URLs use ${manifest.baseUrl}.\n`,
   );
   const paths = installationPaths();
-  if (!(process.env.PATH ?? "").split(":").includes(paths.shim.slice(
-    0,
-    -"/codexhook".length,
-  ))) {
+  const shimDirectory = path.dirname(paths.shim);
+  if (
+    !(process.env.PATH ?? "")
+      .split(path.delimiter)
+      .includes(shimDirectory)
+  ) {
     process.stdout.write(
-      `Add ${paths.shim.slice(0, -"/codexhook".length)} to PATH, or use ${paths.shim}.\n`,
+      `Add ${shimDirectory} to PATH, or use ${paths.shim}.\n`,
     );
   }
 }
@@ -92,12 +97,14 @@ export async function serve(arguments_: string[]): Promise<void> {
     options: {
       host: { type: "string", default: DEFAULT_HOST },
       port: { type: "string", default: String(DEFAULT_PORT) },
+      "data-directory": { type: "string" },
     },
   });
   const host = values.host ?? DEFAULT_HOST;
   const port = parsePort(values.port ?? String(DEFAULT_PORT));
+  const directory = values["data-directory"] ?? dataDirectory();
   const logger = new Logger();
-  const store = new WebhookRegistry(databasePath(dataDirectory()));
+  const store = new WebhookRegistry(databasePath(directory));
   const appLayer = DeliveryLive(logger).pipe(
     Layer.provideMerge(CodexTransportLive),
     Layer.provide(TransportProviderLive(logger)),
@@ -160,14 +167,14 @@ export async function doctor(arguments_: string[]): Promise<void> {
       recordedNode != null &&
       existsSync(paths.currentLink) &&
       existsSync(paths.skill) &&
-      existsSync(paths.launchAgent) &&
+      backgroundServiceExists(installationServicePaths(paths)) &&
       daemon.state === "running",
     version: VERSION,
     installation: {
       manifest,
       runtime: existsSync(paths.currentLink),
       skill: existsSync(paths.skill),
-      launchAgent: existsSync(paths.launchAgent),
+      service: backgroundServiceExists(installationServicePaths(paths)),
       nodeVersion: recordedNode,
     },
     daemon,
@@ -185,7 +192,7 @@ export async function doctor(arguments_: string[]): Promise<void> {
       `codexhook ${VERSION}: ${report.ok ? "ok" : "needs repair"}\n`,
     );
     process.stdout.write(
-      `installation: ${manifest?.version ?? "missing"}; node: ${recordedNode ?? "missing"}; skill: ${report.installation.skill ? "installed" : "missing"}\n`,
+      `installation: ${manifest?.version ?? "missing"}; node: ${recordedNode ?? "missing"}; skill: ${report.installation.skill ? "installed" : "missing"}; service: ${report.installation.service ? "installed" : "missing"}\n`,
     );
     process.stdout.write(`daemon: ${daemon.state}\n`);
     process.stdout.write(

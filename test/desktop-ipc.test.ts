@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { chmod, mkdtemp, rm, symlink } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
@@ -38,7 +39,10 @@ function frame(value: unknown): Buffer {
 
 async function mockRouter(behavior: StartBehavior): Promise<Router> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codexhook-ipc-"));
-  const socketPath = path.join(directory, "ipc.sock");
+  const socketPath =
+    process.platform === "win32"
+      ? `\\\\.\\pipe\\codexhook-test-${randomUUID()}`
+      : path.join(directory, "ipc.sock");
   const sockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
     sockets.add(socket);
@@ -309,13 +313,20 @@ test("Desktop IPC rejects exposed and symlinked socket paths", async () => {
   }
 });
 
-test("a missing Desktop IPC socket is normally unavailable", async () => {
+test("a missing Desktop IPC endpoint is unavailable", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codexhook-ipc-"));
+  const socketPath =
+    process.platform === "win32"
+      ? `\\\\.\\pipe\\codexhook-missing-${randomUUID()}`
+      : path.join(directory, "missing.sock");
   try {
-    assert.equal(
-      await desktopSocketIsPrivate(path.join(directory, "missing.sock")),
-      false,
+    const exit = await Effect.runPromiseExit(
+      Effect.scoped(connectDesktop(spec(socketPath))),
     );
+    assert.equal(Exit.isFailure(exit), true);
+    if (process.platform !== "win32") {
+      assert.equal(await desktopSocketIsPrivate(socketPath), false);
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

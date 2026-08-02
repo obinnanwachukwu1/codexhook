@@ -6,6 +6,7 @@ export type TransportSpec =
       readonly id: Exclude<TransportId, "desktop" | "daemon">;
       readonly executable: string;
       readonly args: ReadonlyArray<string>;
+      readonly windowsVerbatimArguments?: boolean;
       readonly coPresence: boolean;
       readonly approvals: "decline";
     }
