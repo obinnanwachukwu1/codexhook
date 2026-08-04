@@ -160,10 +160,33 @@ test("does not claim visibility for fallback input steered into an existing turn
       true,
     );
   }
-  assert.deepEqual(fixture.recorder.opens, ["desktop", "daemon"]);
+  assert.deepEqual(fixture.recorder.opens, [
+    "desktop",
+    "daemon",
+    "desktop",
+  ]);
   assert.deepEqual(fixture.recorder.writes, [
     { transport: "daemon", method: "turn/steer" },
   ]);
+});
+
+test("defers a fallback steer when Desktop closes before refresh", async () => {
+  const fixture = fakeProvider(
+    { desktop: "follow-fail-then-close", daemon: "active-ok" },
+    [desktop, daemon],
+  );
+  const outcome = await runTransport(fixture, "steer");
+  assert.equal(outcome._tag, "Steered");
+  assert.equal(outcome.transport, "daemon");
+  assert.deepEqual(fixture.recorder.opens, ["desktop", "daemon"]);
+  assert.equal(
+    fixture.recorder.logs.some(
+      (entry) =>
+        entry.event === "transport_selected" &&
+        entry.desktopVisibility === "deferred",
+    ),
+    true,
+  );
 });
 
 test("a stale Desktop candidate falls back when the app closes", async () => {
@@ -175,6 +198,32 @@ test("a stale Desktop candidate falls back when the app closes", async () => {
   const outcome = await runTransport(fixture);
   assert.deepEqual(recorder.opens, ["daemon"]);
   assert.equal((outcome as { transport: string }).transport, "daemon");
+});
+
+test("requires refresh after a Desktop initialize timeout", async () => {
+  const fixture = fakeProvider(
+    { desktop: "connect-handshake-fail", daemon: "ok" },
+    [desktop, daemon],
+  );
+  const exit = await runTransportExit(fixture);
+  assert.equal(Exit.isFailure(exit), true);
+  if (Exit.isFailure(exit)) {
+    const failure = Cause.failureOption(exit.cause);
+    assert.equal(
+      Option.isSome(failure) &&
+        failure.value instanceof DesktopVisibilityUnconfirmed,
+      true,
+    );
+  }
+  assert.deepEqual(fixture.recorder.opens, ["daemon"]);
+  assert.equal(
+    fixture.recorder.logs.some(
+      (entry) =>
+        entry.event === "desktop_visibility_failed" &&
+        entry.detail === "Desktop initialize timed out",
+    ),
+    true,
+  );
 });
 
 test("never falls back when Desktop submission is ambiguous", async () => {

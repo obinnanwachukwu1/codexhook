@@ -20,6 +20,24 @@ interface Pending {
   readonly timeout: NodeJS.Timeout;
 }
 
+export type DesktopIpcConnectFailure =
+  | "socket-unavailable"
+  | "initialize-timeout"
+  | "initialize-malformed"
+  | "initialize-failed";
+
+export class DesktopIpcConnectError extends Error {
+  override readonly name = "DesktopIpcConnectError";
+
+  constructor(
+    readonly failure: DesktopIpcConnectFailure,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
+
 export class DesktopIpcClient {
   private buffer = Buffer.alloc(0);
   private clientId = "initializing-client";
@@ -36,26 +54,51 @@ export class DesktopIpcClient {
 
   static async connect(socketPath: string): Promise<DesktopIpcClient> {
     const socket = net.connect(socketPath);
-    await new Promise<void>((resolve, reject) => {
-      socket.once("connect", resolve);
-      socket.once("error", reject);
-    });
-    const client = new DesktopIpcClient(socket);
-    const initialized = await client.request(
-      "initialize",
-      { clientType: "codexhook" },
-      0,
-      5_000,
-    );
-    const result = initialized.result as
-      | { readonly clientId?: unknown }
-      | undefined;
-    if (typeof result?.clientId !== "string") {
-      client.close();
-      throw new Error("Desktop IPC initialize response was malformed");
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once("connect", resolve);
+        socket.once("error", reject);
+      });
+    } catch (cause) {
+      socket.destroy();
+      throw new DesktopIpcConnectError(
+        "socket-unavailable",
+        cause instanceof Error ? cause.message : String(cause),
+        { cause },
+      );
     }
-    client.clientId = result.clientId;
-    return client;
+    const client = new DesktopIpcClient(socket);
+    try {
+      const initialized = await client.request(
+        "initialize",
+        { clientType: "codexhook" },
+        0,
+        5_000,
+      );
+      const result = initialized.result as
+        | { readonly clientId?: unknown }
+        | undefined;
+      if (typeof result?.clientId !== "string") {
+        throw new DesktopIpcConnectError(
+          "initialize-malformed",
+          "Desktop IPC initialize response was malformed",
+        );
+      }
+      client.clientId = result.clientId;
+      return client;
+    } catch (cause) {
+      client.close();
+      if (cause instanceof DesktopIpcConnectError) throw cause;
+      const message =
+        cause instanceof Error ? cause.message : String(cause);
+      throw new DesktopIpcConnectError(
+        message.includes("timed out")
+          ? "initialize-timeout"
+          : "initialize-failed",
+        message,
+        { cause },
+      );
+    }
   }
 
   get alive(): boolean {

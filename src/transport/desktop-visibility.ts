@@ -21,32 +21,26 @@ export function confirmDesktopVisibility(
     return Effect.succeed("confirmed");
   }
   const submittedTransport = outcome.transport;
-  if (outcome._tag === "Steered") {
-    return Effect.fail(
-      new DesktopVisibilityUnconfirmed({
-        threadId: outcome.threadId,
-        turnId: outcome.turnId,
-        submittedTransport,
-        detail:
-          "Desktop cannot verify fallback input steered into an existing turn",
-      }),
-    );
-  }
   return Effect.scoped(
-    provider.connect(desktop).pipe(
-      Effect.flatMap((peer) =>
-        peer.request(
-          "thread/resume",
-          { threadId: outcome.threadId },
-          ThreadResumeResult,
-          REFRESH_TIMEOUT,
-        ).pipe(
-          Effect.zipRight(
-            peer.awaitTurn(outcome.turnId, REFRESH_TIMEOUT),
-          ),
-        ),
-      ),
-    ),
+    Effect.gen(function* () {
+      const peer = yield* provider.connect(desktop);
+      if (outcome._tag === "Steered") {
+        return yield* new DesktopVisibilityUnconfirmed({
+          threadId: outcome.threadId,
+          turnId: outcome.turnId,
+          submittedTransport,
+          detail:
+            "Desktop cannot verify fallback input steered into an existing turn",
+        });
+      }
+      yield* peer.request(
+        "thread/resume",
+        { threadId: outcome.threadId },
+        ThreadResumeResult,
+        REFRESH_TIMEOUT,
+      );
+      return yield* peer.awaitTurn(outcome.turnId, REFRESH_TIMEOUT);
+    }),
   ).pipe(
     Effect.flatMap((turn) =>
       turn.id === outcome.turnId && turn.status === "completed"

@@ -33,6 +33,7 @@ export type WriteBehavior =
   | "active-ok"
   | "before-write"
   | "connect-fail"
+  | "connect-handshake-fail"
   | "ambiguous"
   | "follow-fail"
   | "follow-fail-then-visible"
@@ -202,6 +203,15 @@ export function fakeProvider(
       const closedAfterFirstConnection =
         behavior === "follow-fail-then-close" &&
         recorder.opens.includes(spec.id);
+      if (behavior === "connect-handshake-fail") {
+        return Effect.fail(
+          new TransportUnavailable({
+            transport: spec.id,
+            reason: "handshake-timeout",
+            detail: "Desktop initialize timed out",
+          }),
+        );
+      }
       if (behavior === "connect-fail" || closedAfterFirstConnection) {
         return Effect.fail(
           new TransportUnavailable({

@@ -11,7 +11,10 @@ import {
   Schema,
   Scope,
 } from "effect";
-import { DesktopIpcClient } from "./desktop-ipc-client.js";
+import {
+  DesktopIpcClient,
+  DesktopIpcConnectError,
+} from "./desktop-ipc-client.js";
 import { DesktopThreadState } from "./desktop-state.js";
 import {
   TransportIncompatible,
@@ -354,12 +357,43 @@ export function connectDesktop(
   return Effect.acquireRelease(
     Effect.tryPromise({
       try: () => DesktopIpcClient.connect(spec.socketPath),
-      catch: (cause) =>
-        new TransportUnavailable({
+      catch: (cause) => {
+        const detail =
+          cause instanceof Error ? cause.message : String(cause);
+        if (!(cause instanceof DesktopIpcConnectError)) {
+          return new TransportIncompatible({
+            transport: "desktop",
+            stage: "initialize",
+            detail,
+          });
+        }
+        if (cause.failure === "socket-unavailable") {
+          return new TransportUnavailable({
+            transport: "desktop",
+            reason: "not-running",
+            detail,
+          });
+        }
+        if (cause.failure === "initialize-timeout") {
+          return new TransportUnavailable({
+            transport: "desktop",
+            reason: "handshake-timeout",
+            detail,
+          });
+        }
+        if (cause.failure === "initialize-failed") {
+          return new TransportUnavailable({
+            transport: "desktop",
+            reason: "exited",
+            detail,
+          });
+        }
+        return new TransportIncompatible({
           transport: "desktop",
-          reason: "not-running",
-          detail: cause instanceof Error ? cause.message : String(cause),
-        }),
+          stage: "malformed",
+          detail,
+        });
+      },
     }),
     (client) => Effect.sync(() => client.close()),
   ).pipe(Effect.map((client) => makePeer(spec, client)));
