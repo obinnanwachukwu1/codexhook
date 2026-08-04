@@ -127,7 +127,6 @@ export const desktopProbe: Effect.Effect<Option.Option<TransportSpec>> =
           _tag: "Desktop",
           id: "desktop",
           socketPath,
-          coPresence: true,
           approvals: "decline",
         } as const)
       : Option.none();

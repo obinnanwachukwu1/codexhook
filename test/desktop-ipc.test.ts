@@ -205,7 +205,6 @@ function spec(socketPath: string): Extract<
     _tag: "Desktop",
     id: "desktop",
     socketPath,
-    coPresence: true,
     approvals: "decline",
   };
 }

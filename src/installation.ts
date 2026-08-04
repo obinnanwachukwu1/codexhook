@@ -340,12 +340,15 @@ export function uninstallInstallation(
     purge?: boolean | undefined;
     purgeDataDirectory?: string | undefined;
     platform?: NodeJS.Platform | undefined;
+    deactivate?: boolean | undefined;
   } = {},
 ): void {
   const platform = options.platform ?? process.platform;
   const paths = installationPaths(options.home, platform);
   const manifest = readInstallManifest(paths);
-  removeBackgroundService(installationServicePaths(paths), platform);
+  if (options.deactivate !== false) {
+    removeBackgroundService(installationServicePaths(paths), platform);
+  }
   rmSync(paths.launchAgent, { force: true });
   const activeWindowsLauncher =
     platform === "win32" &&
@@ -377,7 +380,6 @@ export function uninstallInstallation(
     }
   }
 }
-
 export function installedRuntimePath(
   paths = installationPaths(),
   platform: NodeJS.Platform = process.platform,

@@ -110,8 +110,9 @@ the background.
 Queue delivery is FIFO for each task. Steer delivery targets the active turn.
 On macOS and Windows, codexhook uses the open Codex app when that task is
 active. If the app cannot accept the message, codexhook falls back to a local
-Codex runtime. Linux uses a running Codex app-server daemon or the Codex CLI.
-A task updated through fallback may need a refresh in an already-open app.
+Codex runtime. When the app is open, codexhook confirms that the task can see
+the fallback turn before recording the delivery as complete. Linux uses a
+running Codex app-server daemon or the Codex CLI.
 
 Delivery is best effort and has no retry queue. A limited-use hook is spent
 when its HTTP request is accepted, even when the message later fails to arrive.

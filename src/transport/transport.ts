@@ -6,6 +6,7 @@ import {
   Option,
   Schema,
 } from "effect";
+import { Logger } from "../logger.js";
 import type {
   DeliveryId,
   ThreadId,
@@ -17,8 +18,6 @@ import type {
 import { TurnId as makeTurnId } from "../types.js";
 import {
   type DeliveryError,
-  isTryNext,
-  NoTransportAvailable,
   SubmitAmbiguous,
   SubmitRejected,
   ThreadBusy,
@@ -29,6 +28,11 @@ import {
   TurnFailed,
   TurnTimeout,
 } from "./errors.js";
+import { confirmDesktopVisibility } from "./desktop-visibility.js";
+import {
+  deliverWithFallback,
+  type TransportAttemptStage,
+} from "./attempts.js";
 import type {
   AppServerPeer,
   RpcErrorReply,
@@ -51,8 +55,7 @@ const RPC_TIMEOUT = Duration.seconds(30);
 
 export interface TransportStatus {
   readonly candidates: ReadonlyArray<TransportId>;
-  readonly active: Option.Option<TransportId>;
-  readonly coPresence: boolean;
+  readonly desktopIpcAvailable: boolean;
 }
 
 export interface CodexTransportService {
@@ -207,6 +210,7 @@ function runTurn(
   peer: AppServerPeer,
   spec: TransportSpec,
   request: TurnRequest,
+  setStage: (stage: TransportAttemptStage) => void,
 ): Effect.Effect<
   TurnOutcome,
   | TransportUnavailable
@@ -220,11 +224,13 @@ function runTurn(
   | TurnTimeout
 > {
   return Effect.gen(function* () {
+    setStage(spec._tag === "Desktop" ? "follow" : "resume");
     const thread = yield* resume(peer, spec, request.threadId);
     const active = activeTurn(thread);
 
     if (request.mode === "steer" && Option.isSome(active)) {
       const turnId = makeTurnId(active.value.id);
+      setStage("submit");
       yield* submit(
         peer,
         spec,
@@ -249,6 +255,7 @@ function runTurn(
 
     if (Option.isSome(active)) {
       const heldTurnId = makeTurnId(active.value.id);
+      setStage("await");
       yield* peer.awaitTurn(heldTurnId, request.idleTimeout).pipe(
         Effect.mapError((error) =>
           error._tag === "RpcTimeout"
@@ -266,6 +273,7 @@ function runTurn(
       );
     }
 
+    setStage("submit");
     const started = yield* submit(
       peer,
       spec,
@@ -279,6 +287,7 @@ function runTurn(
       TurnStartResult,
       (result) => result.turn.id,
     );
+    setStage("await");
     const completed = yield* peer
       .awaitTurn(started.turnId, request.turnTimeout)
       .pipe(
@@ -314,66 +323,67 @@ function runTurn(
   });
 }
 
-export const CodexTransportLive: Layer.Layer<
+export function makeCodexTransportLive(
+  logger = new Logger(),
+): Layer.Layer<
   CodexTransport,
   never,
   TransportProvider
-> = Layer.effect(
-  CodexTransport,
-  Effect.gen(function* () {
-    const provider = yield* TransportProvider;
-    const attempt = (
-      request: TurnRequest,
-      candidates: ReadonlyArray<TransportSpec>,
-      excluded: ReadonlySet<TransportId>,
-      attempts: ReadonlyArray<{
-        readonly transport: TransportId;
-        readonly detail: string;
-      }>,
-    ): Effect.Effect<TurnOutcome, DeliveryError> => {
-      const candidate = candidates.find(
-        (value) => !excluded.has(value.id),
-      );
-      if (candidate == null) {
-        return Effect.fail(new NoTransportAvailable({ attempts }));
-      }
-      return Effect.scoped(
-        provider.connect(candidate).pipe(
-          Effect.flatMap((peer) => runTurn(peer, candidate, request)),
-        ),
-      ).pipe(
-        Effect.catchIf(isTryNext, (error) =>
-          attempt(
-            request,
-            candidates,
-            new Set([...excluded, error.transport]),
-            [
-              ...attempts,
-              { transport: error.transport, detail: error.detail },
-            ],
+> {
+  return Layer.effect(
+    CodexTransport,
+    Effect.gen(function* () {
+      const provider = yield* TransportProvider;
+      const deliver = (
+        request: TurnRequest,
+      ): Effect.Effect<TurnOutcome, DeliveryError> =>
+        provider.candidates.pipe(
+          Effect.flatMap((candidates) =>
+            deliverWithFallback(
+              request,
+              candidates,
+              {
+                run: (candidate, setStage) =>
+                  Effect.scoped(
+                    provider.connect(candidate).pipe(
+                      Effect.flatMap((peer) =>
+                        runTurn(peer, candidate, request, setStage),
+                      ),
+                    ),
+                  ),
+                confirmDesktopVisibility: (
+                  desktop,
+                  outcome,
+                  setStage,
+                ) => {
+                  setStage("refresh");
+                  return outcome.transport === "desktop"
+                    ? Effect.void
+                    : confirmDesktopVisibility(
+                        provider,
+                        desktop,
+                        outcome,
+                      );
+                },
+              },
+              logger,
+            ),
           ),
-        ),
-      );
-    };
+        );
 
-    const deliver = (
-      request: TurnRequest,
-    ): Effect.Effect<TurnOutcome, DeliveryError> =>
-      provider.candidates.pipe(
-        Effect.flatMap((candidates) =>
-          attempt(request, candidates, new Set(), []),
-        ),
-      );
+      const status = Effect.gen(function* () {
+        const candidates = yield* provider.candidates;
+        return {
+          candidates: candidates.map((candidate) => candidate.id),
+          desktopIpcAvailable: candidates.some(
+            (candidate) => candidate._tag === "Desktop",
+          ),
+        } satisfies TransportStatus;
+      });
 
-    const status = Effect.gen(function* () {
-      const candidates = yield* provider.candidates;
-      return {
-        candidates: candidates.map((candidate) => candidate.id),
-        active: Option.none<TransportId>(),
-        coPresence: candidates.some((candidate) => candidate.coPresence),
-      } satisfies TransportStatus;
-    });
+      return CodexTransport.of({ deliver, status });
+    }),
+  );
+}
 
-    return CodexTransport.of({ deliver, status });
-  }),
-);
+export const CodexTransportLive = makeCodexTransportLive();

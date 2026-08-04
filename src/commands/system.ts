@@ -27,7 +27,7 @@ import { listen } from "../server.js";
 import { desktopProbe } from "../transport/desktop.js";
 import { discoverStandalone } from "../transport/discovery.js";
 import { TransportProviderLive } from "../transport/provider.js";
-import { CodexTransportLive } from "../transport/transport.js";
+import { makeCodexTransportLive } from "../transport/transport.js";
 import { VERSION } from "../version.js";
 
 export async function setup(arguments_: string[]): Promise<void> {
@@ -106,7 +106,7 @@ export async function serve(arguments_: string[]): Promise<void> {
   const logger = new Logger();
   const store = new WebhookRegistry(databasePath(directory));
   const appLayer = DeliveryLive(logger).pipe(
-    Layer.provideMerge(CodexTransportLive),
+    Layer.provideMerge(makeCodexTransportLive(logger)),
     Layer.provide(TransportProviderLive(logger)),
   );
   const runtime = ManagedRuntime.make(appLayer);
@@ -180,7 +180,7 @@ export async function doctor(arguments_: string[]): Promise<void> {
     daemon,
     codex: {
       available: runtimes.length > 0,
-      coPresence: Option.isSome(desktop),
+      desktopIpcAvailable: Option.isSome(desktop),
       runtimes,
     },
     dataDirectory: dataDirectory(),
@@ -195,8 +195,11 @@ export async function doctor(arguments_: string[]): Promise<void> {
       `installation: ${manifest?.version ?? "missing"}; node: ${recordedNode ?? "missing"}; skill: ${report.installation.skill ? "installed" : "missing"}; service: ${report.installation.service ? "installed" : "missing"}\n`,
     );
     process.stdout.write(`daemon: ${daemon.state}\n`);
+    const desktopStatus = report.codex.desktopIpcAvailable
+      ? "available; task visibility is verified per delivery"
+      : "unavailable";
     process.stdout.write(
-      `codex: ${report.codex.available ? "available" : "unavailable"}; Desktop co-presence: ${report.codex.coPresence ? "available" : "unavailable"}\n`,
+      `codex: ${report.codex.available ? "available" : "unavailable"}; Desktop IPC: ${desktopStatus}\n`,
     );
     if (!report.ok) {
       process.stdout.write(
