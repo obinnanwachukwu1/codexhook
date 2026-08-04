@@ -1,7 +1,11 @@
 import { Context, Effect, Layer, Option, Scope } from "effect";
 import { Logger } from "../logger.js";
 import { discoverStandalone } from "./discovery.js";
-import { connectDesktop, desktopProbe } from "./desktop.js";
+import { connectDesktop } from "./desktop.js";
+import {
+  desktopProbe,
+  desktopVisibilityCandidate,
+} from "./desktop-endpoint.js";
 import {
   TransportIncompatible,
   TransportUnavailable,
@@ -13,6 +17,7 @@ import type { TransportSpec } from "./spec.js";
 
 export interface TransportProviderService {
   readonly candidates: Effect.Effect<ReadonlyArray<TransportSpec>>;
+  readonly desktopCandidate: typeof desktopVisibilityCandidate;
   readonly connect: (
     spec: TransportSpec,
   ) => Effect.Effect<
@@ -37,6 +42,7 @@ export function TransportProviderLive(
         "2 seconds",
       );
       return TransportProvider.of({
+        desktopCandidate: desktopVisibilityCandidate,
         candidates: Effect.gen(function* () {
           const desktop = yield* probeDesktop;
           const standalone = yield* Effect.promise(() =>

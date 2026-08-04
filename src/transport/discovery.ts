@@ -156,9 +156,6 @@ async function runningDaemon(
       _tag: "UnixSocket",
       id: "daemon",
       socketPath: result.socketPath,
-      // The daemon is shared and persistent, but this does not promise that
-      // the Desktop UI is one of its connected clients.
-      coPresence: false,
       approvals: "decline",
     };
   } catch {
@@ -195,7 +192,6 @@ export async function discoverStandalone(
         _tag: "ChildProcess",
         id: "cli",
         ...command,
-        coPresence: false,
         approvals: "decline",
       },
     ];
@@ -219,7 +215,6 @@ export async function discoverStandalone(
       id: "app-bundled",
       executable: bundled,
       args: ["app-server", "--listen", "stdio://"],
-      coPresence: false,
       approvals: "decline",
     });
   }
@@ -234,7 +229,6 @@ export async function discoverStandalone(
       _tag: "ChildProcess",
       id: "cli",
       ...command,
-      coPresence: false,
       approvals: "decline",
     });
   }

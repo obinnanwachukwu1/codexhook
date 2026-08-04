@@ -1,7 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { lstat, stat } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import {
   Deferred,
   Duration,
@@ -11,7 +8,10 @@ import {
   Schema,
   Scope,
 } from "effect";
-import { DesktopIpcClient } from "./desktop-ipc-client.js";
+import {
+  DesktopIpcClient,
+  DesktopIpcConnectError,
+} from "./desktop-ipc-client.js";
 import { DesktopThreadState } from "./desktop-state.js";
 import {
   TransportIncompatible,
@@ -35,12 +35,6 @@ const IPC_VERSION = {
   following: 1,
   history: 1,
 } as const;
-
-function defaultSocketPath(): string {
-  return process.platform === "win32"
-    ? "\\\\.\\pipe\\codex-ipc"
-    : path.join(os.homedir(), ".codex", "ipc", "ipc.sock");
-}
 
 function durationMillis(value: Duration.DurationInput): number {
   return Duration.toMillis(Duration.decode(value));
@@ -87,51 +81,6 @@ function safeIpcRejection(error: string | undefined): boolean {
     "thread-role-timeout",
   ].some((value) => error.includes(value));
 }
-
-export async function desktopSocketIsPrivate(
-  socketPath: string,
-): Promise<boolean> {
-  if (process.platform === "win32") return true;
-  try {
-    const [info, parent] = await Promise.all([
-      lstat(socketPath),
-      stat(path.dirname(socketPath)),
-    ]);
-    return (
-      info.isSocket() &&
-      !info.isSymbolicLink() &&
-      process.getuid?.() === info.uid &&
-      (info.mode & 0o077) === 0 &&
-      parent.isDirectory() &&
-      parent.uid === info.uid &&
-      (parent.mode & 0o077) === 0
-    );
-  } catch {
-    return false;
-  }
-}
-
-async function probe(socketPath: string): Promise<boolean> {
-  if (!(await desktopSocketIsPrivate(socketPath))) return false;
-  const client = await DesktopIpcClient.connect(socketPath);
-  client.close();
-  return true;
-}
-
-export const desktopProbe: Effect.Effect<Option.Option<TransportSpec>> =
-  Effect.tryPromise(async () => {
-    const socketPath =
-      process.env.CODEXHOOK_DESKTOP_IPC_PATH ?? defaultSocketPath();
-    return (await probe(socketPath))
-      ? Option.some({
-          _tag: "Desktop",
-          id: "desktop",
-          socketPath,
-          coPresence: true,
-          approvals: "decline",
-        } as const)
-      : Option.none();
-  }).pipe(Effect.catchAll(() => Effect.succeed(Option.none())));
 
 function makePeer(
   spec: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
@@ -313,12 +262,20 @@ function makePeer(
     awaitTurn: (turnId, timeout) =>
       Effect.tryPromise({
         try: async () => {
-          const state = [...states.values()].find(
-            (candidate) => candidate.turn(turnId) != null,
-          );
-          if (state == null) throw new Error("Desktop turn was not observed");
+          const followed = [...states.values()];
+          const state =
+            followed.find(
+              (candidate) => candidate.turn(turnId) != null,
+            ) ??
+            (followed.length === 1 ? followed[0] : null);
+          if (state == null) {
+            throw new Error("Desktop task was not followed");
+          }
           await state.waitFor(
-            () => state.turn(turnId)?.status !== "inProgress",
+            () => {
+              const turn = state.turn(turnId);
+              return turn != null && turn.status !== "inProgress";
+            },
             durationMillis(timeout),
           );
           const turn = state.turn(turnId);
@@ -347,12 +304,50 @@ export function connectDesktop(
   return Effect.acquireRelease(
     Effect.tryPromise({
       try: () => DesktopIpcClient.connect(spec.socketPath),
-      catch: (cause) =>
-        new TransportUnavailable({
+      catch: (cause) => {
+        const detail =
+          cause instanceof Error ? cause.message : String(cause);
+        if (!(cause instanceof DesktopIpcConnectError)) {
+          return new TransportIncompatible({
+            transport: "desktop",
+            stage: "initialize",
+            detail,
+          });
+        }
+        if (cause.failure === "socket-unavailable") {
+          return new TransportUnavailable({
+            transport: "desktop",
+            reason: "not-running",
+            detail,
+          });
+        }
+        if (cause.failure === "socket-failed") {
+          return new TransportUnavailable({
+            transport: "desktop",
+            reason: "connect-failed",
+            detail,
+          });
+        }
+        if (cause.failure === "initialize-timeout") {
+          return new TransportUnavailable({
+            transport: "desktop",
+            reason: "handshake-timeout",
+            detail,
+          });
+        }
+        if (cause.failure === "initialize-failed") {
+          return new TransportUnavailable({
+            transport: "desktop",
+            reason: "exited",
+            detail,
+          });
+        }
+        return new TransportIncompatible({
           transport: "desktop",
-          reason: "not-running",
-          detail: cause instanceof Error ? cause.message : String(cause),
-        }),
+          stage: "malformed",
+          detail,
+        });
+      },
     }),
     (client) => Effect.sync(() => client.close()),
   ).pipe(Effect.map((client) => makePeer(spec, client)));

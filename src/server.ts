@@ -92,9 +92,9 @@ export function createCodexhookServer(
           version: VERSION,
           status: available ? "ok" : "degraded",
           delivery: available ? "available" : "unavailable",
-          transport: Option.getOrNull(state.transport.active),
           capabilities: {
-            coPresence: state.transport.coPresence,
+            desktopIpcAvailable:
+              state.transport.desktopIpcAvailable,
           },
           candidates: state.transport.candidates,
           queuedThreads: state.delivery.lanes,

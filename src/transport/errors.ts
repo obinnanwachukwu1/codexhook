@@ -13,6 +13,7 @@ export class TransportUnavailable extends Data.TaggedError(
   readonly reason:
     | "not-installed"
     | "spawn-failed"
+    | "connect-failed"
     | "handshake-timeout"
     | "not-running"
     | "exited";
@@ -76,6 +77,15 @@ export class TurnTimeout extends Data.TaggedError("TurnTimeout")<{
   readonly waitedMillis: number;
 }> {}
 
+export class DesktopVisibilityUnconfirmed extends Data.TaggedError(
+  "DesktopVisibilityUnconfirmed",
+)<{
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+  readonly submittedTransport: Exclude<TransportId, "desktop">;
+  readonly detail: string;
+}> {}
+
 export type TransportError =
   | TransportUnavailable
   | TransportIncompatible
@@ -85,14 +95,18 @@ export type TransportError =
   | SubmitAmbiguous
   | TurnAbandoned
   | TurnFailed
-  | TurnTimeout;
+  | TurnTimeout
+  | DesktopVisibilityUnconfirmed;
 
 export class NoTransportAvailable extends Data.TaggedError(
   "NoTransportAvailable",
 )<{
   readonly attempts: ReadonlyArray<{
     readonly transport: TransportId;
+    readonly stage: string;
+    readonly errorTag: string;
     readonly detail: string;
+    readonly elapsedMs: number;
   }>;
 }> {}
 
@@ -124,6 +138,10 @@ export const DISPOSITIONS = {
   TurnAbandoned: { recovery: "stop", submission: "unknown" },
   TurnFailed: { recovery: "stop", submission: "submitted" },
   TurnTimeout: { recovery: "stop", submission: "submitted" },
+  DesktopVisibilityUnconfirmed: {
+    recovery: "stop",
+    submission: "submitted",
+  },
 } as const satisfies {
   readonly [K in TransportError["_tag"]]: Disposition;
 };

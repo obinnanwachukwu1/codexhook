@@ -41,7 +41,6 @@ test("discovers the newest Windows Codex runtime installed by the app", async ()
     id: "app-bundled",
     executable: newer,
     args: ["app-server", "--listen", "stdio://"],
-    coPresence: false,
     approvals: "decline",
   });
 });
@@ -73,7 +72,6 @@ test("wraps Windows command shims with an explicitly quoted command", async () =
       `""${shim}" "app-server" "--listen" "stdio://""`,
     ],
     windowsVerbatimArguments: true,
-    coPresence: false,
     approvals: "decline",
   });
 });

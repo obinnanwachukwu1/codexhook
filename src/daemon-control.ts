@@ -15,7 +15,7 @@ import {
 export interface DaemonHealth {
   state: "available" | "degraded";
   version: string;
-  coPresence: boolean;
+  desktopIpcAvailable: boolean;
 }
 
 export type DaemonProbe =
@@ -44,7 +44,9 @@ export async function probeDaemon(
       service?: unknown;
       version?: unknown;
       status?: unknown;
-      capabilities?: { coPresence?: unknown };
+      capabilities?: {
+        desktopIpcAvailable?: unknown;
+      };
     };
     if (body.service !== "codexhook" || typeof body.version !== "string") {
       return { state: "occupied" };
@@ -54,7 +56,8 @@ export async function probeDaemon(
       health: {
         state: body.status === "ok" ? "available" : "degraded",
         version: body.version,
-        coPresence: body.capabilities?.coPresence === true,
+        desktopIpcAvailable:
+          body.capabilities?.desktopIpcAvailable === true,
       },
     };
   } catch {

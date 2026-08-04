@@ -7,20 +7,17 @@ export type TransportSpec =
       readonly executable: string;
       readonly args: ReadonlyArray<string>;
       readonly windowsVerbatimArguments?: boolean;
-      readonly coPresence: boolean;
       readonly approvals: "decline";
     }
   | {
       readonly _tag: "UnixSocket";
       readonly id: "daemon";
       readonly socketPath: string;
-      readonly coPresence: false;
       readonly approvals: "decline";
     }
   | {
       readonly _tag: "Desktop";
       readonly id: "desktop";
       readonly socketPath: string;
-      readonly coPresence: true;
       readonly approvals: "decline";
     };

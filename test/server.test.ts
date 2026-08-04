@@ -44,8 +44,7 @@ async function fixture(
     deliver: () => Effect.die("not used by the HTTP test"),
     status: Effect.succeed({
       candidates: ["cli"],
-      active: Option.none(),
-      coPresence: false,
+      desktopIpcAvailable: false,
     }),
   } satisfies CodexTransportService);
   const runtime = ManagedRuntime.make(
@@ -135,10 +134,16 @@ test("health responses identify the codexhook listener", async () => {
     service: string;
     version: string;
     status: string;
+    capabilities: {
+      desktopIpcAvailable: boolean;
+    };
   };
 
   assert.equal(response.status, 200);
   assert.equal(health.service, "codexhook");
   assert.match(health.version, /^\d+\.\d+\.\d+$/);
   assert.equal(health.status, "ok");
+  assert.deepEqual(health.capabilities, {
+    desktopIpcAvailable: false,
+  });
 });

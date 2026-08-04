@@ -30,7 +30,9 @@ test("recognizes an available codexhook listener", async () => {
     service: "codexhook",
     version: "1.2.3",
     status: "ok",
-    capabilities: { coPresence: true },
+    capabilities: {
+      desktopIpcAvailable: true,
+    },
   });
 
   assert.deepEqual(await probeDaemon(origin), {
@@ -38,7 +40,7 @@ test("recognizes an available codexhook listener", async () => {
     health: {
       state: "available",
       version: "1.2.3",
-      coPresence: true,
+      desktopIpcAvailable: true,
     },
   });
 });
@@ -48,7 +50,9 @@ test("accepts a degraded codexhook listener as running", async () => {
     service: "codexhook",
     version: "1.2.3",
     status: "degraded",
-    capabilities: { coPresence: false },
+    capabilities: {
+      desktopIpcAvailable: false,
+    },
   });
 
   assert.equal((await probeDaemon(origin)).state, "running");

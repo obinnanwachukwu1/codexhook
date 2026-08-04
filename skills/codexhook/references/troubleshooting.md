@@ -84,6 +84,11 @@ The installer retains the current and previous runtime directories.
 ## A hit returned 202 but nothing arrived
 
 Read the newest `delivery_failed` entry in the platform log described above. A
-limited-use hook is already spent. Never retry an ambiguous submission
+`DesktopVisibilityUnconfirmed` failure means a fallback turn was submitted but
+the open app did not expose it. The surrounding `transport_attempt_failed`
+entries identify the failed connection and stage without logging the webhook
+body or URL.
+
+A limited-use hook is already spent. Never retry an ambiguous submission
 automatically because that can duplicate a turn; mint a new URL only when the
 user requests another attempt.
