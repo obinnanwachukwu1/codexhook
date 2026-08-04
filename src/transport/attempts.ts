@@ -10,6 +10,7 @@ import {
   isTryNext,
   NoTransportAvailable,
 } from "./errors.js";
+import type { DesktopVisibility } from "./desktop-visibility.js";
 import type { TransportSpec } from "./spec.js";
 
 export type TransportAttemptStage =
@@ -37,7 +38,7 @@ export interface TransportAttemptRunner {
     desktop: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
     outcome: TurnOutcome,
     setStage: (stage: TransportAttemptStage) => void,
-  ) => Effect.Effect<void, DeliveryError>;
+  ) => Effect.Effect<DesktopVisibility, DeliveryError>;
 }
 
 function errorDetail(error: DeliveryError): string {
@@ -216,24 +217,33 @@ export function deliverWithFallback(
                   });
                 }),
               ),
-              Effect.tap(() =>
+              Effect.tap((visibility) =>
                 Effect.sync(() => {
-                  logger.info("desktop_visibility_confirmed", {
-                    ...attemptFields(
-                      request,
-                      desktop.id,
-                      refreshStage,
-                      Date.now() - refreshStartedAt,
-                    ),
-                    turnId: outcome.turnId,
-                    submittedTransport: outcome.transport,
-                  });
+                  logger.info(
+                    visibility === "confirmed"
+                      ? "desktop_visibility_confirmed"
+                      : "desktop_visibility_deferred",
+                    {
+                      ...attemptFields(
+                        request,
+                        desktop.id,
+                        refreshStage,
+                        Date.now() - refreshStartedAt,
+                      ),
+                      turnId: outcome.turnId,
+                      submittedTransport: outcome.transport,
+                      reason:
+                        visibility === "deferred"
+                          ? "desktop-not-running"
+                          : undefined,
+                    },
+                  );
                   logger.info("transport_selected", {
                     deliveryId: request.deliveryId,
                     threadId: request.threadId,
                     transport: outcome.transport,
                     priorFailures: failures.length,
-                    desktopVisibility: "confirmed",
+                    desktopVisibility: visibility,
                   });
                 }),
               ),

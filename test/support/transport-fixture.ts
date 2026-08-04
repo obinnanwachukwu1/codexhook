@@ -35,7 +35,8 @@ export type WriteBehavior =
   | "connect-fail"
   | "ambiguous"
   | "follow-fail"
-  | "follow-fail-then-visible";
+  | "follow-fail-then-visible"
+  | "follow-fail-then-close";
 
 export interface Recorder {
   readonly logs: Array<Record<string, unknown>>;
@@ -136,6 +137,7 @@ function fakePeer(
         spec.id === "desktop" &&
         method === "thread/resume" &&
         (behavior === "follow-fail" ||
+          behavior === "follow-fail-then-close" ||
           (behavior === "follow-fail-then-visible" &&
             connectionOrdinal === 1));
       if (followFails) {
@@ -196,7 +198,11 @@ export function fakeProvider(
   const service: TransportProviderService = {
     candidates: Effect.succeed(candidates),
     connect: (spec) => {
-      if (scripts[spec.id] === "connect-fail") {
+      const behavior = scripts[spec.id];
+      const closedAfterFirstConnection =
+        behavior === "follow-fail-then-close" &&
+        recorder.opens.includes(spec.id);
+      if (behavior === "connect-fail" || closedAfterFirstConnection) {
         return Effect.fail(
           new TransportUnavailable({
             transport: spec.id,

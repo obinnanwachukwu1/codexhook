@@ -358,7 +358,7 @@ export function makeCodexTransportLive(
                 ) => {
                   setStage("refresh");
                   return outcome.transport === "desktop"
-                    ? Effect.void
+                    ? Effect.succeed("confirmed" as const)
                     : confirmDesktopVisibility(
                         provider,
                         desktop,

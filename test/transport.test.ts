@@ -118,6 +118,32 @@ test("fails after fallback when Desktop cannot expose the completed turn", async
   );
 });
 
+test("defers visibility when Desktop closes before fallback refresh", async () => {
+  const fixture = fakeProvider(
+    { desktop: "follow-fail-then-close", daemon: "ok" },
+    [desktop, daemon],
+  );
+  const outcome = await runTransport(fixture);
+  assert.equal(outcome.transport, "daemon");
+  assert.deepEqual(fixture.recorder.opens, ["desktop", "daemon"]);
+  assert.equal(
+    fixture.recorder.logs.some(
+      (entry) =>
+        entry.event === "desktop_visibility_deferred" &&
+        entry.reason === "desktop-not-running",
+    ),
+    true,
+  );
+  assert.equal(
+    fixture.recorder.logs.some(
+      (entry) =>
+        entry.event === "transport_selected" &&
+        entry.desktopVisibility === "deferred",
+    ),
+    true,
+  );
+});
+
 test("does not claim visibility for fallback input steered into an existing turn", async () => {
   const fixture = fakeProvider(
     { desktop: "follow-fail", daemon: "active-ok" },
