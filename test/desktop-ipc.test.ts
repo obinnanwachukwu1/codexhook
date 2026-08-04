@@ -20,6 +20,7 @@ import { TurnId } from "../src/types.js";
 
 type StartBehavior =
   | "success"
+  | "delayed-visibility"
   | "safe-reject"
   | "unknown-reject"
   | "disconnect";
@@ -106,6 +107,38 @@ async function mockRouter(behavior: StartBehavior): Promise<Router> {
             },
           });
           socket.write(Buffer.concat([ignored, snapshot]));
+          if (behavior === "delayed-visibility") {
+            setTimeout(() => {
+              send({
+                type: "broadcast",
+                method: "thread-stream-state-changed",
+                version: 11,
+                params: {
+                  conversationId: "thread-1",
+                  hostId: "local",
+                  change: {
+                    type: "patches",
+                    baseRevision: 1,
+                    revision: 2,
+                    patches: [{
+                      op: "add",
+                      path: [
+                        "turnHistory",
+                        "history",
+                        "entitiesByKey",
+                        "delayed",
+                      ],
+                      value: {
+                        turnId: "turn-delayed",
+                        status: "completed",
+                        error: null,
+                      },
+                    }],
+                  },
+                },
+              });
+            }, 20);
+          }
         } else if (message.method === "thread-follower-start-turn") {
           if (behavior === "disconnect") {
             socket.destroy();
@@ -242,11 +275,43 @@ function submitStart(socketPath: string) {
   );
 }
 
+function awaitExistingTurn(socketPath: string) {
+  return Effect.scoped(
+    connectDesktop(spec(socketPath)).pipe(
+      Effect.flatMap((peer) =>
+        peer.request(
+          "thread/resume",
+          { threadId: "thread-1" },
+          Schema.Unknown,
+          "1 second",
+        ).pipe(
+          Effect.zipRight(
+            peer.awaitTurn(TurnId("turn-delayed"), "1 second"),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 test("Desktop IPC follows a task and observes turn completion", async () => {
   const router = await mockRouter("success");
   try {
     const turn = await Effect.runPromise(submitStart(router.socketPath));
     assert.equal(turn.id, "turn-ipc");
+    assert.equal(turn.status, "completed");
+  } finally {
+    await router.close();
+  }
+});
+
+test("Desktop IPC waits for a followed turn to arrive in a later patch", async () => {
+  const router = await mockRouter("delayed-visibility");
+  try {
+    const turn = await Effect.runPromise(
+      awaitExistingTurn(router.socketPath),
+    );
+    assert.equal(turn.id, "turn-delayed");
     assert.equal(turn.status, "completed");
   } finally {
     await router.close();

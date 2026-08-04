@@ -118,6 +118,28 @@ test("fails after fallback when Desktop cannot expose the completed turn", async
   );
 });
 
+test("does not claim visibility for fallback input steered into an existing turn", async () => {
+  const fixture = fakeProvider(
+    { desktop: "follow-fail", daemon: "active-ok" },
+    [desktop, daemon],
+  );
+  const exit = await runTransportExit(fixture, "steer");
+  assert.equal(Exit.isFailure(exit), true);
+  if (Exit.isFailure(exit)) {
+    const failure = Cause.failureOption(exit.cause);
+    assert.equal(
+      Option.isSome(failure) &&
+        failure.value instanceof DesktopVisibilityUnconfirmed &&
+        failure.value.detail.includes("existing turn"),
+      true,
+    );
+  }
+  assert.deepEqual(fixture.recorder.opens, ["desktop", "daemon"]);
+  assert.deepEqual(fixture.recorder.writes, [
+    { transport: "daemon", method: "turn/steer" },
+  ]);
+});
+
 test("a stale Desktop candidate falls back when the app closes", async () => {
   const fixture = fakeProvider(
     { desktop: "connect-fail", daemon: "ok" },

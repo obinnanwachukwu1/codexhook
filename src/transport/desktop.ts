@@ -312,12 +312,20 @@ function makePeer(
     awaitTurn: (turnId, timeout) =>
       Effect.tryPromise({
         try: async () => {
-          const state = [...states.values()].find(
-            (candidate) => candidate.turn(turnId) != null,
-          );
-          if (state == null) throw new Error("Desktop turn was not observed");
+          const followed = [...states.values()];
+          const state =
+            followed.find(
+              (candidate) => candidate.turn(turnId) != null,
+            ) ??
+            (followed.length === 1 ? followed[0] : null);
+          if (state == null) {
+            throw new Error("Desktop task was not followed");
+          }
           await state.waitFor(
-            () => state.turn(turnId)?.status !== "inProgress",
+            () => {
+              const turn = state.turn(turnId);
+              return turn != null && turn.status !== "inProgress";
+            },
             durationMillis(timeout),
           );
           const turn = state.turn(turnId);

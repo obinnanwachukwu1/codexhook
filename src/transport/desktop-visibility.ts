@@ -14,6 +14,17 @@ export function confirmDesktopVisibility(
 ): Effect.Effect<void, DesktopVisibilityUnconfirmed> {
   if (outcome.transport === "desktop") return Effect.void;
   const submittedTransport = outcome.transport;
+  if (outcome._tag === "Steered") {
+    return Effect.fail(
+      new DesktopVisibilityUnconfirmed({
+        threadId: outcome.threadId,
+        turnId: outcome.turnId,
+        submittedTransport,
+        detail:
+          "Desktop cannot verify fallback input steered into an existing turn",
+      }),
+    );
+  }
   return Effect.scoped(
     provider.connect(desktop).pipe(
       Effect.flatMap((peer) =>
@@ -22,12 +33,16 @@ export function confirmDesktopVisibility(
           { threadId: outcome.threadId },
           ThreadResumeResult,
           REFRESH_TIMEOUT,
+        ).pipe(
+          Effect.zipRight(
+            peer.awaitTurn(outcome.turnId, REFRESH_TIMEOUT),
+          ),
         ),
       ),
     ),
   ).pipe(
-    Effect.flatMap((result) =>
-      result.thread.turns.some((turn) => turn.id === outcome.turnId)
+    Effect.flatMap((turn) =>
+      turn.id === outcome.turnId && turn.status === "completed"
         ? Effect.void
         : Effect.fail(
             new DesktopVisibilityUnconfirmed({
@@ -35,7 +50,7 @@ export function confirmDesktopVisibility(
               turnId: outcome.turnId,
               submittedTransport,
               detail:
-                "Desktop followed the task but did not expose the submitted turn",
+                "Desktop did not expose the completed fallback turn",
             }),
           ),
     ),
