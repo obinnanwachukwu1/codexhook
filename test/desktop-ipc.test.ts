@@ -8,8 +8,8 @@ import test from "node:test";
 import { Effect, Exit, Schema } from "effect";
 import {
   connectDesktop,
-  desktopSocketIsPrivate,
 } from "../src/transport/desktop.js";
+import { desktopSocketIsPrivate } from "../src/transport/desktop-endpoint.js";
 import {
   RpcNotWritten,
   RpcWriteAmbiguous,

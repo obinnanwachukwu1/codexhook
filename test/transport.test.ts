@@ -130,7 +130,7 @@ test("defers visibility when Desktop closes before fallback refresh", async () =
     fixture.recorder.logs.some(
       (entry) =>
         entry.event === "desktop_visibility_deferred" &&
-        entry.reason === "desktop-not-running",
+        entry.reason === "desktop-unavailable",
     ),
     true,
   );
@@ -139,6 +139,24 @@ test("defers visibility when Desktop closes before fallback refresh", async () =
       (entry) =>
         entry.event === "transport_selected" &&
         entry.desktopVisibility === "deferred",
+    ),
+    true,
+  );
+});
+
+test("re-probes Desktop after a fallback completes", async () => {
+  const fixture = fakeProvider(
+    { desktop: "ok", daemon: "ok" },
+    [daemon],
+  );
+  const outcome = await runTransport(fixture);
+  assert.equal(outcome.transport, "daemon");
+  assert.deepEqual(fixture.recorder.opens, ["daemon", "desktop"]);
+  assert.equal(
+    fixture.recorder.logs.some(
+      (entry) =>
+        entry.event === "desktop_visibility_confirmed" &&
+        entry.turnId === "turn-1",
     ),
     true,
   );
@@ -184,6 +202,31 @@ test("defers a fallback steer when Desktop closes before refresh", async () => {
       (entry) =>
         entry.event === "transport_selected" &&
         entry.desktopVisibility === "deferred",
+    ),
+    true,
+  );
+});
+
+test("defers when Desktop disconnects during fallback refresh", async () => {
+  const fixture = fakeProvider(
+    {
+      desktop: "follow-fail-then-disconnect-refresh",
+      daemon: "ok",
+    },
+    [desktop, daemon],
+  );
+  const outcome = await runTransport(fixture);
+  assert.equal(outcome.transport, "daemon");
+  assert.deepEqual(fixture.recorder.opens, [
+    "desktop",
+    "daemon",
+    "desktop",
+  ]);
+  assert.equal(
+    fixture.recorder.logs.some(
+      (entry) =>
+        entry.event === "desktop_visibility_deferred" &&
+        entry.reason === "desktop-unavailable",
     ),
     true,
   );

@@ -13,6 +13,7 @@ export class TransportUnavailable extends Data.TaggedError(
   readonly reason:
     | "not-installed"
     | "spawn-failed"
+    | "connect-failed"
     | "handshake-timeout"
     | "not-running"
     | "exited";

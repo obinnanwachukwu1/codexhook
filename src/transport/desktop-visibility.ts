@@ -6,7 +6,6 @@ import {
 } from "./errors.js";
 import type { TransportProviderService } from "./provider.js";
 import { ThreadResumeResult } from "./protocol.js";
-import type { TransportSpec } from "./spec.js";
 
 const REFRESH_TIMEOUT = Duration.seconds(30);
 
@@ -14,7 +13,6 @@ export type DesktopVisibility = "confirmed" | "deferred";
 
 export function confirmDesktopVisibility(
   provider: TransportProviderService,
-  desktop: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
   outcome: TurnOutcome,
 ): Effect.Effect<DesktopVisibility, DesktopVisibilityUnconfirmed> {
   if (outcome.transport === "desktop") {
@@ -23,8 +21,13 @@ export function confirmDesktopVisibility(
   const submittedTransport = outcome.transport;
   return Effect.scoped(
     Effect.gen(function* () {
+      const candidate = yield* provider.desktopCandidate;
+      if (candidate._tag === "None") return null;
+      const desktop = candidate.value;
       const peer = yield* provider.connect(desktop);
       if (outcome._tag === "Steered") {
+        const alive = yield* peer.isAlive;
+        if (!alive) return null;
         return yield* new DesktopVisibilityUnconfirmed({
           threadId: outcome.threadId,
           turnId: outcome.turnId,
@@ -33,27 +36,39 @@ export function confirmDesktopVisibility(
             "Desktop cannot verify fallback input steered into an existing turn",
         });
       }
-      yield* peer.request(
+      return yield* peer.request(
         "thread/resume",
         { threadId: outcome.threadId },
         ThreadResumeResult,
         REFRESH_TIMEOUT,
+      ).pipe(
+        Effect.zipRight(
+          peer.awaitTurn(outcome.turnId, REFRESH_TIMEOUT),
+        ),
+        Effect.catchAll((error) =>
+          peer.isAlive.pipe(
+            Effect.flatMap((alive) =>
+              alive ? Effect.fail(error) : Effect.succeed(null),
+            ),
+          ),
+        ),
       );
-      return yield* peer.awaitTurn(outcome.turnId, REFRESH_TIMEOUT);
     }),
   ).pipe(
     Effect.flatMap((turn) =>
-      turn.id === outcome.turnId && turn.status === "completed"
-        ? Effect.succeed("confirmed" as const)
-        : Effect.fail(
-            new DesktopVisibilityUnconfirmed({
-              threadId: outcome.threadId,
-              turnId: outcome.turnId,
-              submittedTransport,
-              detail:
-                "Desktop did not expose the completed fallback turn",
-            }),
-          ),
+      turn == null
+        ? Effect.succeed("deferred" as const)
+        : turn.id === outcome.turnId && turn.status === "completed"
+          ? Effect.succeed("confirmed" as const)
+          : Effect.fail(
+              new DesktopVisibilityUnconfirmed({
+                threadId: outcome.threadId,
+                turnId: outcome.turnId,
+                submittedTransport,
+                detail:
+                  "Desktop did not expose the completed fallback turn",
+              }),
+            ),
     ),
     Effect.catchIf(
       (error) =>

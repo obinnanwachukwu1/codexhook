@@ -4,6 +4,7 @@ import {
   Effect,
   FiberId,
   Layer,
+  Option,
   Schema,
 } from "effect";
 import { Logger } from "../../src/logger.js";
@@ -37,7 +38,8 @@ export type WriteBehavior =
   | "ambiguous"
   | "follow-fail"
   | "follow-fail-then-visible"
-  | "follow-fail-then-close";
+  | "follow-fail-then-close"
+  | "follow-fail-then-disconnect-refresh";
 
 export interface Recorder {
   readonly logs: Array<Record<string, unknown>>;
@@ -70,7 +72,10 @@ const cli: TransportSpec = {
   approvals: "decline",
 };
 
-export const desktop: TransportSpec = {
+export const desktop: Extract<
+  TransportSpec,
+  { readonly _tag: "Desktop" }
+> = {
   _tag: "Desktop",
   id: "desktop",
   socketPath: "/fake/ipc.sock",
@@ -134,11 +139,24 @@ function fakePeer(
       _params: unknown,
       _schema: Schema.Schema<A, I>,
     ) => {
+      const disconnectsDuringRefresh =
+        spec.id === "desktop" &&
+        method === "thread/resume" &&
+        behavior === "follow-fail-then-disconnect-refresh" &&
+        connectionOrdinal === 2;
+      if (disconnectsDuringRefresh) {
+        alive = false;
+        return Effect.fail(
+          new RpcNotWritten({ detail: "Desktop closed during refresh" }),
+        );
+      }
       const followFails =
         spec.id === "desktop" &&
         method === "thread/resume" &&
         (behavior === "follow-fail" ||
           behavior === "follow-fail-then-close" ||
+          (behavior === "follow-fail-then-disconnect-refresh" &&
+            connectionOrdinal === 1) ||
           (behavior === "follow-fail-then-visible" &&
             connectionOrdinal === 1));
       if (followFails) {
@@ -198,6 +216,19 @@ export function fakeProvider(
   );
   const service: TransportProviderService = {
     candidates: Effect.succeed(candidates),
+    desktopCandidate: Effect.sync(() => {
+      const behavior = scripts.desktop;
+      const known =
+        behavior != null ||
+        candidates.some((candidate) => candidate._tag === "Desktop");
+      const closed =
+        behavior === "connect-fail" ||
+        (behavior === "follow-fail-then-close" &&
+          recorder.opens.includes("desktop"));
+      return known && !closed
+        ? Option.some(desktop)
+        : Option.none();
+    }),
     connect: (spec) => {
       const behavior = scripts[spec.id];
       const closedAfterFirstConnection =

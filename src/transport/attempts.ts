@@ -35,7 +35,6 @@ export interface TransportAttemptRunner {
     setStage: (stage: TransportAttemptStage) => void,
   ) => Effect.Effect<TurnOutcome, DeliveryError>;
   readonly confirmDesktopVisibility: (
-    desktop: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
     outcome: TurnOutcome,
     setStage: (stage: TransportAttemptStage) => void,
   ) => Effect.Effect<DesktopVisibility, DeliveryError>;
@@ -69,19 +68,6 @@ function errorDetail(error: DeliveryError): string {
   return error._tag;
 }
 
-function desktopFailureNeedsRefresh(
-  candidate: TransportSpec,
-  stage: TransportAttemptStage,
-  error: DeliveryError,
-): boolean {
-  return !(
-    candidate._tag !== "Desktop" ||
-    (stage === "connect" &&
-      error._tag === "TransportUnavailable" &&
-      error.reason === "not-running")
-  );
-}
-
 function attemptFields(
   request: TurnRequest,
   transport: TransportId,
@@ -103,17 +89,9 @@ export function deliverWithFallback(
   runner: TransportAttemptRunner,
   logger: Logger,
 ): Effect.Effect<TurnOutcome, DeliveryError> {
-  const desktop = candidates.find(
-    (candidate): candidate is Extract<
-      TransportSpec,
-      { readonly _tag: "Desktop" }
-    > => candidate._tag === "Desktop",
-  );
-
   const attempt = (
     remaining: ReadonlyArray<TransportSpec>,
     failures: ReadonlyArray<TransportAttemptFailure>,
-    desktopNeedsRefresh: boolean,
   ): Effect.Effect<TurnOutcome, DeliveryError> => {
     const candidate = remaining[0];
     if (candidate == null) {
@@ -158,8 +136,6 @@ export function deliverWithFallback(
           return attempt(
             remaining.slice(1),
             [...failures, failure],
-            desktopNeedsRefresh ||
-              desktopFailureNeedsRefresh(candidate, stage, error),
           );
         },
         onSuccess: (outcome) => {
@@ -173,11 +149,7 @@ export function deliverWithFallback(
             ),
             status: outcome._tag,
           });
-          if (
-            desktop == null ||
-            candidate._tag === "Desktop" ||
-            !desktopNeedsRefresh
-          ) {
+          if (candidate._tag === "Desktop") {
             logger.info("transport_selected", {
               deliveryId: request.deliveryId,
               threadId: request.threadId,
@@ -193,11 +165,11 @@ export function deliverWithFallback(
           logger.info("desktop_visibility_started", {
             deliveryId: request.deliveryId,
             threadId: request.threadId,
-            transport: desktop.id,
+            transport: "desktop",
             turnId: outcome.turnId,
           });
           return runner
-            .confirmDesktopVisibility(desktop, outcome, (next) => {
+            .confirmDesktopVisibility(outcome, (next) => {
               refreshStage = next;
             })
             .pipe(
@@ -206,7 +178,7 @@ export function deliverWithFallback(
                   logger.error("desktop_visibility_failed", {
                     ...attemptFields(
                       request,
-                      desktop.id,
+                      "desktop",
                       refreshStage,
                       Date.now() - refreshStartedAt,
                     ),
@@ -226,7 +198,7 @@ export function deliverWithFallback(
                     {
                       ...attemptFields(
                         request,
-                        desktop.id,
+                        "desktop",
                         refreshStage,
                         Date.now() - refreshStartedAt,
                       ),
@@ -234,7 +206,7 @@ export function deliverWithFallback(
                       submittedTransport: outcome.transport,
                       reason:
                         visibility === "deferred"
-                          ? "desktop-not-running"
+                          ? "desktop-unavailable"
                           : undefined,
                     },
                   );
@@ -254,5 +226,5 @@ export function deliverWithFallback(
     );
   };
 
-  return attempt(candidates, [], false);
+  return attempt(candidates, []);
 }

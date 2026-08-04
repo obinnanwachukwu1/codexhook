@@ -1,7 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { lstat, stat } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import {
   Deferred,
   Duration,
@@ -38,12 +35,6 @@ const IPC_VERSION = {
   following: 1,
   history: 1,
 } as const;
-
-function defaultSocketPath(): string {
-  return process.platform === "win32"
-    ? "\\\\.\\pipe\\codex-ipc"
-    : path.join(os.homedir(), ".codex", "ipc", "ipc.sock");
-}
 
 function durationMillis(value: Duration.DurationInput): number {
   return Duration.toMillis(Duration.decode(value));
@@ -90,50 +81,6 @@ function safeIpcRejection(error: string | undefined): boolean {
     "thread-role-timeout",
   ].some((value) => error.includes(value));
 }
-
-export async function desktopSocketIsPrivate(
-  socketPath: string,
-): Promise<boolean> {
-  if (process.platform === "win32") return true;
-  try {
-    const [info, parent] = await Promise.all([
-      lstat(socketPath),
-      stat(path.dirname(socketPath)),
-    ]);
-    return (
-      info.isSocket() &&
-      !info.isSymbolicLink() &&
-      process.getuid?.() === info.uid &&
-      (info.mode & 0o077) === 0 &&
-      parent.isDirectory() &&
-      parent.uid === info.uid &&
-      (parent.mode & 0o077) === 0
-    );
-  } catch {
-    return false;
-  }
-}
-
-async function probe(socketPath: string): Promise<boolean> {
-  if (!(await desktopSocketIsPrivate(socketPath))) return false;
-  const client = await DesktopIpcClient.connect(socketPath);
-  client.close();
-  return true;
-}
-
-export const desktopProbe: Effect.Effect<Option.Option<TransportSpec>> =
-  Effect.tryPromise(async () => {
-    const socketPath =
-      process.env.CODEXHOOK_DESKTOP_IPC_PATH ?? defaultSocketPath();
-    return (await probe(socketPath))
-      ? Option.some({
-          _tag: "Desktop",
-          id: "desktop",
-          socketPath,
-          approvals: "decline",
-        } as const)
-      : Option.none();
-  }).pipe(Effect.catchAll(() => Effect.succeed(Option.none())));
 
 function makePeer(
   spec: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
@@ -371,6 +318,13 @@ export function connectDesktop(
           return new TransportUnavailable({
             transport: "desktop",
             reason: "not-running",
+            detail,
+          });
+        }
+        if (cause.failure === "socket-failed") {
+          return new TransportUnavailable({
+            transport: "desktop",
+            reason: "connect-failed",
             detail,
           });
         }

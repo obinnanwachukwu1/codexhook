@@ -352,7 +352,6 @@ export function makeCodexTransportLive(
                     ),
                   ),
                 confirmDesktopVisibility: (
-                  desktop,
                   outcome,
                   setStage,
                 ) => {
@@ -361,7 +360,6 @@ export function makeCodexTransportLive(
                     ? Effect.succeed("confirmed" as const)
                     : confirmDesktopVisibility(
                         provider,
-                        desktop,
                         outcome,
                       );
                 },

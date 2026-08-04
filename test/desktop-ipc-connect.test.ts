@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { Cause, Effect, Exit, Option } from "effect";
 import { connectDesktop } from "../src/transport/desktop.js";
+import { isAbsentDesktopEndpointError } from "../src/transport/desktop-ipc-client.js";
 import { TransportIncompatible } from "../src/transport/errors.js";
 import type { TransportSpec } from "../src/transport/spec.js";
 
@@ -17,6 +18,16 @@ function frame(value: unknown): Buffer {
   body.copy(output, 4);
   return output;
 }
+
+test("only missing and refused endpoints prove Desktop is absent", () => {
+  const error = (code: string) =>
+    Object.assign(new Error(code), { code });
+  assert.equal(isAbsentDesktopEndpointError(error("ENOENT")), true);
+  assert.equal(isAbsentDesktopEndpointError(error("ECONNREFUSED")), true);
+  assert.equal(isAbsentDesktopEndpointError(error("EACCES")), false);
+  assert.equal(isAbsentDesktopEndpointError(error("EMFILE")), false);
+  assert.equal(isAbsentDesktopEndpointError(error("ETIMEDOUT")), false);
+});
 
 test("a malformed Desktop initialize response is incompatible", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codexhook-ipc-"));

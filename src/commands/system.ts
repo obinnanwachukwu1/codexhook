@@ -24,7 +24,7 @@ import { Logger } from "../logger.js";
 import { chooseInstallationPort, parsePort } from "../port.js";
 import { WebhookRegistry } from "../registry.js";
 import { listen } from "../server.js";
-import { desktopProbe } from "../transport/desktop.js";
+import { desktopProbe } from "../transport/desktop-endpoint.js";
 import { discoverStandalone } from "../transport/discovery.js";
 import { TransportProviderLive } from "../transport/provider.js";
 import { makeCodexTransportLive } from "../transport/transport.js";

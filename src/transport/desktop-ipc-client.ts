@@ -22,6 +22,7 @@ interface Pending {
 
 export type DesktopIpcConnectFailure =
   | "socket-unavailable"
+  | "socket-failed"
   | "initialize-timeout"
   | "initialize-malformed"
   | "initialize-failed";
@@ -36,6 +37,11 @@ export class DesktopIpcConnectError extends Error {
   ) {
     super(message, options);
   }
+}
+
+export function isAbsentDesktopEndpointError(cause: unknown): boolean {
+  const code = (cause as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ECONNREFUSED";
 }
 
 export class DesktopIpcClient {
@@ -62,7 +68,9 @@ export class DesktopIpcClient {
     } catch (cause) {
       socket.destroy();
       throw new DesktopIpcConnectError(
-        "socket-unavailable",
+        isAbsentDesktopEndpointError(cause)
+          ? "socket-unavailable"
+          : "socket-failed",
         cause instanceof Error ? cause.message : String(cause),
         { cause },
       );
