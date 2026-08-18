@@ -1,6 +1,6 @@
 import net from "node:net";
 import { PassThrough } from "node:stream";
-import { Effect, Scope } from "effect";
+import { type Duration, Effect, Scope } from "effect";
 import WebSocket from "ws";
 import { Logger } from "../logger.js";
 import {
@@ -19,8 +19,11 @@ interface OpenSocket {
   readonly connection: WireConnection;
 }
 
+const SOCKET_OPEN_TIMEOUT = "15 seconds";
+
 function openSocket(
   spec: Extract<TransportSpec, { readonly _tag: "UnixSocket" }>,
+  onOpen: (socket: OpenSocket) => void,
 ): Effect.Effect<OpenSocket, TransportUnavailable> {
   return Effect.async<OpenSocket, TransportUnavailable>((resume) => {
     const input = new PassThrough();
@@ -61,11 +64,14 @@ function openSocket(
           webSocket.once("close", () => listener(0, null));
         },
       };
-      resume(Effect.succeed({ webSocket, input, connection }));
+      const socket = { webSocket, input, connection };
+      onOpen(socket);
+      resume(Effect.succeed(socket));
     });
 
     return Effect.sync(() => {
       webSocket.off("error", fail);
+      webSocket.once("error", () => undefined);
       webSocket.terminate();
       input.destroy();
     });
@@ -98,14 +104,33 @@ function closeSocket(socket: OpenSocket): Effect.Effect<void> {
 export function connectUnixPeer(
   spec: Extract<TransportSpec, { readonly _tag: "UnixSocket" }>,
   logger = new Logger(),
+  socketOpenTimeout: Duration.DurationInput = SOCKET_OPEN_TIMEOUT,
 ): Effect.Effect<
   AppServerPeer,
   TransportUnavailable | TransportIncompatible,
   Scope.Scope
 > {
-  return Effect.acquireRelease(openSocket(spec), closeSocket).pipe(
-    Effect.flatMap(({ connection }) =>
-      connectWirePeer(spec, connection, logger),
-    ),
-  );
+  return Effect.suspend(() => {
+    let acquired: OpenSocket | null = null;
+    const open = openSocket(spec, (socket) => {
+      acquired = socket;
+    }).pipe(
+      Effect.timeoutFail({
+        duration: socketOpenTimeout,
+        onTimeout: () => new TransportUnavailable({
+          transport: spec.id,
+          reason: "connect-failed",
+          detail: "socket open timed out",
+        }),
+      }),
+    );
+    return Effect.acquireReleaseInterruptible(
+      open,
+      () => acquired == null ? Effect.void : closeSocket(acquired),
+    ).pipe(
+      Effect.flatMap(({ connection }) =>
+        connectWirePeer(spec, connection, logger),
+      ),
+    );
+  });
 }

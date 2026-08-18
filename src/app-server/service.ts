@@ -274,21 +274,25 @@ export const CanonicalAppServerLive: Layer.Layer<
   TransportProvider
 > = Layer.scoped(
   CanonicalAppServer,
-  Effect.gen(function* () {
-    const provider = yield* TransportProvider;
-    const candidates = localCandidates(yield* provider.candidates);
-    return yield* connectFirstLocal(provider, candidates).pipe(
-      Effect.catchAll((failure) => Effect.succeed({
-        availability: Effect.succeed({
-          status: "unavailable" as const,
-          reason: failure.reason,
-          cause: failure.cause,
-          rejectedCandidates: failure.rejectedCandidates,
-        }),
-        identity: null,
-        client: null,
-        compatibility: APP_SERVER_COMPATIBILITY,
-      })),
-    );
-  }),
+  Effect.flatMap(TransportProvider, acquireCanonicalAppServer),
 );
+
+export function acquireCanonicalAppServer(
+  provider: Context.Tag.Service<TransportProvider>,
+): Effect.Effect<CanonicalAppServerService, never, Scope.Scope> {
+  return provider.candidates.pipe(
+    Effect.map(localCandidates),
+    Effect.flatMap((candidates) => connectFirstLocal(provider, candidates)),
+    Effect.catchAll((failure) => Effect.succeed({
+      availability: Effect.succeed({
+        status: "unavailable" as const,
+        reason: failure.reason,
+        cause: failure.cause,
+        rejectedCandidates: failure.rejectedCandidates,
+      }),
+      identity: null,
+      client: null,
+      compatibility: APP_SERVER_COMPATIBILITY,
+    })),
+  );
+}

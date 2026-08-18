@@ -30,10 +30,11 @@ import type { CanonicalTurn } from "./schema.js";
 import { appServerCompatibility } from "./local-compatibility.js";
 import { localTaskEvents } from "./local-events.js";
 import {
-  CanonicalAppServer,
-  CanonicalAppServerLive,
+  acquireCanonicalAppServer,
   type CanonicalAppServerService,
 } from "./service.js";
+import { TransportProvider } from "../transport/provider.js";
+import { resilientLocalCodexService } from "./local-codex-resilience.js";
 
 function diagnostic(
   code: DiagnosticCode,
@@ -310,11 +311,10 @@ export function localCodexService(
   };
 }
 
-const LocalCodexFromCanonical = Layer.effect(
+export const LocalCodexLive = Layer.scoped(
   LocalCodex,
-  Effect.map(CanonicalAppServer, localCodexService),
-);
-
-export const LocalCodexLive = LocalCodexFromCanonical.pipe(
-  Layer.provide(CanonicalAppServerLive),
+  Effect.flatMap(TransportProvider, (provider) =>
+    resilientLocalCodexService(
+      acquireCanonicalAppServer(provider).pipe(Effect.map(localCodexService)),
+    )),
 );

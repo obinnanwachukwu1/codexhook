@@ -7,21 +7,40 @@ import {
   ManagedRuntime,
   Option,
 } from "effect";
-import { MAX_BODY_BYTES } from "./config.js";
+import {
+  HTTP_HEADERS_TIMEOUT_MS,
+  HTTP_KEEP_ALIVE_TIMEOUT_MS,
+  HTTP_REQUEST_TIMEOUT_MS,
+  MAX_BODY_BYTES,
+  MAX_HTTP_CONNECTIONS,
+} from "./config.js";
 import { Delivery } from "./delivery/delivery.js";
+import { LocalCodex } from "./contracts/local-codex.js";
 import { Logger } from "./logger.js";
 import { ThreadRateLimiter } from "./rate-limit.js";
 import { WebhookRegistry } from "./registry.js";
 import { CodexTransport } from "./transport/transport.js";
 import { VERSION } from "./version.js";
+import {
+  noAdditionalAuthentication,
+  type RequestAuthenticator,
+} from "./service/auth.js";
+import {
+  ServiceLifecycle,
+} from "./service/lifecycle.js";
 
 export interface CodexhookServerOptions {
   host: string;
   port: number;
   registry: WebhookRegistry;
-  runtime: ManagedRuntime.ManagedRuntime<Delivery | CodexTransport, never>;
+  runtime: ManagedRuntime.ManagedRuntime<
+    Delivery | CodexTransport | LocalCodex,
+    never
+  >;
   logger?: Logger;
   rateLimiter?: ThreadRateLimiter;
+  lifecycle?: ServiceLifecycle;
+  authenticator?: RequestAuthenticator;
 }
 
 function json(
@@ -65,15 +84,25 @@ export function createCodexhookServer(
 ): http.Server {
   const logger = options.logger ?? new Logger();
   const rateLimiter = options.rateLimiter ?? new ThreadRateLimiter();
+  const lifecycle = options.lifecycle ?? new ServiceLifecycle();
+  const authenticator =
+    options.authenticator ?? noAdditionalAuthentication;
 
-  return http.createServer(async (request, response) => {
+  const server = http.createServer(async (request, response) => {
     try {
       const requestUrl = new URL(
         request.url ?? "/",
         `http://${request.headers.host ?? "localhost"}`,
       );
 
-      if (request.method === "GET" && requestUrl.pathname.endsWith("/healthz")) {
+      const healthRoute =
+        request.method === "GET" &&
+        requestUrl.pathname.endsWith("/healthz");
+      if (healthRoute) {
+        if (!(await authenticator.authorize(request, { kind: "health" }))) {
+          json(response, 401, { error: "unauthorized" });
+          return;
+        }
         const state = await options.runtime.runPromise(
           Effect.all({
             transport: Effect.flatMap(
@@ -84,9 +113,15 @@ export function createCodexhookServer(
               Delivery,
               (service) => service.snapshot,
             ),
+            taskAccess: Effect.flatMap(
+              LocalCodex,
+              (service) => service.availability,
+            ),
           }),
         );
-        const available = state.transport.candidates.length > 0;
+        const lifecycleState = lifecycle.snapshot();
+        const available =
+          lifecycleState.accepting && state.transport.candidates.length > 0;
         json(response, available ? 200 : 503, {
           service: "codexhook",
           version: VERSION,
@@ -98,9 +133,22 @@ export function createCodexhookServer(
           },
           candidates: state.transport.candidates,
           queuedThreads: state.delivery.lanes,
+          lifecycle: lifecycleState,
+          taskAccess: { status: state.taskAccess.status },
         });
         return;
       }
+
+      const release = lifecycle.enter();
+      if (release == null) {
+        response.setHeader("connection", "close");
+        json(response, 503, {
+          error: `service is ${lifecycle.snapshot().phase}`,
+        });
+        return;
+      }
+      response.once("close", release);
+      response.once("finish", release);
 
       const match = /\/w\/([A-Za-z0-9_-]+)$/.exec(requestUrl.pathname);
       if (request.method !== "POST" || match == null) {
@@ -116,6 +164,15 @@ export function createCodexhookServer(
       const inspected = options.registry.inspectToken(token);
       if (inspected == null) {
         json(response, 404, { error: "not found" });
+        return;
+      }
+      if (
+        !(await authenticator.authorize(request, {
+          kind: "webhook",
+          hook: inspected,
+        }))
+      ) {
+        json(response, 401, { error: "unauthorized" });
         return;
       }
       if (!rateLimiter.allow(inspected.threadId)) {
@@ -143,10 +200,13 @@ export function createCodexhookServer(
         Effect.flatMap(Delivery, (service) => service.submit(hook, body)),
       );
       if (Option.isNone(accepted)) {
+        const dropReason = hook.mode === "steer"
+          ? "steer delivery capacity is full"
+          : "thread delivery queue is full";
         logger.warn("delivery_dropped", {
           hookId: hook.id,
           threadId: hook.threadId,
-          reason: "thread delivery queue is full",
+          reason: dropReason,
         });
         // The hook was atomically claimed already. A 5xx would invite a
         // provider retry even though a one-shot URL is intentionally gone.
@@ -155,7 +215,7 @@ export function createCodexhookServer(
           deliveryId: null,
           hookId: hook.id,
           dropped: true,
-          reason: "thread delivery queue is full",
+          reason: dropReason,
         });
         return;
       }
@@ -184,6 +244,14 @@ export function createCodexhookServer(
       }
     }
   });
+  server.maxConnections = MAX_HTTP_CONNECTIONS;
+  server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
+  server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
+  server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
+  server.once("listening", () => {
+    if (lifecycle.snapshot().phase === "starting") lifecycle.ready();
+  });
+  return server;
 }
 
 export async function listen(
@@ -198,4 +266,32 @@ export async function listen(
     });
   });
   return server;
+}
+
+export async function closeCodexhookServer(
+  server: http.Server,
+  timeoutMs: number,
+): Promise<boolean> {
+  let timedOut = false;
+  const closed = new Promise<void>((resolve) => {
+    server.close(() => resolve());
+    server.closeIdleConnections();
+  });
+  const idleCloser = setInterval(() => {
+    server.closeIdleConnections();
+  }, 10);
+  idleCloser.unref();
+  void closed.finally(() => clearInterval(idleCloser));
+  const timeout = new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      timedOut = true;
+      server.closeAllConnections();
+      resolve();
+    }, timeoutMs);
+    timer.unref();
+    void closed.finally(() => clearTimeout(timer));
+  });
+  await Promise.race([closed, timeout]);
+  if (timedOut) await closed;
+  return !timedOut;
 }

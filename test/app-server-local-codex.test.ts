@@ -1,15 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Chunk, Duration, Effect, Fiber, Stream } from "effect";
-import { localCodexService } from "../src/app-server/local-codex.js";
+import {
+  Chunk,
+  Deferred,
+  Duration,
+  Effect,
+  Fiber,
+  Queue,
+  Stream,
+} from "effect";
+import {
+  localCodexService,
+} from "../src/app-server/local-codex.js";
+import {
+  resilientLocalCodexService,
+} from "../src/app-server/local-codex-resilience.js";
 import { confirmLocalPlane } from "../src/app-server/service.js";
-import type { LocalTaskRef } from "../src/contracts/local-codex.js";
+import {
+  type LocalTaskRef,
+} from "../src/contracts/local-codex.js";
 import { DeliveryId, ThreadId } from "../src/types.js";
 import {
   canonicalThread,
   canonicalTurn,
   fakeAppServerPeer,
 } from "./support/app-server-fixture.js";
+import { availabilityService } from "./support/local-codex-fixture.js";
 
 function localPlane(handler: Parameters<typeof fakeAppServerPeer>[0]) {
   const fixture = fakeAppServerPeer(handler);
@@ -281,6 +297,43 @@ test("blocks queries and writes for an unknown app-server binding", async () => 
     assert.equal(outcome.reason, "incompatible");
   }
   assert.deepEqual(fixture.submissions, []);
+});
+
+test("reacquires canonical task access after an unavailable binding", async () => {
+  let acquisitions = 0;
+  const retry = await Effect.runPromise(Queue.unbounded<void>());
+  const firstReleased = await Effect.runPromise(Deferred.make<void>());
+  const acquire = Effect.acquireRelease(
+    Effect.sync(() => {
+      acquisitions += 1;
+      return {
+        id: acquisitions,
+        service: availabilityService(
+          acquisitions === 1 ? "unavailable" : "available",
+        ),
+      };
+    }),
+    ({ id }) => id === 1
+      ? Deferred.succeed(firstReleased, undefined).pipe(Effect.asVoid)
+      : Effect.void,
+  ).pipe(Effect.map(({ service }) => service));
+
+  const result = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    const service = yield* resilientLocalCodexService(
+      acquire,
+      "1 hour",
+      () => Queue.take(retry),
+    );
+    const initial = yield* service.availability;
+    yield* Queue.offer(retry, undefined);
+    yield* Deferred.await(firstReleased);
+    const recovered = yield* service.availability;
+    return { initial, recovered };
+  })));
+
+  assert.equal(result.initial.status, "unavailable");
+  assert.equal(result.recovered.status, "available");
+  assert.equal(acquisitions, 2);
 });
 
 test("projects canonical thread deletion after the initial snapshot", async () => {

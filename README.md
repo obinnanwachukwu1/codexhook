@@ -125,11 +125,14 @@ codexhook list
 codexhook revoke build-result
 codexhook revoke --thread "$CODEX_THREAD_ID"
 codexhook revoke --all
+codexhook status
 codexhook doctor
 ```
 
-`doctor` checks the installation, background service, and available Codex
-connections. Use `doctor --json` for structured output.
+`status` reports daemon readiness, canonical local task access, delivery
+availability, and Desktop IPC availability. `doctor` additionally checks the
+installed runtime, background service, skill, and Codex connections. Use
+`--json` with either command for structured output.
 
 Run setup again to update or repair codexhook:
 
