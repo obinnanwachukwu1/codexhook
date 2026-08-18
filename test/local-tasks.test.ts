@@ -224,3 +224,56 @@ test("task request failures do not fan out across app-server candidates", async 
     await runtime.dispose();
   }
 });
+
+test("failed task candidates close before connecting the fallback", async () => {
+  const trace: string[] = [];
+  const peer = {
+    request: () => Effect.sync(() => {
+      trace.push("request cli");
+      return { data: [task()], nextCursor: null };
+    }),
+  } as unknown as AppServerPeer;
+  const provider = TransportProvider.of({
+    candidates: Effect.succeed([daemon, cli]),
+    desktopCandidate: Effect.die("not used"),
+    connect: (spec) =>
+      Effect.acquireRelease(
+        Effect.sync(() => {
+          trace.push(`open ${spec.id}`);
+          return peer;
+        }),
+        () => Effect.sync(() => {
+          trace.push(`close ${spec.id}`);
+        }),
+      ).pipe(
+        Effect.flatMap((connected) =>
+          spec.id === "daemon"
+            ? Effect.fail(new TransportUnavailable({
+                transport: "daemon",
+                reason: "connect-failed",
+                detail: "test",
+              }))
+            : Effect.succeed(connected),
+        ),
+      ),
+  } satisfies TransportProviderService);
+  const runtime = ManagedRuntime.make(
+    AppServerTasksLive().pipe(
+      Layer.provide(Layer.succeed(TransportProvider, provider)),
+    ),
+  );
+  try {
+    await runtime.runPromise(
+      Effect.flatMap(AppServerTasks, (access) => access.list()),
+    );
+    assert.deepEqual(trace, [
+      "open daemon",
+      "close daemon",
+      "open cli",
+      "request cli",
+      "close cli",
+    ]);
+  } finally {
+    await runtime.dispose();
+  }
+});

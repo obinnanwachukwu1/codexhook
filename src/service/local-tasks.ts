@@ -1,4 +1,4 @@
-import { Context, Data, Duration, Effect, Layer, Schema, Scope } from "effect";
+import { Context, Data, Duration, Effect, Layer, Schema } from "effect";
 import type { ThreadId, TransportId } from "../types.js";
 import type { AppServerNotification, AppServerPeer } from "../transport/rpc.js";
 import { TransportProvider } from "../transport/provider.js";
@@ -153,6 +153,10 @@ function operationFailure(error: unknown): AppServerTaskFailure {
     : failure("request-failed");
 }
 
+const CANDIDATE_CONNECTION_FAILURE = {
+  _tag: "CandidateConnectionFailure",
+} as const;
+
 export function AppServerTasksLive(): Layer.Layer<
   AppServerTasks,
   never,
@@ -169,33 +173,33 @@ export function AppServerTasksLive(): Layer.Layer<
       const withPeer = <A>(
         operation: (peer: AppServerPeer) => Effect.Effect<A, unknown>,
       ): Effect.Effect<A, AppServerTaskFailure> =>
-        Effect.scoped(
-          candidates.pipe(
-            Effect.flatMap((available) => {
-              const connect = (
-                remaining: ReadonlyArray<TransportSpec>,
-              ): Effect.Effect<
-                AppServerPeer,
-                AppServerTaskFailure,
-                Scope.Scope
-              > => {
-                const candidate = remaining[0];
-                if (candidate == null) {
-                  return Effect.fail(failure("unavailable"));
-                }
-                return provider.connect(candidate).pipe(
-                  Effect.catchAll(() => connect(remaining.slice(1))),
-                );
-              };
-              return connect(available).pipe(
-                Effect.flatMap((peer) =>
-                  operation(peer).pipe(
-                    Effect.mapError(operationFailure),
+        candidates.pipe(
+          Effect.flatMap((available) => {
+            const attempt = (
+              remaining: ReadonlyArray<TransportSpec>,
+            ): Effect.Effect<A, AppServerTaskFailure> => {
+              const candidate = remaining[0];
+              if (candidate == null) {
+                return Effect.fail(failure("unavailable"));
+              }
+              return Effect.scoped(
+                provider.connect(candidate).pipe(
+                  Effect.mapError(() => CANDIDATE_CONNECTION_FAILURE),
+                  Effect.flatMap((peer) =>
+                    operation(peer).pipe(
+                      Effect.mapError(operationFailure),
+                    ),
                   ),
                 ),
+              ).pipe(
+                Effect.catchTag(
+                  "CandidateConnectionFailure",
+                  () => attempt(remaining.slice(1)),
+                ),
               );
-            }),
-          ),
+            };
+            return attempt(available);
+          }),
         );
 
       const list: AppServerTaskService["list"] = (options = {}) =>
