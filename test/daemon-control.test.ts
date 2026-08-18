@@ -43,7 +43,7 @@ test("recognizes an available codexhook listener", async () => {
       desktopIpcAvailable: true,
       phase: "unknown",
       delivery: "unavailable",
-      taskAccessAvailable: false,
+      taskAccessCandidatesFound: false,
     },
   });
 });

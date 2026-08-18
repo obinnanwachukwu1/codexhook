@@ -175,3 +175,64 @@ test("drain stops admissions and waits for accepted work", async () => {
     await runtime.dispose();
   }
 });
+
+test("steer dispatches immediately up to its in-flight bound", async () => {
+  const gate = await Effect.runPromise(Deferred.make<void>());
+  const { logger } = memoryLogger();
+  const transport = CodexTransport.of({
+    deliver: (request) =>
+      Deferred.await(gate).pipe(
+        Effect.as({
+          _tag: "Steered" as const,
+          threadId: request.threadId,
+          turnId: TurnId("turn-1"),
+          transport: "desktop" as const,
+        }),
+      ),
+    status: Effect.succeed({
+      candidates: ["desktop"],
+      desktopIpcAvailable: true,
+    }),
+  } satisfies CodexTransportService);
+  const runtime = ManagedRuntime.make(
+    DeliveryLive(logger).pipe(
+      Layer.provide(Layer.succeed(CodexTransport, transport)),
+    ),
+  );
+  const hook: WebhookRecord = {
+    id: "steer",
+    threadId: ThreadId("thread-1"),
+    mode: "steer",
+    prependBody: "",
+    expiresAt: null,
+    remainingDeliveries: null,
+    createdAt: Date.now(),
+  };
+
+  try {
+    for (let index = 0; index < 100; index += 1) {
+      const result = await runtime.runPromise(
+        Effect.flatMap(Delivery, (service) => service.submit(hook, "one")),
+      );
+      assert.equal(Option.isSome(result), true);
+    }
+    const overflow = await runtime.runPromise(
+      Effect.flatMap(Delivery, (service) => service.submit(hook, "overflow")),
+    );
+    assert.equal(Option.isNone(overflow), true);
+    const snapshot = await runtime.runPromise(
+      Effect.flatMap(Delivery, (service) => service.snapshot),
+    );
+    assert.equal(snapshot.steerDepth, 100);
+
+    await Effect.runPromise(Deferred.succeed(gate, undefined));
+    assert.equal(
+      await runtime.runPromise(
+        Effect.flatMap(Delivery, (service) => service.drain("1 second")),
+      ),
+      true,
+    );
+  } finally {
+    await runtime.dispose();
+  }
+});

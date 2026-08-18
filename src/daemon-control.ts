@@ -18,7 +18,7 @@ export interface DaemonHealth {
   desktopIpcAvailable: boolean;
   phase: "starting" | "ready" | "draining" | "stopped" | "unknown";
   delivery: "available" | "unavailable";
-  taskAccessAvailable: boolean;
+  taskAccessCandidatesFound: boolean;
 }
 
 export type DaemonProbe =
@@ -52,7 +52,7 @@ export async function probeDaemon(
       };
       delivery?: unknown;
       lifecycle?: { phase?: unknown };
-      taskAccess?: { available?: unknown } | null;
+      taskAccess?: { candidatesFound?: unknown } | null;
     };
     if (body.service !== "codexhook" || typeof body.version !== "string") {
       return { state: "occupied" };
@@ -73,7 +73,8 @@ export async function probeDaemon(
             : "unknown",
         delivery:
           body.delivery === "available" ? "available" : "unavailable",
-        taskAccessAvailable: body.taskAccess?.available === true,
+        taskAccessCandidatesFound:
+          body.taskAccess?.candidatesFound === true,
       },
     };
   } catch {

@@ -13,6 +13,7 @@ import {
   HTTP_REQUEST_TIMEOUT_MS,
   MAX_BODY_BYTES,
   MAX_HTTP_CONNECTIONS,
+  MAX_HTTP_REQUESTS_PER_SOCKET,
 } from "./config.js";
 import { Delivery } from "./delivery/delivery.js";
 import { Logger } from "./logger.js";
@@ -21,13 +22,13 @@ import { WebhookRegistry } from "./registry.js";
 import { CodexTransport } from "./transport/transport.js";
 import { VERSION } from "./version.js";
 import {
-  capabilityTokenAuthenticator,
+  noAdditionalAuthentication,
   type RequestAuthenticator,
 } from "./service/auth.js";
 import {
   ServiceLifecycle,
 } from "./service/lifecycle.js";
-import type { LocalTaskAccessService } from "./service/local-tasks.js";
+import type { AppServerTaskStatus } from "./service/local-tasks.js";
 
 export interface CodexhookServerOptions {
   host: string;
@@ -38,7 +39,7 @@ export interface CodexhookServerOptions {
   rateLimiter?: ThreadRateLimiter;
   lifecycle?: ServiceLifecycle;
   authenticator?: RequestAuthenticator;
-  localTasks?: LocalTaskAccessService;
+  localTaskStatus?: Effect.Effect<AppServerTaskStatus>;
 }
 
 function json(
@@ -84,8 +85,7 @@ export function createCodexhookServer(
   const rateLimiter = options.rateLimiter ?? new ThreadRateLimiter();
   const lifecycle = options.lifecycle ?? new ServiceLifecycle();
   const authenticator =
-    options.authenticator ?? capabilityTokenAuthenticator;
-  if (options.lifecycle == null) lifecycle.ready();
+    options.authenticator ?? noAdditionalAuthentication;
 
   const server = http.createServer(async (request, response) => {
     try {
@@ -115,14 +115,13 @@ export function createCodexhookServer(
             ),
           }),
         );
-        const tasks = options.localTasks == null
+        const tasks = options.localTaskStatus == null
           ? null
-          : await options.runtime.runPromise(options.localTasks.status);
+          : await options.runtime.runPromise(options.localTaskStatus);
         const lifecycleState = lifecycle.snapshot();
         const available =
           lifecycleState.accepting && state.transport.candidates.length > 0;
-        const readiness = requestUrl.pathname.endsWith("/readyz");
-        json(response, readiness && !available ? 503 : 200, {
+        json(response, available ? 200 : 503, {
           service: "codexhook",
           version: VERSION,
           status: available ? "ok" : "degraded",
@@ -142,7 +141,9 @@ export function createCodexhookServer(
       const release = lifecycle.enter();
       if (release == null) {
         response.setHeader("connection", "close");
-        json(response, 503, { error: "service is draining" });
+        json(response, 503, {
+          error: `service is ${lifecycle.snapshot().phase}`,
+        });
         return;
       }
       response.once("close", release);
@@ -243,7 +244,10 @@ export function createCodexhookServer(
   server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
   server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
   server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
-  server.maxRequestsPerSocket = 100;
+  server.maxRequestsPerSocket = MAX_HTTP_REQUESTS_PER_SOCKET;
+  server.once("listening", () => {
+    if (lifecycle.snapshot().phase === "starting") lifecycle.ready();
+  });
   return server;
 }
 
@@ -258,9 +262,6 @@ export async function listen(
       resolve();
     });
   });
-  if (options.lifecycle?.snapshot().phase === "starting") {
-    options.lifecycle.ready();
-  }
   return server;
 }
 
@@ -273,6 +274,11 @@ export async function closeCodexhookServer(
     server.close(() => resolve());
     server.closeIdleConnections();
   });
+  const idleCloser = setInterval(() => {
+    server.closeIdleConnections();
+  }, 10);
+  idleCloser.unref();
+  void closed.finally(() => clearInterval(idleCloser));
   const timeout = new Promise<void>((resolve) => {
     const timer = setTimeout(() => {
       timedOut = true;

@@ -9,7 +9,13 @@ export class AppServerNotifications {
   emit(method: string | undefined, params: unknown): Effect.Effect<void> {
     if (method == null) return Effect.void;
     return Effect.sync(() => {
-      for (const observer of this.observers) observer({ method, params });
+      for (const observer of this.observers) {
+        try {
+          observer({ method, params });
+        } catch {
+          // Observers cannot affect RPC delivery or connection health.
+        }
+      }
     });
   }
 

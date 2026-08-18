@@ -105,26 +105,24 @@ export async function serve(arguments_: string[]): Promise<void> {
     dataDirectory: directory,
     logger,
   });
-  let reason: string;
-  try {
-    reason = await new Promise<string>((resolve, reject) => {
-      const onInterrupt = () => resolve("SIGINT");
-      const onTerminate = () => resolve("SIGTERM");
-      const onError = (error: Error) => reject(error);
-      process.once("SIGINT", onInterrupt);
-      process.once("SIGTERM", onTerminate);
-      daemon.server.once("error", onError);
-      daemon.server.once("close", () => {
-        process.off("SIGINT", onInterrupt);
-        process.off("SIGTERM", onTerminate);
-        daemon.server.off("error", onError);
-      });
+  await new Promise<void>((resolve, reject) => {
+    const shutdown = (reason: string) => {
+      void daemon.stop(reason).then(resolve, reject);
+    };
+    const onInterrupt = () => shutdown("SIGINT");
+    const onTerminate = () => shutdown("SIGTERM");
+    const onError = (error: Error) => {
+      void daemon.stop("server-error").then(() => reject(error), reject);
+    };
+    process.once("SIGINT", onInterrupt);
+    process.once("SIGTERM", onTerminate);
+    daemon.server.once("error", onError);
+    daemon.server.once("close", () => {
+      process.off("SIGINT", onInterrupt);
+      process.off("SIGTERM", onTerminate);
+      daemon.server.off("error", onError);
     });
-  } catch (error) {
-    await daemon.stop("server-error");
-    throw error;
-  }
-  await daemon.stop(reason);
+  });
 }
 
 export async function status(arguments_: string[]): Promise<void> {
@@ -135,21 +133,26 @@ export async function status(arguments_: string[]): Promise<void> {
   });
   const manifest = readInstallManifest();
   const port = manifest?.port ?? DEFAULT_PORT;
-  const daemon = await probeDaemon(defaultBaseUrl(DEFAULT_HOST, port));
-  const report = { daemon, port, baseUrl: manifest?.baseUrl ?? null };
+  const origin = defaultBaseUrl(DEFAULT_HOST, port);
+  const daemon = await probeDaemon(origin);
+  const report = {
+    daemon,
+    origin,
+    publicBaseUrl: manifest?.baseUrl ?? null,
+  };
   if (values.json) {
     process.stdout.write(`${JSON.stringify(report)}\n`);
   } else if (daemon.state === "running") {
     process.stdout.write(
-      `codexhook ${daemon.health.state} on ${DEFAULT_HOST}:${port} (${daemon.health.phase}).\n`,
+      `codexhook ${daemon.health.state} at ${origin} (${daemon.health.phase}).\n`,
     );
     process.stdout.write(
-      `delivery: ${daemon.health.delivery}; task access: ${daemon.health.taskAccessAvailable ? "available" : "unavailable"}; Desktop IPC: ${daemon.health.desktopIpcAvailable ? "available" : "unavailable"}.\n`,
+      `delivery: ${daemon.health.delivery}; task access candidates: ${daemon.health.taskAccessCandidatesFound ? "found" : "none"}; Desktop IPC: ${daemon.health.desktopIpcAvailable ? "available" : "unavailable"}.\n`,
     );
   } else {
     process.stdout.write(`codexhook daemon: ${daemon.state}.\n`);
-    process.exitCode = 1;
   }
+  if (daemon.state !== "running") process.exitCode = 1;
 }
 
 function nodeVersion(executable: string): string | null {

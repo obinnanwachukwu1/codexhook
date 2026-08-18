@@ -296,7 +296,6 @@ function runTurn(
             ? new TurnTimeout({
                 threadId: request.threadId,
                 turnId: started.turnId,
-                transport: spec.id,
                 waitedMillis: millis(request.turnTimeout),
               })
             : new TurnAbandoned({
@@ -310,7 +309,6 @@ function runTurn(
       return yield* new TurnFailed({
         threadId: request.threadId,
         turnId: started.turnId,
-        transport: spec.id,
         status:
           completed.status === "interrupted" ? "interrupted" : "failed",
         message: Option.fromNullable(completed.error?.message),

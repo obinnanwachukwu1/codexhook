@@ -129,10 +129,10 @@ codexhook status
 codexhook doctor
 ```
 
-`status` reports daemon readiness, local task access, delivery availability, and
-Desktop IPC availability. `doctor` additionally checks the installed runtime,
-background service, skill, and Codex connections. Use `--json` with either
-command for structured output.
+`status` reports daemon readiness, local task-access candidates, delivery
+availability, and Desktop IPC availability. `doctor` additionally checks the
+installed runtime, background service, skill, and Codex connections. Use
+`--json` with either command for structured output.
 
 Run setup again to update or repair codexhook:
 

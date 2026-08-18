@@ -6,7 +6,7 @@ import type { TransportSpec } from "../transport/spec.js";
 
 const READ_TIMEOUT = Duration.seconds(30);
 
-const Task = Schema.Struct({
+const TASK_FIELDS = {
   id: Schema.String,
   name: Schema.optional(Schema.NullOr(Schema.String)),
   preview: Schema.String,
@@ -14,6 +14,11 @@ const Task = Schema.Struct({
   createdAt: Schema.Number,
   updatedAt: Schema.Number,
   status: Schema.Struct({ type: Schema.String }),
+} as const;
+
+const Task = Schema.Struct(TASK_FIELDS);
+const TaskWithTurns = Schema.Struct({
+  ...TASK_FIELDS,
   turns: Schema.Array(Schema.Unknown),
 });
 
@@ -22,9 +27,25 @@ const TaskList = Schema.Struct({
   nextCursor: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
-const TaskRead = Schema.Struct({ thread: Task });
+const TaskRead = Schema.Struct({ thread: TaskWithTurns });
 
-export interface LocalTask {
+// Empty sourceKinds uses app-server's interactive-only default. Enumerating
+// the v2 source kinds keeps this machine-wide reader inclusive of CLI, app,
+// exec, and sub-agent tasks.
+const ALL_TASK_SOURCES = [
+  "cli",
+  "vscode",
+  "exec",
+  "appServer",
+  "subAgent",
+  "subAgentReview",
+  "subAgentCompact",
+  "subAgentThreadSpawn",
+  "subAgentOther",
+  "unknown",
+] as const;
+
+export interface AppServerTask {
   readonly id: ThreadId;
   readonly title: string;
   readonly preview: string;
@@ -34,53 +55,53 @@ export interface LocalTask {
   readonly status: string;
 }
 
-export interface LocalTaskPage {
-  readonly tasks: ReadonlyArray<LocalTask>;
+export interface AppServerTaskPage {
+  readonly tasks: ReadonlyArray<AppServerTask>;
   readonly nextCursor: string | null;
 }
 
-export interface LocalTaskHistory {
-  readonly task: LocalTask;
+export interface AppServerTaskHistory {
+  readonly task: AppServerTask;
   /** App-server owns the canonical history; codexhook does not persist a copy. */
   readonly turns: ReadonlyArray<unknown>;
 }
 
-export interface LocalTaskEvent {
+export interface AppServerTaskEvent {
   readonly method: string;
   readonly params: unknown;
 }
 
-export interface LocalTaskAccessStatus {
-  readonly available: boolean;
+export interface AppServerTaskStatus {
+  readonly candidatesFound: boolean;
   readonly candidates: ReadonlyArray<string>;
   readonly source: "app-server";
 }
 
-export class LocalTaskUnavailable extends Data.TaggedError(
-  "LocalTaskUnavailable",
-)<{ readonly detail: string }> {}
+export class AppServerTaskFailure extends Data.TaggedError(
+  "AppServerTaskFailure",
+)<{ readonly reason: "unavailable" | "request-failed" }> {}
 
-export interface LocalTaskAccessService {
-  readonly status: Effect.Effect<LocalTaskAccessStatus>;
+export interface AppServerTaskService {
+  readonly status: Effect.Effect<AppServerTaskStatus>;
   readonly list: (options?: {
     readonly cursor?: string | undefined;
     readonly limit?: number | undefined;
     readonly archived?: boolean | undefined;
-  }) => Effect.Effect<LocalTaskPage, LocalTaskUnavailable>;
+  }) => Effect.Effect<AppServerTaskPage, AppServerTaskFailure>;
   readonly history: (
     threadId: ThreadId,
-  ) => Effect.Effect<LocalTaskHistory, LocalTaskUnavailable>;
+  ) => Effect.Effect<AppServerTaskHistory, AppServerTaskFailure>;
   readonly events: (
-    listener: (event: LocalTaskEvent) => void,
-  ) => Effect.Effect<never, LocalTaskUnavailable, Scope.Scope>;
+    listener: (event: AppServerTaskEvent) => void,
+  ) => Effect.Effect<never, AppServerTaskFailure, Scope.Scope>;
 }
 
-export class LocalTaskAccess extends Context.Tag("codexhook/LocalTaskAccess")<
-  LocalTaskAccess,
-  LocalTaskAccessService
+export class AppServerTasks extends Context.Tag("codexhook/AppServerTasks")<
+  AppServerTasks,
+  AppServerTaskService
 >() {}
 
-function normalize(task: typeof Task.Type): LocalTask {
+function normalize(task: typeof Task.Type): AppServerTask {
   return {
     id: task.id as ThreadId,
     title: task.name ?? task.preview,
@@ -95,31 +116,28 @@ function normalize(task: typeof Task.Type): LocalTask {
 function canonicalCandidates(
   candidates: ReadonlyArray<TransportSpec>,
 ): ReadonlyArray<TransportSpec> {
+  const order = ["daemon", "app-bundled", "cli"] as const;
   return candidates
-    .filter((candidate) => candidate._tag !== "Desktop")
-    .sort((left, right) => {
-      const order = { daemon: 0, "app-bundled": 1, cli: 2 } as const;
-      return order[left.id] - order[right.id];
-    });
+    .filter((candidate) =>
+      order.includes(candidate.id as (typeof order)[number]),
+    )
+    .sort((left, right) =>
+      order.indexOf(left.id as (typeof order)[number]) -
+      order.indexOf(right.id as (typeof order)[number]),
+    );
 }
 
-function unavailable(error: unknown): LocalTaskUnavailable {
-  const detail =
-    error != null && typeof error === "object" && "detail" in error
-      ? String(error.detail)
-      : error instanceof Error
-        ? error.message
-        : String(error);
-  return new LocalTaskUnavailable({ detail });
+function failure(reason: AppServerTaskFailure["reason"]): AppServerTaskFailure {
+  return new AppServerTaskFailure({ reason });
 }
 
-export function LocalTaskAccessLive(): Layer.Layer<
-  LocalTaskAccess,
+export function AppServerTasksLive(): Layer.Layer<
+  AppServerTasks,
   never,
   TransportProvider
 > {
   return Layer.effect(
-    LocalTaskAccess,
+    AppServerTasks,
     Effect.gen(function* () {
       const provider = yield* TransportProvider;
       const candidates = provider.candidates.pipe(
@@ -128,34 +146,38 @@ export function LocalTaskAccessLive(): Layer.Layer<
 
       const withPeer = <A>(
         operation: (peer: AppServerPeer) => Effect.Effect<A, unknown>,
-      ): Effect.Effect<A, LocalTaskUnavailable> =>
+      ): Effect.Effect<A, AppServerTaskFailure> =>
         Effect.scoped(
           candidates.pipe(
             Effect.flatMap((available) => {
-              const attempt = (
+              const connect = (
                 remaining: ReadonlyArray<TransportSpec>,
-                last?: unknown,
-              ): Effect.Effect<A, LocalTaskUnavailable, Scope.Scope> => {
+              ): Effect.Effect<
+                AppServerPeer,
+                AppServerTaskFailure,
+                Scope.Scope
+              > => {
                 const candidate = remaining[0];
                 if (candidate == null) {
-                  return Effect.fail(
-                    unavailable(last ?? "no local app-server is available"),
-                  );
+                  return Effect.fail(failure("unavailable"));
                 }
                 return provider.connect(candidate).pipe(
-                  Effect.flatMap(operation),
-                  Effect.mapError(unavailable),
-                  Effect.catchAll((error) =>
-                    attempt(remaining.slice(1), error),
-                  ),
+                  Effect.mapError(() => failure("unavailable")),
+                  Effect.catchAll(() => connect(remaining.slice(1))),
                 );
               };
-              return attempt(available);
+              return connect(available).pipe(
+                Effect.flatMap((peer) =>
+                  operation(peer).pipe(
+                    Effect.mapError(() => failure("request-failed")),
+                  ),
+                ),
+              );
             }),
           ),
         );
 
-      const list: LocalTaskAccessService["list"] = (options = {}) =>
+      const list: AppServerTaskService["list"] = (options = {}) =>
         withPeer((peer) =>
           peer.request(
             "thread/list",
@@ -165,7 +187,7 @@ export function LocalTaskAccessLive(): Layer.Layer<
               archived: options.archived,
               sortKey: "updated_at",
               sortDirection: "desc",
-              sourceKinds: [],
+              sourceKinds: ALL_TASK_SOURCES,
             },
             TaskList,
             READ_TIMEOUT,
@@ -177,7 +199,7 @@ export function LocalTaskAccessLive(): Layer.Layer<
           })),
         );
 
-      const history: LocalTaskAccessService["history"] = (threadId) =>
+      const history: AppServerTaskService["history"] = (threadId) =>
         withPeer((peer) =>
           peer.request(
             "thread/read",
@@ -192,36 +214,23 @@ export function LocalTaskAccessLive(): Layer.Layer<
           })),
         );
 
-      const events: LocalTaskAccessService["events"] = (listener) =>
-        candidates.pipe(
-          Effect.flatMap((available) => {
-            const candidate = available[0];
-            if (candidate == null) {
-              return Effect.fail(
-                new LocalTaskUnavailable({
-                  detail: "no local app-server is available",
-                }),
-              );
-            }
-            return provider.connect(candidate).pipe(
-              Effect.flatMap((peer) =>
-                peer.observe((notification: AppServerNotification) => {
-                  listener(notification);
-                }),
-              ),
-              Effect.mapError(unavailable),
-            );
-          }),
+      const events: AppServerTaskService["events"] = (listener) =>
+        withPeer((peer) =>
+          peer.observe == null
+            ? Effect.fail(new Error("notifications unsupported"))
+            : peer.observe((notification: AppServerNotification) => {
+                listener(notification);
+              }),
         );
 
       const status = candidates.pipe(
         Effect.map((available) => ({
-          available: available.length > 0,
+          candidatesFound: available.length > 0,
           candidates: available.map((candidate) => candidate.id),
           source: "app-server" as const,
         })),
       );
-      return LocalTaskAccess.of({ status, list, history, events });
+      return AppServerTasks.of({ status, list, history, events });
     }),
   );
 }

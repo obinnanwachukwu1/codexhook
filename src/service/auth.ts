@@ -6,8 +6,7 @@ export type AuthorizationTarget =
   | {
       readonly kind: "webhook";
       readonly hook: WebhookRecord;
-    }
-  | { readonly kind: "service"; readonly operation: string };
+    };
 
 export interface RequestAuthenticator {
   readonly authorize: (
@@ -21,6 +20,6 @@ export interface RequestAuthenticator {
  * seam lets a future local adapter add stronger service-level authentication
  * without teaching the HTTP listener about that adapter's protocol.
  */
-export const capabilityTokenAuthenticator: RequestAuthenticator = {
+export const noAdditionalAuthentication: RequestAuthenticator = {
   authorize: () => true,
 };

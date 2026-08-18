@@ -279,13 +279,11 @@ export function connectWirePeer(
         if (message.method === "turn/completed") {
           const params = message.params as { turn?: Turn } | undefined;
           if (params?.turn != null) {
-            return observed.pipe(
-              Effect.zipRight(
-                Deferred.succeed(
-                  turnSlot(params.turn.id),
-                  params.turn,
-                ),
-              ),
+            return Deferred.succeed(
+              turnSlot(params.turn.id),
+              params.turn,
+            ).pipe(
+              Effect.zipRight(observed),
               Effect.asVoid,
             );
           }

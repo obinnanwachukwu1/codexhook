@@ -15,8 +15,8 @@ import {
 import type { RequestAuthenticator } from "./service/auth.js";
 import { ServiceLifecycle } from "./service/lifecycle.js";
 import {
-  LocalTaskAccess,
-  LocalTaskAccessLive,
+  AppServerTasks,
+  AppServerTasksLive,
 } from "./service/local-tasks.js";
 import { TransportProviderLive } from "./transport/provider.js";
 import {
@@ -25,7 +25,7 @@ import {
 } from "./transport/transport.js";
 
 type DaemonRuntime = ManagedRuntime.ManagedRuntime<
-  Delivery | CodexTransport | LocalTaskAccess,
+  Delivery | CodexTransport | AppServerTasks,
   never
 >;
 
@@ -41,24 +41,6 @@ export interface UnifiedDaemonOptions {
 export interface UnifiedDaemon {
   readonly server: http.Server;
   readonly lifecycle: ServiceLifecycle;
-  readonly status: () => Promise<{
-    readonly lifecycle: ReturnType<ServiceLifecycle["snapshot"]>;
-    readonly delivery: {
-      readonly accepting: boolean;
-      readonly pending: number;
-      readonly lanes: number;
-      readonly steerDepth: number;
-    };
-    readonly transport: {
-      readonly candidates: ReadonlyArray<string>;
-      readonly desktopIpcAvailable: boolean;
-    };
-    readonly taskAccess: {
-      readonly available: boolean;
-      readonly candidates: ReadonlyArray<string>;
-      readonly source: "app-server";
-    };
-  }>;
   readonly stop: (reason?: string) => Promise<void>;
 }
 
@@ -69,7 +51,7 @@ function makeRuntime(logger: Logger): DaemonRuntime {
   );
   const services = Layer.merge(
     deliveryAndTransport,
-    LocalTaskAccessLive(),
+    AppServerTasksLive(),
   ).pipe(Layer.provide(TransportProviderLive(logger)));
   return ManagedRuntime.make(services);
 }
@@ -83,7 +65,7 @@ export async function startUnifiedDaemon(
   const lifecycle = new ServiceLifecycle();
   const registry = new WebhookRegistry(databasePath(options.dataDirectory));
   const runtime = makeRuntime(logger);
-  const localTasks = await runtime.runPromise(LocalTaskAccess);
+  const localTasks = await runtime.runPromise(AppServerTasks);
   let server: http.Server;
   try {
     server = await listen({
@@ -93,7 +75,7 @@ export async function startUnifiedDaemon(
       runtime,
       logger,
       lifecycle,
-      localTasks,
+      localTaskStatus: localTasks.status,
       ...(options.authenticator == null
         ? {}
         : { authenticator: options.authenticator }),
@@ -111,50 +93,41 @@ export async function startUnifiedDaemon(
   });
 
   let stopPromise: Promise<void> | null = null;
-  const status: UnifiedDaemon["status"] = async () => {
-    const state = await runtime.runPromise(
-      Effect.all({
-        delivery: Effect.flatMap(Delivery, (service) => service.snapshot),
-        transport: Effect.flatMap(
-          CodexTransport,
-          (service) => service.status,
-        ),
-        taskAccess: Effect.flatMap(
-          LocalTaskAccess,
-          (service) => service.status,
-        ),
-      }),
-    );
-    return { lifecycle: lifecycle.snapshot(), ...state };
-  };
-
   const stop: UnifiedDaemon["stop"] = (reason = "requested") => {
     if (stopPromise != null) return stopPromise;
     stopPromise = (async () => {
-      lifecycle.beginDrain();
-      logger.info("server_draining", { reason, graceMs });
-      const deadline = Date.now() + graceMs;
-      const httpDrained = await closeCodexhookServer(server, graceMs);
-      await lifecycle.waitForIdle(Math.max(0, deadline - Date.now()));
-      await runtime.runPromise(
-        Effect.flatMap(Delivery, (service) => service.stopAccepting),
-      );
-      const deliveryDrained = await runtime.runPromise(
-        Effect.flatMap(Delivery, (service) =>
-          service.drain(Math.max(0, deadline - Date.now())),
-        ),
-      );
-      await runtime.dispose();
-      registry.close();
-      lifecycle.stopped();
-      logger.info("server_stopped", {
-        reason,
-        httpDrained,
-        deliveryDrained,
-      });
+      let httpDrained = false;
+      let deliveryDrained = false;
+      try {
+        lifecycle.beginDrain();
+        logger.info("server_draining", { reason, graceMs });
+        const deadline = Date.now() + graceMs;
+        httpDrained = await closeCodexhookServer(server, graceMs);
+        await lifecycle.waitForIdle(Math.max(0, deadline - Date.now()));
+        await runtime.runPromise(
+          Effect.flatMap(Delivery, (service) => service.stopAccepting),
+        );
+        deliveryDrained = await runtime.runPromise(
+          Effect.flatMap(Delivery, (service) =>
+            service.drain(Math.max(0, deadline - Date.now())),
+          ),
+        );
+      } finally {
+        try {
+          await runtime.dispose();
+        } finally {
+          registry.close();
+          lifecycle.stopped();
+          logger.info("server_stopped", {
+            reason,
+            httpDrained,
+            deliveryDrained,
+          });
+        }
+      }
     })();
     return stopPromise;
   };
 
-  return { server, lifecycle, status, stop };
+  return { server, lifecycle, stop };
 }

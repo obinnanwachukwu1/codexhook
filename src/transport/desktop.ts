@@ -259,7 +259,6 @@ function makePeer(
     submit,
     reply,
     request,
-    observe: () => Effect.never,
     awaitTurn: (turnId, timeout) =>
       Effect.tryPromise({
         try: async () => {

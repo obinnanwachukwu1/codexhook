@@ -83,7 +83,7 @@ export interface AppServerPeer {
     timeout: Duration.DurationInput,
   ) => Effect.Effect<Turn, RpcDisconnected | RpcTimeout>;
   /** Observe app-server notifications for the lifetime of the caller scope. */
-  readonly observe: (
+  readonly observe?: (
     listener: (notification: AppServerNotification) => void,
   ) => Effect.Effect<never, RpcDisconnected>;
 }

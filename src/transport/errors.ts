@@ -67,7 +67,6 @@ export class TurnAbandoned extends Data.TaggedError("TurnAbandoned")<{
 export class TurnFailed extends Data.TaggedError("TurnFailed")<{
   readonly threadId: ThreadId;
   readonly turnId: TurnId;
-  readonly transport?: TransportId;
   readonly status: "failed" | "interrupted";
   readonly message: Option.Option<string>;
 }> {}
@@ -75,7 +74,6 @@ export class TurnFailed extends Data.TaggedError("TurnFailed")<{
 export class TurnTimeout extends Data.TaggedError("TurnTimeout")<{
   readonly threadId: ThreadId;
   readonly turnId: TurnId;
-  readonly transport?: TransportId;
   readonly waitedMillis: number;
 }> {}
 
