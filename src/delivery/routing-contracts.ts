@@ -33,6 +33,10 @@ export type DesktopRouteState =
   | { readonly _tag: "Unattached" }
   | { readonly _tag: "Unhealthy" };
 
+export const WRITE_AMBIGUOUS: RoutingDiagnostic = {
+  code: "write-ambiguous",
+};
+
 /** Desktop acknowledgement is a receipt; app-server acknowledgement is canonical. */
 export type DeliveryReceipt =
   | { readonly _tag: "Acknowledged"; readonly turnId: TurnId }
@@ -40,9 +44,17 @@ export type DeliveryReceipt =
   | { readonly _tag: "Rejected"; readonly diagnostic: RoutingDiagnostic }
   | { readonly _tag: "Uncertain"; readonly diagnostic: RoutingDiagnostic };
 
+export type DesktopWriteReceipt = Extract<
+  DeliveryReceipt,
+  { readonly _tag: "Acknowledged" | "Uncertain" }
+>;
+
 export type DeliveryEvidence =
   | { readonly _tag: "Found"; readonly turnId: TurnId }
-  | { readonly _tag: "Absent" }
+  | {
+      /** Proven not written after a canonical observation barrier. */
+      readonly _tag: "Absent";
+    }
   | { readonly _tag: "Unresolved"; readonly diagnostic: RoutingDiagnostic };
 
 export type DeliveryRoute = "desktop" | "app-server";
@@ -62,12 +74,10 @@ interface DeliveryResultBase extends DeliveryRef {
 export type CoordinatedDeliveryResult =
   | (DeliveryResultBase & {
       readonly _tag: "ConfirmedDesktop";
-      readonly route: "desktop";
       readonly turnId: TurnId;
     })
   | (DeliveryResultBase & {
       readonly _tag: "ConfirmedAppServer";
-      readonly route: "app-server";
       readonly turnId: TurnId;
     })
   | (DeliveryResultBase & {
@@ -77,7 +87,6 @@ export type CoordinatedDeliveryResult =
     })
   | (DeliveryResultBase & {
       readonly _tag: "Unavailable";
-      readonly route: "app-server";
       readonly diagnostic: RoutingDiagnostic;
     })
   | (DeliveryResultBase & {
@@ -94,6 +103,7 @@ export interface DesktopDeliveryPortService {
   readonly inject: (
     request: TurnRequest,
   ) => Effect.Effect<DeliveryReceipt>;
+  /** Supplemental contradiction evidence; canonical evidence remains decisive. */
   readonly evidence: (
     delivery: DeliveryRef,
   ) => Effect.Effect<DeliveryEvidence>;
@@ -110,7 +120,6 @@ export interface CanonicalDeliveryPortService {
   ) => Effect.Effect<DeliveryReceipt>;
   readonly reconcile: (
     delivery: DeliveryRef,
-    source: DeliveryRoute,
   ) => Effect.Effect<DeliveryEvidence>;
 }
 

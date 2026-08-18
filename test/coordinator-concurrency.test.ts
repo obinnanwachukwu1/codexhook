@@ -34,8 +34,8 @@ test("reconciling does not block a later app-server command", async () => {
       diagnostic: { code: "disconnected" },
     }),
     desktopEvidence: () => Effect.succeed(unresolved),
-    canonicalEvidence: (delivery, source) =>
-      source === "desktop" && delivery.deliveryId === "delivery-1"
+    canonicalEvidence: (delivery) =>
+      delivery.deliveryId === "delivery-1"
         ? Effect.sync(() => entered.resolve()).pipe(
             Effect.zipRight(Effect.promise(() => canonical.promise)),
           )
@@ -46,7 +46,7 @@ test("reconciling does not block a later app-server command", async () => {
     }),
   });
   try {
-    const first = fixture.deliver(request("delivery-1"));
+    const first = fixture.deliver(request("delivery-1", "thread-1", "30 seconds"));
     await entered.promise;
     assert.equal((await fixture.circuitState(request().threadId))._tag,
       "Reconciling");
@@ -72,15 +72,15 @@ test("reset cannot clear an in-flight reconciliation", async () => {
       _tag: "Uncertain",
       diagnostic: { code: "write-ambiguous" },
     }),
-    canonicalEvidence: (delivery, source) =>
-      source === "desktop" && delivery.deliveryId === "delivery-1"
+    canonicalEvidence: (delivery) =>
+      delivery.deliveryId === "delivery-1"
         ? Effect.sync(() => entered.resolve()).pipe(
             Effect.zipRight(Effect.promise(() => canonical.promise)),
           )
         : Effect.succeed({ _tag: "Found", turnId: TurnId("turn-2") }),
   });
   try {
-    const first = fixture.deliver(request("delivery-1"));
+    const first = fixture.deliver(request("delivery-1", "thread-1", "30 seconds"));
     await entered.promise;
     await fixture.resetCircuit(request().threadId);
     assert.equal((await fixture.circuitState(request().threadId))._tag,
@@ -137,16 +137,14 @@ test("simultaneous commands cannot both cross the desktop barrier", async () => 
       _tag: "Uncertain",
       diagnostic: { code: "write-ambiguous" },
     }),
-    canonicalEvidence: (_delivery, source) => source === "desktop"
-      ? Effect.sync(() => entered.resolve()).pipe(
-          Effect.zipRight(Effect.promise(() => canonical.promise)),
-        )
-      : Effect.succeed({ _tag: "Found", turnId: TurnId("turn-app") }),
+    canonicalEvidence: () => Effect.sync(() => entered.resolve()).pipe(
+      Effect.zipRight(Effect.promise(() => canonical.promise)),
+    ),
   });
   try {
     const deliveries = [
-      fixture.deliver(request("delivery-a")),
-      fixture.deliver(request("delivery-b")),
+      fixture.deliver(request("delivery-a", "thread-1", "30 seconds")),
+      fixture.deliver(request("delivery-b", "thread-1", "30 seconds")),
     ] as const;
     await entered.promise;
     const appServerResult = await Promise.race(deliveries);
@@ -189,8 +187,8 @@ test("per-task gates do not serialize independent tasks", async () => {
   });
   try {
     const deliveries = [
-      fixture.deliver(request("delivery-a", "thread-a")),
-      fixture.deliver(request("delivery-b", "thread-b")),
+      fixture.deliver(request("delivery-a", "thread-a", "30 seconds")),
+      fixture.deliver(request("delivery-b", "thread-b", "30 seconds")),
     ] as const;
     await bothEntered.promise;
     release.resolve();
@@ -205,16 +203,20 @@ test("per-task gates do not serialize independent tasks", async () => {
 test("interruption converts Reconciling to an open circuit", async () => {
   const entered = latch<void>();
   const fixture = coordinatorFixture({
-    canonicalEvidence: (_delivery, source) => source === "desktop"
-      ? Effect.sync(() => entered.resolve()).pipe(Effect.zipRight(Effect.never))
-      : Effect.succeed({ _tag: "Found", turnId: TurnId("turn-app") }),
+    canonicalEvidence: () => Effect.sync(() => entered.resolve()).pipe(
+      Effect.zipRight(Effect.never),
+    ),
   });
   try {
     const state = await fixture.runtime.runPromise(
       Effect.gen(function* () {
         const coordinator = yield* DeliveryCoordinator;
         const fiber = yield* Effect.fork(
-          coordinator.deliver(request("delivery-interrupted")),
+          coordinator.deliver(request(
+            "delivery-interrupted",
+            "thread-1",
+            "30 seconds",
+          )),
         );
         yield* Effect.promise(() => entered.promise);
         yield* Fiber.interrupt(fiber);
@@ -222,6 +224,68 @@ test("interruption converts Reconciling to an open circuit", async () => {
       }),
     );
     assert.equal(state._tag, "Open");
+  } finally {
+    await fixture.runtime.dispose();
+  }
+});
+
+test("a stalled desktop injection times out and later commands remain usable", async () => {
+  const fixture = coordinatorFixture({
+    desktopReceipt: () => Effect.never,
+    desktopEvidence: () => Effect.succeed(unresolved),
+    canonicalEvidence: () => Effect.succeed(unresolved),
+  });
+  try {
+    const first = await fixture.deliver(request(
+      "delivery-stalled",
+      "thread-1",
+      "10 millis",
+    ));
+    assert.equal(first._tag, "Ambiguous");
+    assert.equal((await fixture.circuitState(request().threadId))._tag, "Open");
+
+    const second = await fixture.deliver(request("delivery-later"));
+    assert.equal(second._tag, "ConfirmedAppServer");
+    assert.deepEqual(fixture.recorder.desktopInjections, ["delivery-stalled"]);
+    assert.deepEqual(fixture.recorder.localDeliveries, ["delivery-later"]);
+  } finally {
+    await fixture.runtime.dispose();
+  }
+});
+
+test("same-task app-server writes are serialized", async () => {
+  const entered = latch<void>();
+  const release = latch<void>();
+  let calls = 0;
+  const fixture = coordinatorFixture({
+    routeState: () => Effect.succeed({ _tag: "Unattached" }),
+    localReceipt: (input) => Effect.sync(() => {
+      calls += 1;
+      if (calls === 1) entered.resolve();
+      return input;
+    }).pipe(
+      Effect.flatMap((current) => calls === 1
+        ? Effect.promise(() => release.promise).pipe(Effect.as(current))
+        : Effect.succeed(current)),
+      Effect.map((current) => ({
+        _tag: "Acknowledged" as const,
+        turnId: TurnId(`turn-${current.deliveryId}`),
+      })),
+    ),
+  });
+  try {
+    const deliveries = [
+      fixture.deliver(request("delivery-a", "thread-1", "30 seconds")),
+      fixture.deliver(request("delivery-b", "thread-1", "30 seconds")),
+    ];
+    await entered.promise;
+    assert.equal(fixture.recorder.localDeliveries.length, 1);
+    release.resolve();
+    const results = await Promise.all(deliveries);
+    assert.equal(results.every((result) =>
+      result._tag === "ConfirmedAppServer"), true);
+    assert.deepEqual(fixture.recorder.localDeliveries.sort(),
+      ["delivery-a", "delivery-b"]);
   } finally {
     await fixture.runtime.dispose();
   }

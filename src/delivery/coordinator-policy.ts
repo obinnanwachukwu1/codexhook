@@ -1,14 +1,10 @@
 import type { TurnId } from "../types.js";
 import type {
   DeliveryEvidence,
-  DeliveryReceipt,
+  DesktopWriteReceipt,
   RoutingDiagnostic,
 } from "./routing-contracts.js";
-
-type DesktopReceipt = Extract<
-  DeliveryReceipt,
-  { readonly _tag: "Acknowledged" | "Uncertain" }
->;
+import { WRITE_AMBIGUOUS } from "./routing-contracts.js";
 
 export type DesktopEvidenceDecision =
   | { readonly _tag: "Confirm"; readonly turnId: TurnId }
@@ -16,7 +12,7 @@ export type DesktopEvidenceDecision =
   | { readonly _tag: "Ambiguous"; readonly diagnostic: RoutingDiagnostic };
 
 export function decideDesktopEvidence(
-  receipt: DesktopReceipt,
+  receipt: DesktopWriteReceipt,
   desktop: DeliveryEvidence,
   canonical: DeliveryEvidence,
 ): DesktopEvidenceDecision {
@@ -31,7 +27,7 @@ export function decideDesktopEvidence(
   return receiptConflict || desktopConflict
     ? {
         _tag: "Ambiguous",
-        diagnostic: { code: "write-ambiguous" },
+        diagnostic: WRITE_AMBIGUOUS,
       }
     : { _tag: "Confirm", turnId: canonical.turnId };
 }

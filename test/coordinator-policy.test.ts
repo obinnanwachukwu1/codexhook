@@ -81,7 +81,7 @@ test("unattached and unhealthy tasks route directly through app-server", async (
 test("canonical evidence drives the outcome and circuit transition", async (t) => {
   const cases = [
     { canonical: found, outcome: "ConfirmedDesktop", circuit: "Closed" },
-    { canonical: absent, outcome: "ConfirmedAppServer", circuit: "Closed" },
+    { canonical: absent, outcome: "ConfirmedAppServer", circuit: "Open" },
     { canonical: unresolved, outcome: "Ambiguous", circuit: "Open" },
   ] as const;
   for (const entry of cases) {
@@ -134,9 +134,16 @@ test("only confirmed non-submission may fall back immediately", async (t) => {
       try {
         const result = await fixture.deliver(request());
         assert.equal(result._tag, entry.expected);
+        if (entry.receipt._tag === "Rejected") {
+          assert.equal(result.proof.desktopReceipt?._tag, "Rejected");
+        }
         assert.equal(fixture.recorder.localDeliveries.length, entry.localWrites);
         assert.deepEqual(fixture.recorder.desktopEvidence, []);
         assert.deepEqual(fixture.recorder.reconciliations, []);
+        assert.equal(
+          (await fixture.circuitState(request().threadId))._tag,
+          "Closed",
+        );
       } finally {
         await fixture.runtime.dispose();
       }
@@ -186,6 +193,12 @@ test("app-server receipts report all four submission truths", async (t) => {
           fixture.recorder.reconciliations.length,
           entry.receipt._tag === "Uncertain" ? 1 : 0,
         );
+        if (result._tag === "Ambiguous") {
+          assert.equal(
+            (await fixture.circuitState(request().threadId))._tag,
+            "Closed",
+          );
+        }
       } finally {
         await fixture.runtime.dispose();
       }
@@ -194,9 +207,10 @@ test("app-server receipts report all four submission truths", async (t) => {
 });
 
 test("fallback proof preserves both canonical observations", async () => {
+  let reconciliation = 0;
   const fixture = coordinatorFixture({
-    canonicalEvidence: (_delivery, source) => Effect.succeed(
-      source === "desktop" ? absent : found,
+    canonicalEvidence: () => Effect.succeed(
+      ++reconciliation === 1 ? absent : found,
     ),
     localReceipt: () => Effect.succeed(uncertain),
   });
@@ -205,6 +219,97 @@ test("fallback proof preserves both canonical observations", async () => {
     assert.equal(result._tag, "ConfirmedAppServer");
     assert.equal(result.proof.canonicalAfterDesktop?._tag, "Absent");
     assert.equal(result.proof.canonicalAfterAppServer?._tag, "Found");
+  } finally {
+    await fixture.runtime.dispose();
+  }
+});
+
+test("cleanly proven desktop absence falls back without opening the circuit", async () => {
+  const fixture = coordinatorFixture({
+    desktopReceipt: () => Effect.succeed(uncertain),
+    desktopEvidence: () => Effect.succeed(unresolved),
+    canonicalEvidence: () => Effect.succeed(absent),
+  });
+  try {
+    assert.equal((await fixture.deliver(request()))._tag, "ConfirmedAppServer");
+    assert.equal(
+      (await fixture.circuitState(request().threadId))._tag,
+      "Closed",
+    );
+  } finally {
+    await fixture.runtime.dispose();
+  }
+});
+
+test("adapter defects become closed delivery outcomes", async (t) => {
+  await t.test("desktop state defect routes through app-server", async () => {
+    const fixture = coordinatorFixture({ routeState: () => Effect.die("boom") });
+    try {
+      assert.equal((await fixture.deliver(request()))._tag,
+        "ConfirmedAppServer");
+    } finally {
+      await fixture.runtime.dispose();
+    }
+  });
+
+  await t.test("desktop write defect is reconciled as uncertain", async () => {
+    const fixture = coordinatorFixture({
+      desktopReceipt: () => Effect.die("boom"),
+      canonicalEvidence: () => Effect.succeed(unresolved),
+    });
+    try {
+      assert.equal((await fixture.deliver(request()))._tag, "Ambiguous");
+      assert.equal(
+        (await fixture.circuitState(request().threadId))._tag,
+        "Open",
+      );
+    } finally {
+      await fixture.runtime.dispose();
+    }
+  });
+
+  await t.test("app-server write defect is reconciled as uncertain", async () => {
+    const fixture = coordinatorFixture({
+      routeState: () => Effect.succeed({ _tag: "Unattached" }),
+      localReceipt: () => Effect.die("boom"),
+      canonicalEvidence: () => Effect.succeed(unresolved),
+    });
+    try {
+      assert.equal((await fixture.deliver(request()))._tag, "Ambiguous");
+      assert.equal(
+        (await fixture.circuitState(request().threadId))._tag,
+        "Closed",
+      );
+    } finally {
+      await fixture.runtime.dispose();
+    }
+  });
+});
+
+test("evidence timeouts are bounded and open the desktop circuit", async () => {
+  const fixture = coordinatorFixture({
+    desktopReceipt: () => Effect.succeed(uncertain),
+    desktopEvidence: () => Effect.never,
+    canonicalEvidence: () => Effect.never,
+  });
+  try {
+    const result = await fixture.deliver(request(
+      "delivery-timeout",
+      "thread-timeout",
+      "10 millis",
+    ));
+    assert.equal(result._tag, "Ambiguous");
+    assert.equal(
+      result._tag === "Ambiguous" && result.diagnostic.code,
+      "timeout",
+    );
+    assert.equal(
+      (await fixture.circuitState(request(
+        "delivery-timeout",
+        "thread-timeout",
+      ).threadId))._tag,
+      "Open",
+    );
   } finally {
     await fixture.runtime.dispose();
   }

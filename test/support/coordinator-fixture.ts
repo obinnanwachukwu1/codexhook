@@ -27,7 +27,7 @@ export interface CoordinatorRecorder {
   readonly desktopInjections: string[];
   readonly localDeliveries: string[];
   readonly logs: Array<Record<string, unknown>>;
-  readonly reconciliations: Array<{ deliveryId: string; source: string }>;
+  readonly reconciliations: string[];
   readonly routeStateQueries: string[];
 }
 
@@ -46,13 +46,13 @@ export interface CoordinatorFixtureOptions {
   ) => Effect.Effect<DeliveryReceipt>;
   readonly canonicalEvidence?: (
     delivery: DeliveryRef,
-    source: "desktop" | "app-server",
   ) => Effect.Effect<DeliveryEvidence>;
 }
 
 export function request(
   deliveryId = "delivery-1",
   threadId = "thread-1",
+  turnTimeout: TurnRequest["turnTimeout"] = "1 second",
 ): TurnRequest {
   return {
     threadId: ThreadId(threadId),
@@ -60,7 +60,7 @@ export function request(
     message: "private webhook body",
     mode: "queue",
     idleTimeout: "1 second",
-    turnTimeout: "1 second",
+    turnTimeout,
   };
 }
 
@@ -114,14 +114,11 @@ export function coordinatorFixture(options: CoordinatorFixtureOptions = {}) {
         }),
       ),
     ),
-    reconcile: (delivery, source) => Effect.sync(() => {
-      recorder.reconciliations.push({
-        deliveryId: delivery.deliveryId,
-        source,
-      });
+    reconcile: (delivery) => Effect.sync(() => {
+      recorder.reconciliations.push(delivery.deliveryId);
     }).pipe(
       Effect.zipRight(
-        options.canonicalEvidence?.(delivery, source) ?? Effect.succeed({
+        options.canonicalEvidence?.(delivery) ?? Effect.succeed({
           _tag: "Found",
           turnId: TurnId("turn-1"),
         }),
@@ -130,7 +127,14 @@ export function coordinatorFixture(options: CoordinatorFixtureOptions = {}) {
   };
   const logger = new Logger(new Writable({
     write(chunk, _encoding, callback) {
-      recorder.logs.push(JSON.parse(String(chunk)));
+      for (const line of String(chunk).split(/\r?\n/)) {
+        if (line.length === 0) continue;
+        try {
+          recorder.logs.push(JSON.parse(line));
+        } catch {
+          recorder.logs.push({ raw: line });
+        }
+      }
       callback();
     },
   }));
