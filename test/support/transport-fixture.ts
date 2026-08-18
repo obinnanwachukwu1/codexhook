@@ -218,6 +218,9 @@ export function fakeProvider(
   );
   const service: TransportProviderService = {
     candidates: Effect.succeed(candidates),
+    appServerCandidates: Effect.succeed(
+      candidates.filter((candidate) => candidate._tag !== "Desktop"),
+    ),
     desktopCandidate: Effect.sync(() => {
       const behavior = scripts.desktop;
       const known =

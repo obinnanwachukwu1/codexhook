@@ -131,3 +131,28 @@ test("rejects a revision gap and requests a fresh snapshot", () => {
   assert.equal(state.takeResyncRequest(), true);
   assert.equal(state.takeResyncRequest(), false);
 });
+
+test("resets stale turns before a reconnected stream is followed", () => {
+  const state = new DesktopThreadState(threadId);
+  state.apply(
+    stateChange({
+      type: "snapshot",
+      revision: 1,
+      conversationState: {
+        turnHistory: {
+          history: {
+            entitiesByKey: {
+              old: { turnId: "turn-old", status: "completed" },
+            },
+          },
+        },
+      },
+    }),
+  );
+
+  state.reset();
+
+  assert.equal(state.ready, false);
+  assert.equal(state.turn("turn-old"), undefined);
+  assert.equal(state.takeResyncRequest(), false);
+});

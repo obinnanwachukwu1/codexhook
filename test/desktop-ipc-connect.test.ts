@@ -5,11 +5,15 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { Cause, Effect, Exit, Option } from "effect";
+import { Cause, Effect, Exit, Fiber, Option } from "effect";
 import { connectDesktop } from "../src/transport/desktop.js";
-import { isAbsentDesktopEndpointError } from "../src/transport/desktop-ipc-client.js";
+import { isAbsentDesktopEndpointError } from "../src/transport/desktop-ipc/index.js";
 import { TransportIncompatible } from "../src/transport/errors.js";
 import type { TransportSpec } from "../src/transport/spec.js";
+import {
+  listen as listenRouter,
+  testEndpoint,
+} from "./support/desktop-ipc-router.js";
 
 function frame(value: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(value));
@@ -86,5 +90,50 @@ test("a malformed Desktop initialize response is incompatible", async () => {
     for (const socket of sockets) socket.destroy();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("interrupting a hanging Desktop initialize releases it promptly", async () => {
+  const endpoint = await testEndpoint();
+  let notifyConnected!: () => void;
+  const connected = new Promise<void>((resolve) => {
+    notifyConnected = resolve;
+  });
+  const router = await listenRouter(endpoint.socketPath, null, undefined, {
+    onConnection: notifyConnected,
+  });
+  const spec = {
+    _tag: "Desktop",
+    id: "desktop",
+    socketPath: endpoint.socketPath,
+    approvals: "decline",
+  } as const satisfies TransportSpec;
+  try {
+    const fiber = Effect.runFork(Effect.scoped(connectDesktop(spec)));
+    await connected;
+    const startedAt = Date.now();
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        Effect.runPromise(Fiber.interrupt(fiber)),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error("Desktop interruption was not bounded")),
+            500,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeout != null) clearTimeout(timeout);
+    }
+    assert.equal(Date.now() - startedAt < 500, true);
+    const closeDeadline = Date.now() + 250;
+    while (router.socketCount() !== 0 && Date.now() < closeDeadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(router.socketCount(), 0);
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
   }
 });

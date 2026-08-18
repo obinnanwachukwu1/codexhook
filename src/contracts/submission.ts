@@ -3,10 +3,15 @@ import type { SanitizedDiagnostic } from "./diagnostics.js";
 
 export type DeliveryRoute = "desktop" | "app-server";
 export type DeliveryOperation = "start" | "steer";
-export type PreSubmissionFailureReason =
+export type NotSubmittedReason =
   | "unavailable"
   | "incompatible"
-  | "pre-submit-failure";
+  | "pre-submit-failure"
+  /** The route replied after transport write but proved no Codex task write. */
+  | "confirmed-not-submitted";
+
+/** @deprecated Use NotSubmittedReason; not every safe non-submission is pre-write. */
+export type PreSubmissionFailureReason = NotSubmittedReason;
 
 export type RouteSubmissionOutcome<
   Route extends DeliveryRoute = DeliveryRoute,
@@ -22,7 +27,7 @@ export type RouteSubmissionOutcome<
       readonly _tag: "NotSubmitted";
       readonly route: Route;
       readonly deliveryId: DeliveryId;
-      readonly reason: PreSubmissionFailureReason;
+      readonly reason: NotSubmittedReason;
       readonly diagnostic: SanitizedDiagnostic;
     }
   | {

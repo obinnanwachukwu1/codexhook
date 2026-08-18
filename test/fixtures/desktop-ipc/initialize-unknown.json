@@ -1,0 +1,7 @@
+{
+  "clientId": "future-client",
+  "protocolVersion": 99,
+  "capabilities": [
+    "startTurn"
+  ]
+}

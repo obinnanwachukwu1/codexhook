@@ -10,7 +10,6 @@ export * from "./daemon.js";
 export * from "./transport/errors.js";
 export * from "./transport/spec.js";
 export * from "./transport/discovery.js";
-export * from "./transport/desktop-ipc-client.js";
 export * from "./transport/rpc.js";
 export * from "./transport/peer.js";
 export * from "./transport/child-peer.js";

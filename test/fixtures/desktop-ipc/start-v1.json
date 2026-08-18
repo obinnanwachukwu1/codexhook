@@ -1,0 +1,13 @@
+{
+  "response": {
+    "result": {
+      "details": {
+        "turn": {
+          "id": "turn-versioned",
+          "status": "inProgress",
+          "error": null
+        }
+      }
+    }
+  }
+}

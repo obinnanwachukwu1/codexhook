@@ -88,6 +88,7 @@ export const PHASE_ONE_DELIVERY_POLICY = Object.freeze({
     "unavailable",
     "incompatible",
     "pre-submit-failure",
+    "confirmed-not-submitted",
   ] as const),
   ambiguousSubmission: "stop-and-reconcile",
   reconciliation: "app-server-observe-only",

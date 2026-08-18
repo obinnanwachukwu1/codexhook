@@ -119,8 +119,13 @@ test("fallback requires a confirmed Desktop non-submission", () => {
     ...notSubmitted,
     route: "app-server",
   };
+  const confirmedNotSubmitted: RouteSubmissionOutcome = {
+    ...notSubmitted,
+    reason: "confirmed-not-submitted",
+  };
 
   assert.equal(mayFallback(notSubmitted), true);
+  assert.equal(mayFallback(confirmedNotSubmitted), true);
   assert.equal(mayFallback(ambiguous), false);
   assert.equal(mayFallback(confirmed), false);
   assert.equal(mayFallback(rejected), false);
@@ -225,6 +230,8 @@ test("root exports retain legacy and contract services", async () => {
   assert.equal("CanonicalAppServerClient" in publicApi, false);
   assert.equal("CanonicalAppServer" in publicApi, false);
   assert.equal("APP_SERVER_COMPATIBILITY" in publicApi, false);
+  assert.equal("DesktopProtocolSession" in publicApi, false);
+  assert.equal("DesktopProtocolError" in publicApi, false);
   assert.equal(typeof publicApi.LocalDeliveryCoordinator, "function");
   assert.equal(Array.isArray(publicApi.DELIVERY_STAGES), true);
 });

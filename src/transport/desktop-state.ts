@@ -1,4 +1,4 @@
-import type { IpcEnvelope } from "./desktop-ipc-client.js";
+import type { DesktopWireEnvelope } from "./desktop-ipc/index.js";
 import type { Turn } from "./protocol.js";
 
 interface Patch {
@@ -23,6 +23,15 @@ export class DesktopThreadState {
 
   get ready(): boolean {
     return this.initialized;
+  }
+
+  reset(): void {
+    this.entityTurns.clear();
+    this.initialized = false;
+    this.resync = false;
+    this.revision = null;
+    this.turns.clear();
+    for (const listener of this.listeners) listener();
   }
 
   takeResyncRequest(): boolean {
@@ -67,7 +76,7 @@ export class DesktopThreadState {
     });
   }
 
-  apply(message: IpcEnvelope): void {
+  apply(message: DesktopWireEnvelope): void {
     if (
       message.method !== "thread-stream-state-changed" ||
       message.params == null ||

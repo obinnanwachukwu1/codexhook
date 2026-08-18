@@ -17,6 +17,8 @@ import type { TransportSpec } from "./spec.js";
 
 export interface TransportProviderService {
   readonly candidates: Effect.Effect<ReadonlyArray<TransportSpec>>;
+  /** Candidate set for the canonical local app-server plane only. */
+  readonly appServerCandidates: Effect.Effect<ReadonlyArray<TransportSpec>>;
   readonly desktopCandidate: typeof desktopVisibilityCandidate;
   readonly connect: (
     spec: TransportSpec,
@@ -41,13 +43,13 @@ export function TransportProviderLive(
         desktopProbe,
         "2 seconds",
       );
+      const appServerCandidates = Effect.promise(() => discoverStandalone());
       return TransportProvider.of({
         desktopCandidate: desktopVisibilityCandidate,
+        appServerCandidates,
         candidates: Effect.gen(function* () {
           const desktop = yield* probeDesktop;
-          const standalone = yield* Effect.promise(() =>
-            discoverStandalone(),
-          );
+          const standalone = yield* appServerCandidates;
           return [...Option.toArray(desktop), ...standalone];
         }),
         connect: (spec) =>

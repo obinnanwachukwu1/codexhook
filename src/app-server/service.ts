@@ -280,7 +280,7 @@ export const CanonicalAppServerLive: Layer.Layer<
 export function acquireCanonicalAppServer(
   provider: Context.Tag.Service<TransportProvider>,
 ): Effect.Effect<CanonicalAppServerService, never, Scope.Scope> {
-  return provider.candidates.pipe(
+  return provider.appServerCandidates.pipe(
     Effect.map(localCandidates),
     Effect.flatMap((candidates) => connectFirstLocal(provider, candidates)),
     Effect.catchAll((failure) => Effect.succeed({
