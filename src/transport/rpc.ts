@@ -1,6 +1,6 @@
 import { Data, Deferred, Duration, Effect, Schema } from "effect";
 import type { TurnId } from "../types.js";
-import type { Turn } from "./protocol.js";
+import type { InitializeResult, Turn } from "./protocol.js";
 import type { TransportSpec } from "./spec.js";
 
 export class RpcNotWritten extends Data.TaggedError("RpcNotWritten")<{
@@ -42,7 +42,12 @@ export interface RpcTicket {
 
 export interface AppServerPeer {
   readonly spec: TransportSpec;
+  /** Present only for a real app-server peer with a compatible initialize reply. */
+  readonly serverInfo: InitializeResult | null;
   readonly isAlive: Effect.Effect<boolean>;
+  readonly onNotification: (
+    listener: (message: WireNotification) => void,
+  ) => () => void;
   readonly notify: (
     method: string,
     params: unknown,
@@ -107,4 +112,9 @@ export interface WireMessage {
     code?: number;
     message?: string;
   };
+}
+
+export interface WireNotification {
+  readonly method: string;
+  readonly params?: unknown;
 }

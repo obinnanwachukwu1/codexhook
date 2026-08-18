@@ -15,3 +15,8 @@ export * from "./transport/child-peer.js";
 export * from "./transport/unix-peer.js";
 export * from "./transport/provider.js";
 export * from "./transport/transport.js";
+export * from "./app-server/compatibility.js";
+export * from "./app-server/schema.js";
+export * from "./app-server/errors.js";
+export * from "./app-server/client.js";
+export * from "./app-server/service.js";

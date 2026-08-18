@@ -46,7 +46,14 @@ export const TurnSteerResult = Schema.Struct({
   turnId: Schema.String,
 });
 
-export const InitializeResult = Schema.Unknown;
+export const InitializeResult = Schema.Struct({
+  userAgent: Schema.optional(Schema.String),
+  codexHome: Schema.optional(Schema.String),
+  platformFamily: Schema.optional(Schema.String),
+  platformOs: Schema.optional(Schema.String),
+});
+
+export type InitializeResult = typeof InitializeResult.Type;
 
 export const INITIALIZE_PARAMS = {
   capabilities: {

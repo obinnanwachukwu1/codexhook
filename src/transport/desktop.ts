@@ -253,7 +253,9 @@ function makePeer(
 
   return {
     spec,
+    serverInfo: null,
     isAlive: Effect.sync(() => client.alive),
+    onNotification: () => () => undefined,
     notify: () => Effect.void,
     prepare,
     submit,
