@@ -40,7 +40,6 @@ export interface UnifiedDaemonOptions {
 
 export interface UnifiedDaemon {
   readonly server: http.Server;
-  readonly lifecycle: ServiceLifecycle;
   readonly stop: (reason?: string) => Promise<void>;
 }
 
@@ -65,7 +64,6 @@ export async function startUnifiedDaemon(
   const lifecycle = new ServiceLifecycle();
   const registry = new WebhookRegistry(databasePath(options.dataDirectory));
   const runtime = makeRuntime(logger);
-  const localTasks = await runtime.runPromise(AppServerTasks);
   let server: http.Server;
   try {
     server = await listen({
@@ -75,7 +73,6 @@ export async function startUnifiedDaemon(
       runtime,
       logger,
       lifecycle,
-      localTaskStatus: localTasks.status,
       ...(options.authenticator == null
         ? {}
         : { authenticator: options.authenticator }),
@@ -129,5 +126,5 @@ export async function startUnifiedDaemon(
     return stopPromise;
   };
 
-  return { server, lifecycle, stop };
+  return { server, stop };
 }

@@ -17,7 +17,6 @@ export interface DaemonHealth {
   version: string;
   desktopIpcAvailable: boolean;
   phase: "starting" | "ready" | "draining" | "stopped" | "unknown";
-  delivery: "available" | "unavailable";
   taskAccessCandidatesFound: boolean;
 }
 
@@ -50,7 +49,6 @@ export async function probeDaemon(
       capabilities?: {
         desktopIpcAvailable?: unknown;
       };
-      delivery?: unknown;
       lifecycle?: { phase?: unknown };
       taskAccess?: { candidatesFound?: unknown } | null;
     };
@@ -71,8 +69,6 @@ export async function probeDaemon(
           body.lifecycle?.phase === "stopped"
             ? body.lifecycle.phase
             : "unknown",
-        delivery:
-          body.delivery === "available" ? "available" : "unavailable",
         taskAccessCandidatesFound:
           body.taskAccess?.candidatesFound === true,
       },

@@ -55,8 +55,6 @@ async function fixture(
     snapshot: Effect.succeed({
       lanes: 0,
       depths: {},
-      accepting: true,
-      pending: 0,
       steerDepth: 0,
     }),
     stopAccepting: Effect.void,
@@ -184,19 +182,17 @@ test("the HTTP server owns the ready transition", async () => {
   assert.equal(lifecycle.snapshot().phase, "ready");
 });
 
-test("health and readiness preserve degraded status codes", async () => {
+test("health preserves the degraded status code", async () => {
   const { origin } = await fixture(
     () => Effect.succeed(Option.none()),
     { transportCandidates: [] },
   );
   const health = await fetch(`${origin}/healthz`);
-  const readiness = await fetch(`${origin}/readyz`);
   const body = await health.json() as {
     status: string;
     delivery: string;
   };
   assert.equal(health.status, 503);
-  assert.equal(readiness.status, 503);
   assert.equal(body.status, "degraded");
   assert.equal(body.delivery, "unavailable");
 });
@@ -227,7 +223,7 @@ test("authorization runs before a webhook capability is claimed", async () => {
   assert.equal((await fetch(url, { method: "POST" })).status, 202);
 });
 
-test("readiness fails during drain without spending webhook tokens", async () => {
+test("health fails during drain without spending webhook tokens", async () => {
   const lifecycle = new ServiceLifecycle();
   lifecycle.ready();
   const { registry, origin } = await fixture(
@@ -245,7 +241,6 @@ test("readiness fails during drain without spending webhook tokens", async () =>
   lifecycle.beginDrain();
 
   assert.equal((await fetch(`${origin}/healthz`)).status, 503);
-  assert.equal((await fetch(`${origin}/readyz`)).status, 503);
   assert.equal(
     (await fetch(`${origin}/w/${hook.token}`, { method: "POST" })).status,
     503,

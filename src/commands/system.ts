@@ -99,30 +99,49 @@ export async function serve(arguments_: string[]): Promise<void> {
   const port = parsePort(values.port ?? String(DEFAULT_PORT));
   const directory = values["data-directory"] ?? dataDirectory();
   const logger = new Logger();
-  const daemon = await startUnifiedDaemon({
-    host,
-    port,
-    dataDirectory: directory,
-    logger,
+  let daemon: Awaited<ReturnType<typeof startUnifiedDaemon>> | undefined;
+  let requestedReason: string | undefined;
+  let requestedError: Error | undefined;
+  let stopping = false;
+  let resolveCompletion!: () => void;
+  let rejectCompletion!: (error: unknown) => void;
+  const completion = new Promise<void>((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
   });
-  await new Promise<void>((resolve, reject) => {
-    const shutdown = (reason: string) => {
-      void daemon.stop(reason).then(resolve, reject);
-    };
-    const onInterrupt = () => shutdown("SIGINT");
-    const onTerminate = () => shutdown("SIGTERM");
-    const onError = (error: Error) => {
-      void daemon.stop("server-error").then(() => reject(error), reject);
-    };
-    process.once("SIGINT", onInterrupt);
-    process.once("SIGTERM", onTerminate);
-    daemon.server.once("error", onError);
-    daemon.server.once("close", () => {
-      process.off("SIGINT", onInterrupt);
-      process.off("SIGTERM", onTerminate);
-      daemon.server.off("error", onError);
+  const requestStop = (reason: string, error?: Error) => {
+    requestedReason ??= reason;
+    requestedError ??= error;
+    if (daemon == null || stopping) return;
+    stopping = true;
+    void daemon.stop(requestedReason).then(
+      () => {
+        if (requestedError == null) resolveCompletion();
+        else rejectCompletion(requestedError);
+      },
+      rejectCompletion,
+    );
+  };
+  const onInterrupt = () => requestStop("SIGINT");
+  const onTerminate = () => requestStop("SIGTERM");
+  const onError = (error: Error) => requestStop("server-error", error);
+  process.once("SIGINT", onInterrupt);
+  process.once("SIGTERM", onTerminate);
+  try {
+    daemon = await startUnifiedDaemon({
+      host,
+      port,
+      dataDirectory: directory,
+      logger,
     });
-  });
+    daemon.server.once("error", onError);
+    if (requestedReason != null) requestStop(requestedReason);
+    await completion;
+  } finally {
+    process.off("SIGINT", onInterrupt);
+    process.off("SIGTERM", onTerminate);
+    daemon?.server.off("error", onError);
+  }
 }
 
 export async function status(arguments_: string[]): Promise<void> {
@@ -147,7 +166,7 @@ export async function status(arguments_: string[]): Promise<void> {
       `codexhook ${daemon.health.state} at ${origin} (${daemon.health.phase}).\n`,
     );
     process.stdout.write(
-      `delivery: ${daemon.health.delivery}; task access candidates: ${daemon.health.taskAccessCandidatesFound ? "found" : "none"}; Desktop IPC: ${daemon.health.desktopIpcAvailable ? "available" : "unavailable"}.\n`,
+      `task access candidates: ${daemon.health.taskAccessCandidatesFound ? "found" : "none"}; Desktop IPC: ${daemon.health.desktopIpcAvailable ? "available" : "unavailable"}.\n`,
     );
   } else {
     process.stdout.write(`codexhook daemon: ${daemon.state}.\n`);

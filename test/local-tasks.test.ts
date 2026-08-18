@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import {
+  appServerTaskStatus,
   AppServerTasks,
   AppServerTasksLive,
 } from "../src/service/local-tasks.js";
@@ -116,6 +117,17 @@ test("local task access reads canonical app-server list and history", async () =
   }
 });
 
+test("task status derives from the transport health snapshot", () => {
+  assert.deepEqual(
+    appServerTaskStatus(["desktop", "daemon", "cli"]),
+    {
+      candidatesFound: true,
+      candidates: ["daemon", "cli"],
+      source: "app-server",
+    },
+  );
+});
+
 test("local task events expose app-server notifications safely", async () => {
   const events: Array<{ method: string; params: unknown }> = [];
   const peer = {
@@ -152,6 +164,34 @@ test("local task events expose app-server notifications safely", async () => {
       method: "thread/started",
       params: { thread: {} },
     }]);
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+test("local task events report an unsupported peer distinctly", async () => {
+  const provider = TransportProvider.of({
+    candidates: Effect.succeed([daemon]),
+    desktopCandidate: Effect.die("not used"),
+    connect: () => Effect.succeed({} as AppServerPeer),
+  } satisfies TransportProviderService);
+  const runtime = ManagedRuntime.make(
+    AppServerTasksLive().pipe(
+      Layer.provide(Layer.succeed(TransportProvider, provider)),
+    ),
+  );
+  try {
+    const result = await runtime.runPromise(
+      Effect.either(
+        Effect.flatMap(AppServerTasks, (access) =>
+          access.events(() => undefined),
+        ),
+      ),
+    );
+    assert.equal(result._tag, "Left");
+    if (result._tag === "Left") {
+      assert.equal(result.left.reason, "unsupported");
+    }
   } finally {
     await runtime.dispose();
   }

@@ -1,5 +1,5 @@
 import { Context, Data, Duration, Effect, Layer, Schema, Scope } from "effect";
-import type { ThreadId } from "../types.js";
+import type { ThreadId, TransportId } from "../types.js";
 import type { AppServerNotification, AppServerPeer } from "../transport/rpc.js";
 import { TransportProvider } from "../transport/provider.js";
 import type { TransportSpec } from "../transport/spec.js";
@@ -29,9 +29,9 @@ const TaskList = Schema.Struct({
 
 const TaskRead = Schema.Struct({ thread: TaskWithTurns });
 
-// Empty sourceKinds uses app-server's interactive-only default. Enumerating
-// the v2 source kinds keeps this machine-wide reader inclusive of CLI, app,
-// exec, and sub-agent tasks.
+// Generated from the complete app-server v2 ThreadSourceKind schema in Codex
+// CLI 0.147.0. Omitting this field excludes non-interactive tasks, so an older
+// incompatible server must fail visibly instead of returning a partial store.
 const ALL_TASK_SOURCES = [
   "cli",
   "vscode",
@@ -79,10 +79,11 @@ export interface AppServerTaskStatus {
 
 export class AppServerTaskFailure extends Data.TaggedError(
   "AppServerTaskFailure",
-)<{ readonly reason: "unavailable" | "request-failed" }> {}
+)<{
+  readonly reason: "unavailable" | "request-failed" | "unsupported";
+}> {}
 
 export interface AppServerTaskService {
-  readonly status: Effect.Effect<AppServerTaskStatus>;
   readonly list: (options?: {
     readonly cursor?: string | undefined;
     readonly limit?: number | undefined;
@@ -93,7 +94,7 @@ export interface AppServerTaskService {
   ) => Effect.Effect<AppServerTaskHistory, AppServerTaskFailure>;
   readonly events: (
     listener: (event: AppServerTaskEvent) => void,
-  ) => Effect.Effect<never, AppServerTaskFailure, Scope.Scope>;
+  ) => Effect.Effect<never, AppServerTaskFailure>;
 }
 
 export class AppServerTasks extends Context.Tag("codexhook/AppServerTasks")<
@@ -127,8 +128,30 @@ function canonicalCandidates(
     );
 }
 
+export function appServerTaskStatus(
+  candidates: ReadonlyArray<TransportId>,
+): AppServerTaskStatus {
+  const available = candidates.filter(
+    (candidate) =>
+      candidate === "daemon" ||
+      candidate === "app-bundled" ||
+      candidate === "cli",
+  );
+  return {
+    candidatesFound: available.length > 0,
+    candidates: available,
+    source: "app-server",
+  };
+}
+
 function failure(reason: AppServerTaskFailure["reason"]): AppServerTaskFailure {
   return new AppServerTaskFailure({ reason });
+}
+
+function operationFailure(error: unknown): AppServerTaskFailure {
+  return error instanceof AppServerTaskFailure
+    ? error
+    : failure("request-failed");
 }
 
 export function AppServerTasksLive(): Layer.Layer<
@@ -162,14 +185,13 @@ export function AppServerTasksLive(): Layer.Layer<
                   return Effect.fail(failure("unavailable"));
                 }
                 return provider.connect(candidate).pipe(
-                  Effect.mapError(() => failure("unavailable")),
                   Effect.catchAll(() => connect(remaining.slice(1))),
                 );
               };
               return connect(available).pipe(
                 Effect.flatMap((peer) =>
                   operation(peer).pipe(
-                    Effect.mapError(() => failure("request-failed")),
+                    Effect.mapError(operationFailure),
                   ),
                 ),
               );
@@ -217,20 +239,13 @@ export function AppServerTasksLive(): Layer.Layer<
       const events: AppServerTaskService["events"] = (listener) =>
         withPeer((peer) =>
           peer.observe == null
-            ? Effect.fail(new Error("notifications unsupported"))
+            ? Effect.fail(failure("unsupported"))
             : peer.observe((notification: AppServerNotification) => {
                 listener(notification);
               }),
         );
 
-      const status = candidates.pipe(
-        Effect.map((available) => ({
-          candidatesFound: available.length > 0,
-          candidates: available.map((candidate) => candidate.id),
-          source: "app-server" as const,
-        })),
-      );
-      return AppServerTasks.of({ status, list, history, events });
+      return AppServerTasks.of({ list, history, events });
     }),
   );
 }

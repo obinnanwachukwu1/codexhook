@@ -13,7 +13,6 @@ import {
   HTTP_REQUEST_TIMEOUT_MS,
   MAX_BODY_BYTES,
   MAX_HTTP_CONNECTIONS,
-  MAX_HTTP_REQUESTS_PER_SOCKET,
 } from "./config.js";
 import { Delivery } from "./delivery/delivery.js";
 import { Logger } from "./logger.js";
@@ -28,7 +27,7 @@ import {
 import {
   ServiceLifecycle,
 } from "./service/lifecycle.js";
-import type { AppServerTaskStatus } from "./service/local-tasks.js";
+import { appServerTaskStatus } from "./service/local-tasks.js";
 
 export interface CodexhookServerOptions {
   host: string;
@@ -39,7 +38,6 @@ export interface CodexhookServerOptions {
   rateLimiter?: ThreadRateLimiter;
   lifecycle?: ServiceLifecycle;
   authenticator?: RequestAuthenticator;
-  localTaskStatus?: Effect.Effect<AppServerTaskStatus>;
 }
 
 function json(
@@ -96,8 +94,7 @@ export function createCodexhookServer(
 
       const healthRoute =
         request.method === "GET" &&
-        (requestUrl.pathname.endsWith("/healthz") ||
-          requestUrl.pathname.endsWith("/readyz"));
+        requestUrl.pathname.endsWith("/healthz");
       if (healthRoute) {
         if (!(await authenticator.authorize(request, { kind: "health" }))) {
           json(response, 401, { error: "unauthorized" });
@@ -115,9 +112,6 @@ export function createCodexhookServer(
             ),
           }),
         );
-        const tasks = options.localTaskStatus == null
-          ? null
-          : await options.runtime.runPromise(options.localTaskStatus);
         const lifecycleState = lifecycle.snapshot();
         const available =
           lifecycleState.accepting && state.transport.candidates.length > 0;
@@ -133,7 +127,7 @@ export function createCodexhookServer(
           candidates: state.transport.candidates,
           queuedThreads: state.delivery.lanes,
           lifecycle: lifecycleState,
-          taskAccess: tasks,
+          taskAccess: appServerTaskStatus(state.transport.candidates),
         });
         return;
       }
@@ -244,7 +238,6 @@ export function createCodexhookServer(
   server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
   server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
   server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
-  server.maxRequestsPerSocket = MAX_HTTP_REQUESTS_PER_SOCKET;
   server.once("listening", () => {
     if (lifecycle.snapshot().phase === "starting") lifecycle.ready();
   });

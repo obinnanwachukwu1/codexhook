@@ -41,8 +41,6 @@ interface Lane {
 export interface DeliverySnapshot {
   readonly lanes: number;
   readonly depths: Readonly<Record<string, number>>;
-  readonly accepting: boolean;
-  readonly pending: number;
   readonly steerDepth: number;
 }
 
@@ -203,20 +201,24 @@ export function DeliveryLive(
           if (job.request.mode !== "steer") {
             return yield* offer(job.request.threadId, job);
           }
-          const accepted = yield* reserveSteer;
-          if (!accepted) return false;
-          yield* Effect.forkIn(
-            runJob(job).pipe(
-              Effect.ensuring(
-                SynchronizedRef.update(control, (current) => ({
-                  ...current,
-                  steerPending: Math.max(0, current.steerPending - 1),
-                })),
-              ),
-            ),
-            layerScope,
+          return yield* Effect.uninterruptible(
+            Effect.gen(function* () {
+              const accepted = yield* reserveSteer;
+              if (!accepted) return false;
+              yield* Effect.forkIn(
+                runJob(job).pipe(
+                  Effect.ensuring(
+                    SynchronizedRef.update(control, (current) => ({
+                      ...current,
+                      steerPending: Math.max(0, current.steerPending - 1),
+                    })),
+                  ),
+                ),
+                layerScope,
+              );
+              return true;
+            }),
           );
-          return true;
         });
 
       const submit: DeliveryService["submit"] = (hook, body) =>
@@ -249,13 +251,6 @@ export function DeliveryLive(
               lane.pending,
             ]),
           ),
-          accepting: state.accepting,
-          pending:
-            state.steerPending +
-            [...HashMap.values(map)].reduce(
-              (total, lane) => total + lane.pending,
-              0,
-            ),
           steerDepth: state.steerPending,
         })),
       );

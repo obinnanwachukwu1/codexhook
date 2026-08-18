@@ -12,7 +12,6 @@ export const MAX_HTTP_CONNECTIONS = 128;
 export const HTTP_HEADERS_TIMEOUT_MS = 10_000;
 export const HTTP_REQUEST_TIMEOUT_MS = 30_000;
 export const HTTP_KEEP_ALIVE_TIMEOUT_MS = 5_000;
-export const MAX_HTTP_REQUESTS_PER_SOCKET = 100;
 export const SHUTDOWN_GRACE_MS = 15_000;
 
 export function dataDirectory(environment = process.env): string {

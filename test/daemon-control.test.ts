@@ -42,7 +42,6 @@ test("recognizes an available codexhook listener", async () => {
       version: "1.2.3",
       desktopIpcAvailable: true,
       phase: "unknown",
-      delivery: "unavailable",
       taskAccessCandidatesFound: false,
     },
   });
