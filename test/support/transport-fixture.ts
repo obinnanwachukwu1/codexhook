@@ -99,7 +99,9 @@ function fakePeer(
   let sequence = 0;
   return {
     spec,
+    serverInfo: null,
     isAlive: Effect.sync(() => alive),
+    onNotification: () => () => undefined,
     notify: () => Effect.void,
     prepare: (method) =>
       Effect.sync(() => ({

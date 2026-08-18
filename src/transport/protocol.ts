@@ -46,6 +46,17 @@ export const TurnSteerResult = Schema.Struct({
   turnId: Schema.String,
 });
 
+export const AppServerInfo = Schema.Struct({
+  userAgent: Schema.String,
+  codexHome: Schema.String,
+  platformFamily: Schema.String,
+  platformOs: Schema.String,
+});
+
+export type AppServerInfo = typeof AppServerInfo.Type;
+
+// The legacy delivery transport accepts app-server versions that predate
+// scope metadata. The canonical plane validates metadata independently.
 export const InitializeResult = Schema.Unknown;
 
 export const INITIALIZE_PARAMS = {

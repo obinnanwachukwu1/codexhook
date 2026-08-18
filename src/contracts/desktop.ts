@@ -1,4 +1,4 @@
-import type { Effect, Scope } from "effect";
+import type { Duration, Effect, Scope } from "effect";
 import type {
   DeliveryId,
   TurnId,
@@ -22,6 +22,8 @@ interface DesktopSubmission {
   readonly task: LocalTaskRef;
   readonly deliveryId: DeliveryId;
   readonly message: string;
+  /** Bounds the post-submit reply wait inside the possible-write region. */
+  readonly replyTimeout: Duration.Duration;
 }
 
 /** A steer is fenced to the active turn observed by `follow`. */

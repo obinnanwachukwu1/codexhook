@@ -1,4 +1,4 @@
-import { Context, type Effect, type Stream } from "effect";
+import { Context, type Duration, type Effect, type Stream } from "effect";
 import type {
   DeliveryId,
   DeliveryMode,
@@ -57,6 +57,8 @@ export interface LocalSubmissionRequest {
   readonly deliveryId: DeliveryId;
   readonly mode: DeliveryMode;
   readonly message: string;
+  /** Bounds the post-submit reply wait inside the possible-write region. */
+  readonly replyTimeout: Duration.Duration;
 }
 
 export interface LocalCodexFailure {

@@ -253,7 +253,12 @@ function makePeer(
 
   return {
     spec,
+    serverInfo: null,
     isAlive: Effect.sync(() => client.alive),
+    onNotification: (_listener, onClose) => {
+      queueMicrotask(() => onClose?.());
+      return () => undefined;
+    },
     notify: () => Effect.void,
     prepare,
     submit,

@@ -221,6 +221,10 @@ test("root exports retain legacy and contract services", async () => {
   assert.equal(typeof publicApi.Delivery, "function");
   assert.equal(typeof publicApi.CodexTransport, "function");
   assert.equal(typeof publicApi.LocalCodex, "function");
+  assert.equal(typeof publicApi.LocalCodexLive, "object");
+  assert.equal("CanonicalAppServerClient" in publicApi, false);
+  assert.equal("CanonicalAppServer" in publicApi, false);
+  assert.equal("APP_SERVER_COMPATIBILITY" in publicApi, false);
   assert.equal(typeof publicApi.LocalDeliveryCoordinator, "function");
   assert.equal(Array.isArray(publicApi.DELIVERY_STAGES), true);
 });

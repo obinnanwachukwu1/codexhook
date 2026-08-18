@@ -47,12 +47,15 @@ stable seams before the runtime cutover.
 10. All transports decline approval requests. These contracts do not broaden
     the authority of a webhook-delivered message.
 11. The coordinator owns one scoped Desktop session per delivery. Sessions are
-    not shared across concurrent task lanes. The possible-write region is
-    uninterruptible until every failure, defect, or pending interruption is
-    classified; an uncertain write becomes `Ambiguous`.
+    not shared across concurrent task lanes. It does not externally cancel a
+    possible-write region: each adapter uses its explicit reply timeout and
+    classifies every reply failure, defect, or internal interruption. An
+    uncertain write becomes `Ambiguous`.
 12. `idleTimeout` bounds each individual wait (Desktop follow, submission
     acknowledgement, or reconciliation match). `turnTimeout` bounds the whole
-    delivery, including reconciliation.
+    delivery, including reconciliation. The coordinator derives each route's
+    `replyTimeout` from the remaining delivery budget so an uninterruptible
+    possible-write wait remains internally bounded.
 
 ## Contract ownership
 
