@@ -57,7 +57,10 @@ test("serializes commands per task and rejects a racing second start", async () 
   assert.equal(protocol.injections.length, 1);
   release();
   assert.equal((await first)._tag, "Confirmed");
-  assert.equal((await second)._tag, "NotSubmitted");
+  const secondResult = await second;
+  assert.equal(secondResult._tag, "NotSubmitted");
+  if (secondResult._tag !== "NotSubmitted") return;
+  assert.equal(secondResult.submissionReason, "task-busy");
   assert.equal(protocol.injections.length, 1);
 });
 
@@ -76,6 +79,27 @@ test("validates the synchronized active turn before steering", async () => {
     input: [],
   });
   assert.equal(result._tag, "NotSubmitted");
+  assert.equal(protocol.injections.length, 0);
+});
+
+test("classifies multiple-active steer as non-fallback task activity", async () => {
+  const protocol = new FakeDesktopProtocol();
+  protocol.setSnapshot("thread-1", 4, {
+    first: { turnId: "turn-1", status: "inProgress", error: null },
+    second: { turnId: "turn-2", status: "inProgress", error: null },
+  });
+  const attachment = new DesktopAttachment(protocol);
+  await attachment.resume("thread-1");
+  const result = await attachment.inject({
+    kind: "steer",
+    threadId: "thread-1",
+    expectedTurnId: "turn-1",
+    clientUserMessageId: "delivery-2",
+    input: [],
+  });
+  assert.equal(result._tag, "NotSubmitted");
+  if (result._tag !== "NotSubmitted") return;
+  assert.equal(result.submissionReason, "task-busy");
   assert.equal(protocol.injections.length, 0);
 });
 

@@ -201,10 +201,16 @@ function desktopSession(
         const active = state.turns.filter(
           (turn) => turn.status === "inProgress",
         );
-        if (active.length > 1) throw new Error("multiple-active-turns");
+        if (active.length > 1) {
+          return { task, activity: "multiple-active" as const, activeTurnId: null };
+        }
+        if (active[0] == null) {
+          return { task, activity: "idle" as const, activeTurnId: null };
+        }
         return {
           task,
-          activeTurnId: active[0] == null ? null : TurnId(active[0].id),
+          activity: "active" as const,
+          activeTurnId: TurnId(active[0].id),
         };
       },
       catch: () => failure("desktop-not-following", "follow-desktop"),
@@ -269,8 +275,8 @@ export function desktopProtocolService(
         }), Effect.catchAll((cause) => Effect.succeed(unavailableFrom(cause)))),
       })),
       Effect.catchAll(() => Effect.succeed({
-        status: "incompatible" as const,
-        diagnostic: diagnostic("desktop-incompatible", "probe-desktop"),
+        status: "unavailable" as const,
+        diagnostic: diagnostic("desktop-unavailable", "probe-desktop"),
       })),
     ),
     connect: provider.desktopCandidate.pipe(

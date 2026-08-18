@@ -1,6 +1,8 @@
 import type http from "node:http";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { LocalCodexLive } from "./app-server/local-codex.js";
+import { LocalDeliveryCoordinator } from "./contracts/delivery.js";
+import { Desktop } from "./contracts/desktop.js";
 import {
   DEFAULT_HOST,
   SHUTDOWN_GRACE_MS,
@@ -8,6 +10,7 @@ import {
 } from "./config.js";
 import { Delivery, DeliveryLive } from "./delivery/delivery.js";
 import { LocalCodex } from "./contracts/local-codex.js";
+import { LocalDeliveryCoordinatorLive } from "./delivery/coordinator.js";
 import { Logger } from "./logger.js";
 import { WebhookRegistry } from "./registry.js";
 import {
@@ -17,13 +20,10 @@ import {
 import type { RequestAuthenticator } from "./service/auth.js";
 import { ServiceLifecycle } from "./service/lifecycle.js";
 import { TransportProviderLive } from "./transport/provider.js";
-import {
-  CodexTransport,
-  makeCodexTransportLive,
-} from "./transport/transport.js";
+import { DesktopProtocolLive } from "./transport/desktop-contract.js";
 
 type DaemonRuntime = ManagedRuntime.ManagedRuntime<
-  Delivery | CodexTransport | LocalCodex,
+  Delivery | LocalCodex | Desktop | LocalDeliveryCoordinator,
   never
 >;
 
@@ -42,14 +42,16 @@ export interface UnifiedDaemon {
 }
 
 function makeRuntime(logger: Logger): DaemonRuntime {
-  const transport = makeCodexTransportLive(logger);
-  const deliveryAndTransport = DeliveryLive(logger).pipe(
-    Layer.provideMerge(transport),
+  const planes = Layer.merge(LocalCodexLive, DesktopProtocolLive).pipe(
+    Layer.provide(TransportProviderLive(logger)),
   );
-  const services = Layer.merge(
-    deliveryAndTransport,
-    LocalCodexLive,
-  ).pipe(Layer.provide(TransportProviderLive(logger)));
+  const coordinator = LocalDeliveryCoordinatorLive.pipe(
+    Layer.provide(planes),
+  );
+  const delivery = DeliveryLive(logger).pipe(
+    Layer.provide(Layer.merge(planes, coordinator)),
+  );
+  const services = Layer.mergeAll(planes, coordinator, delivery);
   return ManagedRuntime.make(services);
 }
 
@@ -68,9 +70,12 @@ export async function startUnifiedDaemon(
     // readiness. ManagedRuntime memoizes these layers for later requests.
     await runtime.runPromise(Effect.all({
       delivery: Effect.flatMap(Delivery, (service) => service.snapshot),
-      transport: Effect.flatMap(CodexTransport, (service) => service.status),
       taskAccess: Effect.flatMap(
         LocalCodex,
+        (service) => service.availability,
+      ),
+      desktopAccess: Effect.flatMap(
+        Desktop,
         (service) => service.availability,
       ),
     }));

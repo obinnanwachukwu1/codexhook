@@ -15,11 +15,12 @@ import {
   MAX_HTTP_CONNECTIONS,
 } from "./config.js";
 import { Delivery } from "./delivery/delivery.js";
+import { LocalDeliveryCoordinator } from "./contracts/delivery.js";
+import { Desktop } from "./contracts/desktop.js";
 import { LocalCodex } from "./contracts/local-codex.js";
 import { Logger } from "./logger.js";
 import { ThreadRateLimiter } from "./rate-limit.js";
 import { WebhookRegistry } from "./registry.js";
-import { CodexTransport } from "./transport/transport.js";
 import { VERSION } from "./version.js";
 import {
   noAdditionalAuthentication,
@@ -34,7 +35,7 @@ export interface CodexhookServerOptions {
   port: number;
   registry: WebhookRegistry;
   runtime: ManagedRuntime.ManagedRuntime<
-    Delivery | CodexTransport | LocalCodex,
+    Delivery | LocalCodex | Desktop | LocalDeliveryCoordinator,
     never
   >;
   logger?: Logger;
@@ -105,10 +106,6 @@ export function createCodexhookServer(
         }
         const state = await options.runtime.runPromise(
           Effect.all({
-            transport: Effect.flatMap(
-              CodexTransport,
-              (service) => service.status,
-            ),
             delivery: Effect.flatMap(
               Delivery,
               (service) => service.snapshot,
@@ -117,21 +114,31 @@ export function createCodexhookServer(
               LocalCodex,
               (service) => service.availability,
             ),
+            desktopAccess: Effect.flatMap(
+              Desktop,
+              (service) => service.availability,
+            ),
           }),
         );
         const lifecycleState = lifecycle.snapshot();
-        const available =
-          lifecycleState.accepting && state.transport.candidates.length > 0;
+        const available = lifecycleState.accepting &&
+          state.taskAccess.status === "available";
+        const desktopIpcAvailable =
+          state.desktopAccess.status === "available";
         json(response, available ? 200 : 503, {
           service: "codexhook",
           version: VERSION,
           status: available ? "ok" : "degraded",
           delivery: available ? "available" : "unavailable",
           capabilities: {
-            desktopIpcAvailable:
-              state.transport.desktopIpcAvailable,
+            desktopIpcAvailable,
           },
-          candidates: state.transport.candidates,
+          candidates: [
+            ...(desktopIpcAvailable ? ["desktop"] : []),
+            ...(state.taskAccess.status === "available"
+              ? ["app-server"]
+              : []),
+          ],
           queuedThreads: state.delivery.lanes,
           lifecycle: lifecycleState,
           taskAccess: { status: state.taskAccess.status },

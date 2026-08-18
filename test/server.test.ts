@@ -16,6 +16,11 @@ import {
   LocalCodex,
   type LocalCodexService,
 } from "../src/contracts/local-codex.js";
+import {
+  LocalDeliveryCoordinator,
+  PHASE_ONE_DELIVERY_POLICY,
+} from "../src/contracts/delivery.js";
+import { Desktop, type DesktopProtocol } from "../src/contracts/desktop.js";
 import { sanitizeDiagnostic } from "../src/contracts/diagnostics.js";
 import {
   Delivery,
@@ -26,12 +31,7 @@ import {
   closeCodexhookServer,
   createCodexhookServer,
 } from "../src/server.js";
-import {
-  CodexTransport,
-  type CodexTransportService,
-} from "../src/transport/transport.js";
 import { DeliveryId } from "../src/types.js";
-import type { TransportId } from "../src/types.js";
 import type { RequestAuthenticator } from "../src/service/auth.js";
 import { ServiceLifecycle } from "../src/service/lifecycle.js";
 
@@ -46,7 +46,7 @@ async function fixture(
   options: {
     authenticator?: RequestAuthenticator;
     lifecycle?: ServiceLifecycle;
-    transportCandidates?: ReadonlyArray<TransportId>;
+    desktopAccessStatus?: "available" | "unavailable" | "incompatible";
     taskAccessStatus?: "available" | "unavailable" | "incompatible";
   } = {},
 ): Promise<{
@@ -57,7 +57,7 @@ async function fixture(
   const directory = mkdtempSync(path.join(tmpdir(), "codexhook-server-"));
   const registry = new WebhookRegistry(path.join(directory, "hooks.sqlite"));
   const {
-    transportCandidates = ["cli"],
+    desktopAccessStatus = "unavailable",
     taskAccessStatus = "available",
     ...serverOptions
   } = options;
@@ -71,13 +71,6 @@ async function fixture(
     stopAccepting: Effect.void,
     drain: () => Effect.succeed(true),
   });
-  const transport = CodexTransport.of({
-    deliver: () => Effect.die("not used by the HTTP test"),
-    status: Effect.succeed({
-      candidates: transportCandidates,
-      desktopIpcAvailable: false,
-    }),
-  } satisfies CodexTransportService);
   const localCodex = LocalCodex.of({
     availability: Effect.succeed(taskAccessStatus === "available"
       ? {
@@ -106,11 +99,40 @@ async function fixture(
     events: () => Stream.die("not used by the HTTP test"),
     submit: () => Effect.die("not used by the HTTP test"),
   } satisfies LocalCodexService);
+  const desktop = Desktop.of({
+    availability: Effect.succeed(desktopAccessStatus === "available"
+      ? {
+          status: "available" as const,
+          compatibility: {
+            status: "compatible" as const,
+            plane: "desktop-ipc" as const,
+            major: 1,
+            revision: 1,
+            features: [],
+          },
+        }
+      : {
+          status: desktopAccessStatus,
+          diagnostic: sanitizeDiagnostic({
+            code: desktopAccessStatus === "incompatible"
+              ? "desktop-incompatible"
+              : "desktop-unavailable",
+            stage: "probe-desktop",
+            route: "desktop",
+          }),
+        }),
+    connect: Effect.die("not used by the HTTP test"),
+  } satisfies DesktopProtocol);
+  const coordinator = LocalDeliveryCoordinator.of({
+    policy: PHASE_ONE_DELIVERY_POLICY,
+    deliver: () => Effect.die("not used by the HTTP test"),
+  });
   const runtime = ManagedRuntime.make(
     Layer.mergeAll(
       Layer.succeed(Delivery, delivery),
-      Layer.succeed(CodexTransport, transport),
       Layer.succeed(LocalCodex, localCodex),
+      Layer.succeed(Desktop, desktop),
+      Layer.succeed(LocalDeliveryCoordinator, coordinator),
     ),
   );
   const server = createCodexhookServer({
@@ -250,7 +272,7 @@ test("the HTTP server owns the ready transition", async () => {
 test("health preserves the degraded status code", async () => {
   const { origin } = await fixture(
     () => Effect.succeed(Option.none()),
-    { transportCandidates: [] },
+    { taskAccessStatus: "unavailable" },
   );
   const health = await fetch(`${origin}/healthz`);
   const body = await health.json() as {

@@ -19,6 +19,7 @@ import {
   withDesktopTimeout,
 } from "./desktop-errors.js";
 import { DesktopProtocolError } from "./desktop-ipc/index.js";
+import type { NotSubmittedReason } from "../contracts/submission.js";
 
 interface DesktopAttachmentOptions {
   readonly followTimeoutMs?: number;
@@ -72,7 +73,15 @@ export class DesktopAttachment {
         return this.notSubmitted(state, desktopErrorMessage(cause));
       }
       const invalid = this.validationFailure(command, state);
-      if (invalid != null) return this.notSubmitted(state, invalid);
+      if (invalid != null) {
+        const taskBusy = state.hasMultipleActiveTurns() ||
+          (command.kind === "start" && state.activeTurn() != null);
+        return this.notSubmitted(
+          state,
+          invalid,
+          taskBusy ? "task-busy" : "pre-submit-failure",
+        );
+      }
       const baseline = captureDesktopProof(command, state);
       state.setInjection("injecting");
 
@@ -303,8 +312,7 @@ export class DesktopAttachment {
   private notSubmitted(
     state: DesktopThreadState,
     reason: string,
-    submissionReason: "confirmed-not-submitted" | "pre-submit-failure" =
-      "pre-submit-failure",
+    submissionReason: NotSubmittedReason = "pre-submit-failure",
   ) {
     state.setInjection("idle");
     return {

@@ -32,10 +32,14 @@ export type DesktopSubmissionRequest = DesktopSubmission & (
   | { readonly mode: "steer"; readonly expectedTurnId: TurnId }
 );
 
-export interface DesktopTaskObservation {
+export type DesktopTaskObservation = {
   readonly task: LocalTaskRef;
-  readonly activeTurnId: TurnId | null;
-}
+} & (
+  | { readonly activity: "idle"; readonly activeTurnId: null }
+  | { readonly activity: "active"; readonly activeTurnId: TurnId }
+  /** Multiple active turns are observable activity but cannot safely fence steer. */
+  | { readonly activity: "multiple-active"; readonly activeTurnId: null }
+);
 
 /**
  * A scoped, initialized Desktop IPC connection owned by one delivery. The

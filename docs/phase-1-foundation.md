@@ -6,9 +6,9 @@ the CLI. It does not create a second daemon, remote store, copied conversation
 database, or alternate task namespace.
 
 The contracts in `src/contracts/` describe the boundary between discovery,
-Desktop IPC, routing, and diagnostics. They are intentionally independent of
-the current `CodexTransport` implementation so subsystem work can land behind
-stable seams before the runtime cutover.
+Desktop IPC, routing, and diagnostics. The unified daemon now runs through
+these canonical services; the older `CodexTransport` remains exported only as
+a transitional compatibility surface for callers that have not migrated.
 
 ## Authority and routing invariants
 
@@ -70,6 +70,8 @@ stable seams before the runtime cutover.
 
 ## Integration sequence
 
+The Phase 1 runtime cutover follows this completed order:
+
 1. Implement the app-server adapter behind `LocalCodexService` without
    changing public HTTP behavior. Centralize the sole `LocalTaskRef` branding
    assertion in one private constructor used by `resolveTask` and `listTasks`.
@@ -80,9 +82,9 @@ stable seams before the runtime cutover.
 4. Adapt the current per-task delivery lanes to call the coordinator. Preserve
    the `DeliveryService.submit` acceptance contract until a separately planned
    public API change.
-5. Retire legacy `CodexTransport`, `TurnOutcome`, transport fallback, and
-   Desktop visibility code only after parity tests cover all five outcome
-   classes and the existing cross-platform suites remain green.
+5. Keep legacy `CodexTransport`, `TurnOutcome`, transport fallback, and Desktop
+   visibility code outside the active daemon path until downstream callers are
+   migrated; remove them in a separate compatibility cleanup.
 
 ## Expected cherry-pick seams
 

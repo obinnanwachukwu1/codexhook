@@ -2,27 +2,33 @@ import assert from "node:assert/strict";
 import { Writable } from "node:stream";
 import test from "node:test";
 import {
-  Effect,
   Deferred,
+  Effect,
   Layer,
   ManagedRuntime,
   Option,
+  Stream,
 } from "effect";
 import {
-  Delivery,
-  DeliveryLive,
-} from "../src/delivery/delivery.js";
+  LocalDeliveryCoordinator,
+  PHASE_ONE_DELIVERY_POLICY,
+  type DeliveryCoordinator,
+  type DeliveryOutcome,
+} from "../src/contracts/delivery.js";
+import {
+  LocalCodex,
+  type LocalCodexService,
+  type LocalTaskRef,
+} from "../src/contracts/local-codex.js";
+import { sanitizeDiagnostic } from "../src/contracts/diagnostics.js";
+import { Delivery, DeliveryLive } from "../src/delivery/delivery.js";
 import { Logger } from "../src/logger.js";
 import {
+  DeliveryId,
   ThreadId,
   TurnId,
   type WebhookRecord,
 } from "../src/types.js";
-import { DesktopVisibilityUnconfirmed } from "../src/transport/errors.js";
-import {
-  CodexTransport,
-  type CodexTransportService,
-} from "../src/transport/transport.js";
 
 function memoryLogger(): {
   readonly entries: Array<Record<string, unknown>>;
@@ -31,208 +37,224 @@ function memoryLogger(): {
   const entries: Array<Record<string, unknown>> = [];
   return {
     entries,
-    logger: new Logger(
-      new Writable({
-        write(chunk, _encoding, callback) {
-          entries.push(JSON.parse(String(chunk)));
-          callback();
-        },
-      }),
-    ),
+    logger: new Logger(new Writable({
+      write(chunk, _encoding, callback) {
+        entries.push(JSON.parse(String(chunk)));
+        callback();
+      },
+    })),
   };
 }
 
-async function waitFor(
-  predicate: () => boolean,
-  timeoutMs = 1_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 1_000;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error("log event timed out");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
 
-test("does not log delivery_finished when Desktop visibility is unconfirmed", async () => {
-  const { entries, logger } = memoryLogger();
-  const threadId = ThreadId("thread-1");
-  const turnId = TurnId("turn-1");
-  const transport = CodexTransport.of({
-    deliver: () =>
-      Effect.fail(
-        new DesktopVisibilityUnconfirmed({
-          threadId,
-          turnId,
-          submittedTransport: "daemon",
-          detail: "Desktop thread state timed out",
-        }),
-      ),
-    status: Effect.succeed({
-      candidates: ["desktop", "daemon"],
-      desktopIpcAvailable: true,
-    }),
-  } satisfies CodexTransportService);
-  const runtime = ManagedRuntime.make(
-    DeliveryLive(logger).pipe(
-      Layer.provide(Layer.succeed(CodexTransport, transport)),
+function localTask(threadId: ThreadId): LocalTaskRef {
+  return { threadId, origin: "cli" } as LocalTaskRef;
+}
+
+function runtime(
+  coordinator: DeliveryCoordinator,
+  logger = memoryLogger().logger,
+  resolve: LocalCodexService["resolveTask"] = (threadId) =>
+    Effect.succeed(localTask(threadId)),
+) {
+  const local = LocalCodex.of({
+    availability: Effect.die("unused"),
+    listTasks: Effect.die("unused"),
+    readHistory: () => Effect.die("unused"),
+    resolveTask: resolve,
+    events: () => Stream.die("unused"),
+    submit: () => Effect.die("unused"),
+  } satisfies LocalCodexService);
+  return ManagedRuntime.make(DeliveryLive(logger).pipe(Layer.provide(
+    Layer.merge(
+      Layer.succeed(LocalCodex, local),
+      Layer.succeed(LocalDeliveryCoordinator, coordinator),
     ),
-  );
-  const hook: WebhookRecord = {
-    id: "review",
-    threadId,
-    mode: "queue",
+  )));
+}
+
+function hook(mode: "queue" | "steer" = "queue"): WebhookRecord {
+  return {
+    id: "delivery-test",
+    threadId: ThreadId("thread-1"),
+    mode,
     prependBody: "",
     expiresAt: null,
     remainingDeliveries: null,
     createdAt: Date.now(),
   };
+}
 
+function confirmedOutcome(
+  task: LocalTaskRef,
+  deliveryId: DeliveryId,
+): DeliveryOutcome {
+  return {
+    _tag: "ConfirmedDesktop",
+    task,
+    deliveryId,
+    turnId: TurnId("turn-1"),
+    operation: "start",
+    attempts: [],
+  };
+}
+
+test("resolves the accepted raw task before coordinating exactly once", async () => {
+  const { entries, logger } = memoryLogger();
+  let calls = 0;
+  const coordinator = LocalDeliveryCoordinator.of({
+    policy: PHASE_ONE_DELIVERY_POLICY,
+    deliver: (request) => Effect.sync(() => {
+      calls += 1;
+      return {
+        _tag: "Ambiguous" as const,
+        task: request.task,
+        deliveryId: request.deliveryId,
+        route: "desktop" as const,
+        attempts: [],
+        diagnostic: sanitizeDiagnostic({
+          code: "write-ambiguous",
+          stage: "reconcile-app-server",
+          route: "desktop",
+          secret: "discarded",
+        }),
+      };
+    }),
+  });
+  const service = runtime(coordinator, logger);
   try {
-    const accepted = await runtime.runPromise(
+    const accepted = await service.runPromise(
       Effect.flatMap(Delivery, (delivery) =>
-        delivery.submit(hook, "review complete"),
+        delivery.submit(hook(), "review complete")
       ),
     );
     assert.equal(Option.isSome(accepted), true);
-    await waitFor(() =>
-      entries.some((entry) => entry.event === "delivery_failed"),
+    await waitFor(() => entries.some((entry) =>
+      entry.event === "delivery_finished"
+    ));
+    assert.equal(calls, 1);
+    const finished = entries.find((entry) =>
+      entry.event === "delivery_finished"
     );
-
-    const failed = entries.find(
-      (entry) => entry.event === "delivery_failed",
-    );
-    assert.equal(failed?.errorTag, "DesktopVisibilityUnconfirmed");
-    assert.equal(failed?.submission, "submitted");
-    assert.equal(
-      entries.some((entry) => entry.event === "delivery_finished"),
-      false,
-    );
+    assert.equal(finished?.status, "Ambiguous");
+    assert.equal(finished?.diagnosticCode, "write-ambiguous");
+    assert.equal("secret" in (finished ?? {}), false);
   } finally {
-    await runtime.dispose();
+    await service.dispose();
+  }
+});
+
+test("resolution failure is logged without fabricating a local task", async () => {
+  const { entries, logger } = memoryLogger();
+  let coordinated = false;
+  const coordinator = LocalDeliveryCoordinator.of({
+    policy: PHASE_ONE_DELIVERY_POLICY,
+    deliver: () => Effect.sync(() => {
+      coordinated = true;
+      throw new Error("must not coordinate");
+    }),
+  });
+  const diagnostic = sanitizeDiagnostic({
+    code: "task-not-found",
+    stage: "resolve-task",
+    route: "app-server",
+  });
+  const service = runtime(
+    coordinator,
+    logger,
+    () => Effect.fail({ _tag: "LocalCodexFailure", diagnostic }),
+  );
+  try {
+    const accepted = await service.runPromise(
+      Effect.flatMap(Delivery, (delivery) =>
+        delivery.submit(hook(), "missing task")
+      ),
+    );
+    assert.equal(Option.isSome(accepted), true);
+    await waitFor(() => entries.some((entry) =>
+      entry.event === "delivery_failed"
+    ));
+    assert.equal(coordinated, false);
+    const failed = entries.find((entry) => entry.event === "delivery_failed");
+    assert.equal(failed?.stage, "resolve-task");
+    assert.equal(failed?.diagnosticCode, "task-not-found");
+  } finally {
+    await service.dispose();
   }
 });
 
 test("drain stops admissions and waits for accepted work", async () => {
   const gate = await Effect.runPromise(Deferred.make<void>());
-  const threadId = ThreadId("thread-1");
-  const turnId = TurnId("turn-1");
-  const transport = CodexTransport.of({
-    deliver: (request) =>
-      Deferred.await(gate).pipe(
-        Effect.as({
-          _tag: "Completed" as const,
-          threadId: request.threadId,
-          turnId,
-          transport: "desktop" as const,
-        }),
-      ),
-    status: Effect.succeed({
-      candidates: ["desktop"],
-      desktopIpcAvailable: true,
-    }),
-  } satisfies CodexTransportService);
-  const runtime = ManagedRuntime.make(
-    DeliveryLive().pipe(
-      Layer.provide(Layer.succeed(CodexTransport, transport)),
+  const coordinator = LocalDeliveryCoordinator.of({
+    policy: PHASE_ONE_DELIVERY_POLICY,
+    deliver: (request) => Deferred.await(gate).pipe(
+      Effect.as(confirmedOutcome(request.task, request.deliveryId)),
     ),
-  );
-  const hook: WebhookRecord = {
-    id: "drain",
-    threadId,
-    mode: "queue",
-    prependBody: "",
-    expiresAt: null,
-    remainingDeliveries: null,
-    createdAt: Date.now(),
-  };
-
+  });
+  const service = runtime(coordinator);
   try {
-    const first = await runtime.runPromise(
-      Effect.flatMap(Delivery, (service) => service.submit(hook, "one")),
+    const first = await service.runPromise(
+      Effect.flatMap(Delivery, (delivery) => delivery.submit(hook(), "one")),
     );
     assert.equal(Option.isSome(first), true);
-    await runtime.runPromise(
-      Effect.flatMap(Delivery, (service) => service.stopAccepting),
+    await service.runPromise(
+      Effect.flatMap(Delivery, (delivery) => delivery.stopAccepting),
     );
-    const second = await runtime.runPromise(
-      Effect.flatMap(Delivery, (service) => service.submit(hook, "two")),
+    const second = await service.runPromise(
+      Effect.flatMap(Delivery, (delivery) => delivery.submit(hook(), "two")),
     );
     assert.equal(Option.isNone(second), true);
-    assert.equal(
-      await runtime.runPromise(
-        Effect.flatMap(Delivery, (service) => service.drain("1 millis")),
-      ),
-      false,
-    );
+    assert.equal(await service.runPromise(
+      Effect.flatMap(Delivery, (delivery) => delivery.drain("1 millis")),
+    ), false);
     await Effect.runPromise(Deferred.succeed(gate, undefined));
-    assert.equal(
-      await runtime.runPromise(
-        Effect.flatMap(Delivery, (service) => service.drain("1 second")),
-      ),
-      true,
-    );
+    assert.equal(await service.runPromise(
+      Effect.flatMap(Delivery, (delivery) => delivery.drain("1 second")),
+    ), true);
   } finally {
-    await runtime.dispose();
+    await service.dispose();
   }
 });
 
 test("steer dispatches immediately up to its in-flight bound", async () => {
   const gate = await Effect.runPromise(Deferred.make<void>());
-  const { logger } = memoryLogger();
-  const transport = CodexTransport.of({
-    deliver: (request) =>
-      Deferred.await(gate).pipe(
-        Effect.as({
-          _tag: "Steered" as const,
-          threadId: request.threadId,
-          turnId: TurnId("turn-1"),
-          transport: "desktop" as const,
-        }),
-      ),
-    status: Effect.succeed({
-      candidates: ["desktop"],
-      desktopIpcAvailable: true,
-    }),
-  } satisfies CodexTransportService);
-  const runtime = ManagedRuntime.make(
-    DeliveryLive(logger).pipe(
-      Layer.provide(Layer.succeed(CodexTransport, transport)),
+  const coordinator = LocalDeliveryCoordinator.of({
+    policy: PHASE_ONE_DELIVERY_POLICY,
+    deliver: (request) => Deferred.await(gate).pipe(
+      Effect.as(confirmedOutcome(request.task, request.deliveryId)),
     ),
-  );
-  const hook: WebhookRecord = {
-    id: "steer",
-    threadId: ThreadId("thread-1"),
-    mode: "steer",
-    prependBody: "",
-    expiresAt: null,
-    remainingDeliveries: null,
-    createdAt: Date.now(),
-  };
-
+  });
+  const service = runtime(coordinator);
   try {
     for (let index = 0; index < 100; index += 1) {
-      const result = await runtime.runPromise(
-        Effect.flatMap(Delivery, (service) => service.submit(hook, "one")),
+      const result = await service.runPromise(
+        Effect.flatMap(Delivery, (delivery) =>
+          delivery.submit(hook("steer"), "one")
+        ),
       );
       assert.equal(Option.isSome(result), true);
     }
-    const overflow = await runtime.runPromise(
-      Effect.flatMap(Delivery, (service) => service.submit(hook, "overflow")),
+    const overflow = await service.runPromise(
+      Effect.flatMap(Delivery, (delivery) =>
+        delivery.submit(hook("steer"), "overflow")
+      ),
     );
     assert.equal(Option.isNone(overflow), true);
-    const snapshot = await runtime.runPromise(
-      Effect.flatMap(Delivery, (service) => service.snapshot),
-    );
-    assert.equal(snapshot.steerDepth, 100);
-
+    assert.equal((await service.runPromise(
+      Effect.flatMap(Delivery, (delivery) => delivery.snapshot),
+    )).steerDepth, 100);
     await Effect.runPromise(Deferred.succeed(gate, undefined));
-    assert.equal(
-      await runtime.runPromise(
-        Effect.flatMap(Delivery, (service) => service.drain("1 second")),
-      ),
-      true,
-    );
+    assert.equal(await service.runPromise(
+      Effect.flatMap(Delivery, (delivery) => delivery.drain("1 second")),
+    ), true);
   } finally {
-    await runtime.dispose();
+    await service.dispose();
   }
 });
