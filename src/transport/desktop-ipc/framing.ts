@@ -17,7 +17,12 @@ function frameError(message: string): DesktopProtocolError {
   );
 }
 
-function wireEnvelope(value: unknown): DesktopWireEnvelope | null {
+interface DecodedEnvelope {
+  readonly envelope: DesktopWireEnvelope;
+  readonly sanitizedRouting: boolean;
+}
+
+function wireEnvelope(value: unknown): DecodedEnvelope | null {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
@@ -49,11 +54,23 @@ function wireEnvelope(value: unknown): DesktopWireEnvelope | null {
   const { sourceClientId, targetClientId, ...envelope } = record;
   const source = routingId(sourceClientId);
   const target = routingId(targetClientId);
+  const sanitizedRouting =
+    (sourceClientId != null && source == null) ||
+    (targetClientId != null && target == null);
+  if (!sanitizedRouting) {
+    return {
+      envelope: record as unknown as DesktopWireEnvelope,
+      sanitizedRouting: false,
+    };
+  }
   return {
-    ...envelope,
-    ...(source == null ? {} : { sourceClientId: source }),
-    ...(target == null ? {} : { targetClientId: target }),
-  } as unknown as DesktopWireEnvelope;
+    envelope: {
+      ...envelope,
+      ...(source == null ? {} : { sourceClientId: source }),
+      ...(target == null ? {} : { targetClientId: target }),
+    } as unknown as DesktopWireEnvelope,
+    sanitizedRouting: true,
+  };
 }
 
 export function encodeDesktopFrame(
@@ -118,9 +135,12 @@ export class DesktopFrameDecoder {
       } catch {
         throw frameError("Desktop IPC frame contains invalid JSON or UTF-8");
       }
-      const envelope = wireEnvelope(parsed);
-      if (envelope == null) this.onMalformedEnvelope();
-      else messages.push(envelope);
+      const decoded = wireEnvelope(parsed);
+      if (decoded == null) this.onMalformedEnvelope();
+      else {
+        if (decoded.sanitizedRouting) this.onMalformedEnvelope();
+        messages.push(decoded.envelope);
+      }
     }
     const remaining = data.subarray(offset);
     this.buffer = Buffer.from(remaining);

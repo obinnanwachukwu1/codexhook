@@ -7,6 +7,8 @@ const ROUTING_REJECTIONS = new Set([
   "client-cannot-handle-request",
   "client-not-found",
   "no-client-found",
+  "no-handler-for-request",
+  "thread-role-timeout",
   "thread-stream-owner-unavailable",
 ]);
 const OWNER_EVIDENCE_TIMEOUT_MS = 1_000;
@@ -19,7 +21,7 @@ export function dropRejectedOwner(
   if (
     receipt.outcome._tag === "Rejected" &&
     ROUTING_REJECTIONS.has(receipt.outcome.rejection)
-  ) owners.drop(threadId);
+  ) owners.invalidate(threadId);
 }
 
 export function requestDeadline(
@@ -82,6 +84,7 @@ export async function requestTarget(
     ),
   );
   if (owner != null) return owner;
+  owners.invalidate(threadId);
   throw new DesktopProtocolError(
     "request-timeout",
     "operation",

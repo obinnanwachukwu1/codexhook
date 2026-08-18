@@ -15,9 +15,24 @@ export class DesktopThreadOwners {
     this.unroutable.delete(threadId);
   }
 
-  reset(): void {
+  invalidate(threadId: string): void {
+    this.owners.delete(threadId);
+    this.unroutable.add(threadId);
+    this.resolveThread(threadId, null);
+  }
+
+  needsRefresh(threadId: string): boolean {
+    return this.unroutable.has(threadId);
+  }
+
+  beginRefresh(threadId: string): void {
+    this.unroutable.delete(threadId);
+  }
+
+  reset(refreshThreads: Iterable<string> = []): void {
     this.owners.clear();
     this.unroutable.clear();
+    for (const threadId of refreshThreads) this.unroutable.add(threadId);
     this.resolveWaiters(null);
   }
 

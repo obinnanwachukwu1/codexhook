@@ -180,6 +180,7 @@ export class DesktopProtocolSession {
   ): Promise<DesktopRequestReceipt<DesktopStartResult>> {
     const deadline = requestDeadline(this.limits, timeoutMs);
     const connection = await this.ready("startTurn");
+    await this.refreshOwner(connection, threadId);
     const target = await requestTarget(
       this.threadOwners,
       this.followedThreads,
@@ -212,6 +213,7 @@ export class DesktopProtocolSession {
   ): Promise<DesktopRequestReceipt<DesktopSteerResult>> {
     const deadline = requestDeadline(this.limits, timeoutMs);
     const connection = await this.ready("steerTurn");
+    await this.refreshOwner(connection, threadId);
     const target = await requestTarget(
       this.threadOwners,
       this.followedThreads,
@@ -251,6 +253,28 @@ export class DesktopProtocolSession {
       );
     }
     return connection;
+  }
+
+  private async refreshOwner(
+    connection: NegotiatedConnection,
+    threadId: string,
+  ): Promise<void> {
+    if (
+      !this.followedThreads.has(threadId) ||
+      !this.threadOwners.needsRefresh(threadId)
+    ) return;
+    this.threadOwners.beginRefresh(threadId);
+    try {
+      await followDesktopThread(
+        connection,
+        this.followedThreads,
+        this.threadOwners,
+        threadId,
+      );
+    } catch (cause) {
+      this.threadOwners.invalidate(threadId);
+      throw cause;
+    }
   }
 
   private async ensureConnection(): Promise<NegotiatedConnection> {
@@ -354,10 +378,9 @@ export class DesktopProtocolSession {
   }
 
   private emit(observation: DesktopProtocolObservation): void {
-    if (
-      observation._tag === "Disconnected" ||
-      observation._tag === "Reconnecting"
-    ) {
+    if (observation._tag === "Disconnected") {
+      this.threadOwners.reset(this.followedThreads);
+    } else if (observation._tag === "Reconnecting") {
       this.threadOwners.reset();
     }
     for (const listener of this.observations) listener(observation);

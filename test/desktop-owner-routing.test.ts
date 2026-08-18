@@ -179,8 +179,10 @@ test("close wakes every pending owner waiter without writing", async () => {
       session.steerTurn("thread-1", {}, 1_000),
     ];
     await new Promise((resolve) => setImmediate(resolve));
+    const closedAt = Date.now();
     session.close();
     const results = await Promise.allSettled(pending);
+    assert.equal(Date.now() - closedAt < 250, true);
     assert.deepEqual(results.map((result) => result.status), [
       "rejected",
       "rejected",
@@ -207,12 +209,14 @@ test("disconnect wakes pending owner waiters without writing", async () => {
     await session.followThread("thread-1");
     const pending = session.startTurn("thread-1", {}, 1_000);
     await new Promise((resolve) => setImmediate(resolve));
+    const disconnectedAt = Date.now();
     await router.close();
     await assert.rejects(pending, (error: unknown) =>
       error instanceof Error &&
-      "failure" in error &&
-      error.failure === "request-timeout"
+      "writeState" in error &&
+      error.writeState === "not-written"
     );
+    assert.equal(Date.now() - disconnectedAt < 250, true);
     assert.equal(mutations, 0);
   } finally {
     session.close();
@@ -266,6 +270,7 @@ test("never writes a followed task without snapshot owner evidence", async () =>
 test("routing rejection requires fresh owner evidence before another write", async () => {
   const endpoint = await testEndpoint();
   let publish!: (owner: string) => void;
+  let follows = 0;
   let starts = 0;
   const router = await listen(
     endpoint.socketPath,
@@ -281,12 +286,12 @@ test("routing rejection requires fresh owner evidence before another write", asy
         },
       });
       if (message.method === "thread-stream-following-changed") {
-        publish("desktop-owner-1");
+        follows += 1;
+        publish(follows === 1 ? "desktop-owner-1" : "desktop-owner-2");
         return;
       }
       if (message.method === "thread-follower-load-complete-history") {
         assert.equal(message.targetClientId, undefined);
-        publish("desktop-owner-2");
         send({
           type: "response",
           requestId: message.requestId,
@@ -306,7 +311,7 @@ test("routing rejection requires fresh owner evidence before another write", asy
             type: "response",
             requestId: message.requestId,
             resultType: "error",
-            error: "client-not-found",
+            error: "no-handler-for-request",
           }
         : {
             type: "response",
@@ -321,13 +326,13 @@ test("routing rejection requires fresh owner evidence before another write", asy
     await session.followThread("thread-1");
     const rejected = await session.startTurn("thread-1", {}, 1_000);
     assert.equal(rejected.outcome._tag, "Rejected");
-    await assert.rejects(session.startTurn("thread-1", {}, 30));
     assert.equal(starts, 1);
     const history = await session.loadCompleteHistory("thread-1", 1_000);
     assert.equal(history.outcome._tag, "Accepted");
     const accepted = await session.startTurn("thread-1", {}, 1_000);
     assert.equal(accepted.outcome._tag, "Accepted");
     assert.equal(starts, 2);
+    assert.equal(follows, 2);
     session.close();
   } finally {
     await router.close();

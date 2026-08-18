@@ -157,7 +157,7 @@ test("bounds and rejects malformed frame lengths, JSON, and envelopes", () => {
   assert.equal(badSource?.sourceClientId, undefined);
   assert.equal(badTarget?.type, "request");
   assert.equal(badTarget?.targetClientId, undefined);
-  assert.equal(malformedEnvelopes, 1);
+  assert.equal(malformedEnvelopes, 3);
 });
 
 test("malformed JSON diagnostics do not retain frame contents", () => {
