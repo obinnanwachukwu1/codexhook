@@ -322,11 +322,31 @@ export class DesktopProtocolSession {
       };
       if (reconnected) {
         this.emit({ _tag: "Reconnecting", profile });
-        for (const threadId of this.followedThreads) {
-          await raw.broadcast(
-            adapter.methods.follow,
-            adapter.followParams(threadId),
-            adapter.version,
+        if (
+          this.followedThreads.size > 0 &&
+          !profile.capabilities.threadStream
+        ) {
+          throw new DesktopProtocolError(
+            "reconnect-failed",
+            "operation",
+            "not-written",
+            "Desktop IPC reconnect cannot restore followed tasks",
+          );
+        }
+        try {
+          for (const threadId of this.followedThreads) {
+            await raw.broadcast(
+              adapter.methods.follow,
+              adapter.followParams(threadId),
+              adapter.version,
+            );
+          }
+        } catch {
+          throw new DesktopProtocolError(
+            "reconnect-failed",
+            "operation",
+            "not-written",
+            "Desktop IPC reconnect could not restore followed tasks",
           );
         }
       }

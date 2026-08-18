@@ -4,6 +4,7 @@ export type DesktopProtocolFailure =
   | "handshake-malformed"
   | "invalid-timeout"
   | "pending-limit"
+  | "reconnect-failed"
   | "request-timeout"
   | "response-malformed"
   | "socket-failed"

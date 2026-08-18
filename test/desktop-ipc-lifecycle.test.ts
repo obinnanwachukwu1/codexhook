@@ -166,6 +166,48 @@ test("concurrent callers share one reconnect and one lifecycle observation", asy
   }
 });
 
+test("reports a failed re-follow as not written for the triggering turn", async () => {
+  const endpoint = await testEndpoint();
+  const firstRouter = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-legacy.json"),
+  );
+  const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+  await session.followThread("thread-1");
+  await firstRouter.close();
+  await waitFor(() => !session.alive);
+
+  let follows = 0;
+  let starts = 0;
+  const secondRouter = await listen(
+    endpoint.socketPath,
+    {
+      clientId: "changed-client",
+      protocolVersion: 1,
+      serverCapabilities: ["startTurn"],
+    },
+    (message) => {
+      if (message.method === "thread-stream-following-changed") follows += 1;
+      if (message.method === "thread-follower-start-turn") starts += 1;
+    },
+  );
+  try {
+    await assert.rejects(
+      session.startTurn("thread-1", {}, 1_000),
+      (error: unknown) =>
+        error instanceof DesktopProtocolError &&
+        error.failure === "reconnect-failed" &&
+        error.writeState === "not-written",
+    );
+    assert.equal(follows, 0);
+    assert.equal(starts, 0);
+  } finally {
+    session.close();
+    await secondRouter.close();
+    await endpoint.cleanup();
+  }
+});
+
 test("responds to discovery and reports sanitized lifecycle observations", async () => {
   const endpoint = await testEndpoint();
   let discovery!: (value: unknown) => void;

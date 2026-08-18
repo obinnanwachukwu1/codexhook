@@ -176,3 +176,44 @@ test("owns incomplete frame bytes instead of aliasing caller memory", () => {
   const [message] = decoder.push(frame.subarray(3));
   assert.equal(message?.method, "thread-stream-state-changed");
 });
+
+test("does not infer a started turn from historical snapshot entities", async () => {
+  const endpoint = await testEndpoint();
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-legacy.json"),
+    (message, send) => {
+      if (message.method !== "thread-follower-start-turn") return;
+      send({
+        type: "response",
+        requestId: message.requestId,
+        resultType: "success",
+        result: {
+          conversationState: {
+            turnHistory: {
+              history: {
+                entitiesByKey: {
+                  old: { turnId: "turn-old", status: "completed" },
+                },
+              },
+            },
+          },
+        },
+      });
+    },
+  );
+  try {
+    const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await assert.rejects(
+      session.startTurn("thread-1", {}, 1_000),
+      (error: unknown) =>
+        error instanceof DesktopProtocolError &&
+        error.failure === "response-malformed" &&
+        error.writeState === "written",
+    );
+    session.close();
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
+});

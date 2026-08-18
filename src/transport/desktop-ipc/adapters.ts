@@ -228,27 +228,11 @@ function applicationResult(value: unknown): unknown {
 function turnId(value: unknown): string | null {
   const result = record(value);
   if (result == null) return null;
-  const queue: Array<{ readonly depth: number; readonly value: unknown }> = [
-    { depth: 0, value: result },
-  ];
-  let visited = 0;
-  while (queue.length > 0 && visited < 256) {
-    const current = queue.shift();
-    if (current == null || current.depth >= 8) continue;
-    visited += 1;
-    const item = record(current.value);
-    if (item == null) continue;
-    const found = turnIdFast(item);
-    if (found != null) return found;
-    for (const child of Object.values(item)) {
-      if (queue.length >= 512) break;
-      queue.push({ depth: current.depth + 1, value: child });
-    }
-  }
-  return null;
+  return turnIdFast(result) ?? turnIdFast(record(result.details));
 }
 
-function turnIdFast(result: Record<string, unknown>): string | null {
+function turnIdFast(result: Record<string, unknown> | null): string | null {
+  if (result == null) return null;
   const turn = record(result.turn);
   const submission = record(result.submission);
   for (const candidate of [result.turnId, turn?.id, submission?.turnId]) {
