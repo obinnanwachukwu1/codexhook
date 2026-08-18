@@ -54,6 +54,7 @@ test("closes a rejected candidate before connecting the next", async () => {
   }).peer;
   const provider: TransportProviderService = {
     candidates: Effect.succeed([first, second]),
+    appServerCandidates: Effect.succeed([first, second]),
     desktopCandidate: Effect.succeed(Option.none()),
     connect: (spec) => Effect.acquireRelease(
       Effect.sync(() => {
@@ -84,6 +85,7 @@ test("closes a rejected candidate before connecting the next", async () => {
 test("represents missing local app-server candidates as availability", async () => {
   const provider: TransportProviderService = {
     candidates: Effect.succeed([]),
+    appServerCandidates: Effect.succeed([]),
     desktopCandidate: Effect.succeed(Option.none()),
     connect: () => Effect.die("unexpected connect"),
   };
@@ -103,9 +105,31 @@ test("represents missing local app-server candidates as availability", async () 
   });
 });
 
+test("canonical acquisition does not evaluate Desktop candidates", async () => {
+  const provider: TransportProviderService = {
+    candidates: Effect.die("combined candidates must stay unused"),
+    appServerCandidates: Effect.succeed([]),
+    desktopCandidate: Effect.die("Desktop probe must stay unused"),
+    connect: () => Effect.die("unexpected connect"),
+  };
+  const layer = CanonicalAppServerLive.pipe(
+    Layer.provide(Layer.succeed(TransportProvider, provider)),
+  );
+  const service = await Effect.runPromise(
+    CanonicalAppServer.pipe(Effect.provide(layer)),
+  );
+  assert.deepEqual(await Effect.runPromise(service.availability), {
+    status: "unavailable",
+    reason: "no-local-app-server",
+    cause: "no-candidate",
+    rejectedCandidates: [],
+  });
+});
+
 test("reports every rejected canonical candidate without free text", async () => {
   const provider: TransportProviderService = {
     candidates: Effect.succeed([first, second]),
+    appServerCandidates: Effect.succeed([first, second]),
     desktopCandidate: Effect.succeed(Option.none()),
     connect: (spec) => Effect.succeed(
       fakeAppServerPeer(() => ({}), { spec, serverInfo: null }).peer,
@@ -128,6 +152,7 @@ test("reports every rejected canonical candidate without free text", async () =>
 test("does not misclassify provider defects as unavailable candidates", async () => {
   const provider: TransportProviderService = {
     candidates: Effect.succeed([first]),
+    appServerCandidates: Effect.succeed([first]),
     desktopCandidate: Effect.succeed(Option.none()),
     connect: () => Effect.die("provider defect"),
   };
@@ -160,6 +185,7 @@ test("rejects remote specs before provider connection", async () => {
   };
   const provider: TransportProviderService = {
     candidates: Effect.succeed([remotePipe, remoteCodeMode]),
+    appServerCandidates: Effect.succeed([remotePipe, remoteCodeMode]),
     desktopCandidate: Effect.succeed(Option.none()),
     connect: () => Effect.sync(() => {
       connections += 1;

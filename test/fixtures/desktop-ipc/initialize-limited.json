@@ -1,0 +1,7 @@
+{
+  "clientId": "limited-client",
+  "protocolVersion": 1,
+  "serverCapabilities": [
+    "threadStream"
+  ]
+}

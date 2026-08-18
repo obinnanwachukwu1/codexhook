@@ -76,7 +76,10 @@ async function mockRouter(behavior: StartBehavior): Promise<Router> {
             requestId: message.requestId,
             resultType: "success",
             method: "initialize",
-            result: { clientId: "desktop-test-client" },
+            result: {
+              clientId: "desktop-test-client",
+              protocolVersion: 1,
+            },
           });
         } else if (
           message.type === "broadcast" &&
@@ -162,13 +165,13 @@ async function mockRouter(behavior: StartBehavior): Promise<Router> {
               requestId: message.requestId,
               resultType: "success",
               result: {
-                result: {
+                response: { result: { details: {
                   turn: {
                     id: "turn-ipc",
                     status: "inProgress",
                     error: null,
                   },
-                },
+                } } },
               },
             });
             setTimeout(() => {
