@@ -90,6 +90,14 @@ export async function requestTarget(
       "Desktop IPC owner evidence was interrupted by session lifecycle",
     );
   }
+  if (result._tag === "Unroutable") {
+    throw new DesktopProtocolError(
+      "owner-unroutable",
+      "operation",
+      "not-written",
+      "Desktop IPC task owner is unavailable for targeted submission",
+    );
+  }
   throw new DesktopProtocolError(
     "request-timeout",
     "operation",

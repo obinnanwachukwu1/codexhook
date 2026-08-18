@@ -150,6 +150,5 @@ export function startCommand(id = "delivery-1"): DesktopCommand {
     threadId: "thread-1",
     clientUserMessageId: id,
     input: [{ type: "text", text: "hello" }],
-    createdAt: 1,
   };
 }

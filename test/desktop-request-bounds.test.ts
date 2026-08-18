@@ -1,11 +1,54 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DesktopIpcProtocol } from "../src/transport/desktop-task-protocol.js";
+import { selectDesktopAdapter, type DesktopProtocolAdapter } from
+  "../src/transport/desktop-ipc/adapters.js";
+import type { DesktopProtocolProfile } from
+  "../src/transport/desktop-ipc/types.js";
+import { restoreFollowedThreads } from
+  "../src/transport/desktop-ipc/session-negotiate.js";
+import { refreshDesktopOwner } from
+  "../src/transport/desktop-ipc/session-owner-refresh.js";
+import { sessionLimits } from "../src/transport/desktop-ipc/limits.js";
+import { DesktopThreadOwners } from
+  "../src/transport/desktop-ipc/thread-owners.js";
 import {
   fixture,
   listen,
   testEndpoint,
 } from "./support/desktop-ipc-router.js";
+
+const TEST_CAPABILITIES = {
+  source: "legacy-inferred",
+  completeHistory: true,
+  startTurn: true,
+  steerTurn: true,
+  threadStream: true,
+} as const;
+
+function testAdapter(): DesktopProtocolAdapter {
+  return selectDesktopAdapter({
+    clientId: "desktop-client",
+    capabilities: TEST_CAPABILITIES,
+    appVersion: null,
+    buildNumber: null,
+    protocolVersion: 1,
+  });
+}
+
+function testProfile(adapter: DesktopProtocolAdapter): DesktopProtocolProfile {
+  return {
+    compatibility: adapter.compatibility,
+    capabilities: TEST_CAPABILITIES,
+    fingerprint: {
+      adapterId: adapter.id,
+      appVersion: null,
+      buildNumber: null,
+      digest: "test",
+      protocolVersion: 1,
+    },
+  };
+}
 
 test("Desktop injection bounds a delivery budget to the request limit", async () => {
   const endpoint = await testEndpoint();
@@ -46,7 +89,6 @@ test("Desktop injection bounds a delivery budget to the request limit", async ()
         threadId: "thread-1",
         clientUserMessageId: "delivery-1",
         input: [],
-        createdAt: 1,
         timeoutMs: 30 * 60 * 1_000,
       });
       assert.equal(reply._tag, "Accepted");
@@ -108,4 +150,63 @@ test("Desktop history uses the negotiated request timeout limit", async () => {
     await router.close();
     await endpoint.cleanup();
   }
+});
+
+test("Desktop reconnect bounds restoration of followed tasks", async () => {
+  const adapter = testAdapter();
+  const began = Date.now();
+  await assert.rejects(
+    restoreFollowedThreads(
+      { broadcast: () => new Promise<void>(() => undefined) },
+      adapter,
+      testProfile(adapter),
+      new Set(["thread-1"]),
+      Date.now() + 20,
+    ),
+    (error: unknown) =>
+      error instanceof Error &&
+      "failure" in error &&
+      error.failure === "reconnect-failed" &&
+      "writeState" in error &&
+      error.writeState === "not-written",
+  );
+  assert.equal(Date.now() - began < 250, true);
+});
+
+test("owner refresh preserves its marker and original failure", async () => {
+  const adapter = testAdapter();
+  const followed = new Set(["thread-1"]);
+  const owners = new DesktopThreadOwners();
+  owners.invalidate("thread-1");
+  await assert.rejects(
+    refreshDesktopOwner(
+      { adapter, raw: { broadcast: async () => undefined } },
+      followed,
+      owners,
+      sessionLimits({}),
+      "thread-1",
+      Date.now() - 1,
+    ),
+    (error: unknown) =>
+      error instanceof Error &&
+      "failure" in error && error.failure === "request-timeout",
+  );
+  assert.equal(owners.needsRefresh("thread-1"), true);
+
+  const cause = new Error("synthetic refresh failure");
+  await assert.rejects(
+    refreshDesktopOwner(
+      { adapter, raw: { broadcast: async () => { throw cause; } } },
+      followed,
+      owners,
+      sessionLimits({}),
+      "thread-1",
+      Date.now() + 1_000,
+    ),
+    (error: unknown) =>
+      error instanceof Error &&
+      "failure" in error && error.failure === "reconnect-failed" &&
+      error.cause === cause,
+  );
+  assert.equal(owners.needsRefresh("thread-1"), true);
 });

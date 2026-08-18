@@ -283,7 +283,7 @@ test("never writes a followed task without snapshot owner evidence", async () =>
       (error: unknown) =>
         error instanceof Error &&
         "failure" in error &&
-        error.failure === "request-timeout" &&
+        error.failure === "owner-unroutable" &&
         "writeState" in error &&
         error.writeState === "not-written",
     );

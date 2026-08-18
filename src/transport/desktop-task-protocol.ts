@@ -56,7 +56,6 @@ export type DesktopCommand =
       readonly threadId: string;
       readonly clientUserMessageId: string;
       readonly input: unknown;
-      readonly createdAt: number;
       readonly timeoutMs?: number;
     }
   | {

@@ -3,7 +3,7 @@ import { DesktopThreadOwners } from "./thread-owners.js";
 import type { RawDesktopConnection } from "./wire.js";
 import { DesktopProtocolError } from "./errors.js";
 
-interface FollowConnection {
+export interface DesktopFollowConnection {
   readonly adapter: Pick<
     DesktopProtocolAdapter,
     "followParams" | "methods" | "version"
@@ -12,7 +12,7 @@ interface FollowConnection {
 }
 
 export async function followDesktopThread(
-  connection: FollowConnection,
+  connection: DesktopFollowConnection,
   followedThreads: Set<string>,
   owners: DesktopThreadOwners,
   threadId: string,
@@ -36,7 +36,7 @@ export async function followDesktopThread(
   }
 }
 
-async function boundedFollow(
+export async function boundedFollow(
   broadcast: Promise<void>,
   timeoutMs: number,
 ): Promise<void> {

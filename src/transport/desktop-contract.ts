@@ -218,13 +218,11 @@ function desktopSession(
     submit: (request) => Effect.uninterruptible(
       Effect.tryPromise({
         try: () => {
-          const createdAt = Date.now();
           return attachment.inject(request.mode === "queue" ? {
               kind: "start",
               threadId: request.task.threadId,
               clientUserMessageId: request.deliveryId,
               input: [{ type: "text", text: request.message }],
-              createdAt,
               timeoutMs: Duration.toMillis(request.replyTimeout),
             }
           : {
@@ -233,7 +231,7 @@ function desktopSession(
               expectedTurnId: request.expectedTurnId,
               clientUserMessageId: request.deliveryId,
               input: [{ type: "text", text: request.message }],
-              createdAt,
+              createdAt: Date.now(),
               timeoutMs: Duration.toMillis(request.replyTimeout),
             });
         },

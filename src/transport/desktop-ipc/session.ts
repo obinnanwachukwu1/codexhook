@@ -23,6 +23,10 @@ import {
 import { desktopRequestReceipt } from "./session-receipt.js";
 import { followDesktopThread } from "./session-follow.js";
 import {
+  reconnectStageTimeout,
+  waitForReconnect,
+} from "./session-deadline.js";
+import {
   negotiateDesktopConnection,
   type NegotiatedConnection,
 } from "./session-negotiate.js";
@@ -34,6 +38,8 @@ import {
   requestTarget,
 } from "./session-request.js";
 import { DesktopThreadOwners } from "./thread-owners.js";
+import { refreshDesktopOwner } from "./session-owner-refresh.js";
+import { requireDesktopCapability } from "./session-capability.js";
 import type { Socket } from "node:net";
 
 export class DesktopProtocolSession {
@@ -48,7 +54,6 @@ export class DesktopProtocolSession {
   private openingSocket: Socket | null = null;
   private reconnecting: Promise<NegotiatedConnection> | null = null;
   private readonly createConnection: (() => Socket) | undefined;
-
   private constructor(
     private readonly socketPath: string,
     options: DesktopProtocolSessionOptions,
@@ -148,7 +153,7 @@ export class DesktopProtocolSession {
     timeoutMs: number,
   ): Promise<DesktopRequestReceipt<void>> {
     const deadline = requestDeadline(this.limits, timeoutMs);
-    const connection = await this.ready("completeHistory");
+    const connection = await this.ready("completeHistory", deadline);
     const target = await requestTarget(
       this.threadOwners,
       this.followedThreads,
@@ -180,8 +185,15 @@ export class DesktopProtocolSession {
     timeoutMs: number,
   ): Promise<DesktopRequestReceipt<DesktopStartResult>> {
     const deadline = mutationDeadline(this.limits, timeoutMs);
-    const connection = await this.ready("startTurn");
-    await this.refreshOwner(connection, threadId, deadline);
+    const connection = await this.ready("startTurn", deadline);
+    await refreshDesktopOwner(
+      connection,
+      this.followedThreads,
+      this.threadOwners,
+      this.limits,
+      threadId,
+      deadline,
+    );
     const target = await requestTarget(
       this.threadOwners,
       this.followedThreads,
@@ -213,8 +225,15 @@ export class DesktopProtocolSession {
     timeoutMs: number,
   ): Promise<DesktopRequestReceipt<DesktopSteerResult>> {
     const deadline = mutationDeadline(this.limits, timeoutMs);
-    const connection = await this.ready("steerTurn");
-    await this.refreshOwner(connection, threadId, deadline);
+    const connection = await this.ready("steerTurn", deadline);
+    await refreshDesktopOwner(
+      connection,
+      this.followedThreads,
+      this.threadOwners,
+      this.limits,
+      threadId,
+      deadline,
+    );
     const target = await requestTarget(
       this.threadOwners,
       this.followedThreads,
@@ -242,45 +261,15 @@ export class DesktopProtocolSession {
 
   private async ready(
     capability: DesktopProtocolCapability,
+    deadline?: number,
   ): Promise<NegotiatedConnection> {
-    const connection = await this.ensureConnection();
+    const connection = await this.ensureConnection(deadline);
     if (this.closing) throw this.closedError();
-    if (!connection.profile.capabilities[capability]) {
-      throw new DesktopProtocolError(
-        "unsupported-capability",
-        "operation",
-        "not-written",
-        `Desktop IPC does not advertise ${capability}`,
-      );
-    }
+    requireDesktopCapability(connection, capability);
     return connection;
   }
 
-  private async refreshOwner(
-    connection: NegotiatedConnection,
-    threadId: string,
-    deadline: number,
-  ): Promise<void> {
-    if (
-      !this.followedThreads.has(threadId) ||
-      !this.threadOwners.needsRefresh(threadId)
-    ) return;
-    this.threadOwners.beginRefresh(threadId);
-    try {
-      await followDesktopThread(
-        connection,
-        this.followedThreads,
-        this.threadOwners,
-        threadId,
-        remainingRequestTimeout(this.limits, deadline),
-      );
-    } catch (cause) {
-      this.threadOwners.invalidate(threadId);
-      throw desktopReconnectError("Desktop IPC owner refresh failed");
-    }
-  }
-
-  private async ensureConnection(): Promise<NegotiatedConnection> {
+  private async ensureConnection(deadline?: number): Promise<NegotiatedConnection> {
     if (this.closing) {
       throw this.closedError();
     }
@@ -295,23 +284,42 @@ export class DesktopProtocolSession {
       active.raw.close();
     }
     if (this.reconnecting == null) {
-      this.reconnecting = this.open(true).finally(() => {
-        this.reconnecting = null;
+      const reconnectDeadline = deadline ??
+        Date.now() + this.limits.handshakeTimeoutMs;
+      const reconnecting = this.open(true, reconnectDeadline).then(
+        (connection) => {
+          if (this.closing) {
+            connection.raw.close();
+            throw this.closedError();
+          }
+          if (this.connection !== connection) {
+            this.connection = connection;
+            this.emit({ _tag: "Reconnected", profile: connection.profile });
+          }
+          return connection;
+        },
+      );
+      const tracked = reconnecting.finally(() => {
+        if (this.reconnecting === tracked) this.reconnecting = null;
       });
+      this.reconnecting = tracked;
     }
-    const connection = await this.reconnecting;
+    const connection = await waitForReconnect(
+      this.limits,
+      this.reconnecting,
+      deadline,
+    );
     if (this.closing) {
       connection.raw.close();
       throw this.closedError();
     }
-    if (this.connection !== connection) {
-      this.connection = connection;
-      this.emit({ _tag: "Reconnected", profile: connection.profile });
-    }
-    return this.connection;
+    return connection;
   }
 
-  private async open(reconnected: boolean): Promise<NegotiatedConnection> {
+  private async open(
+    reconnected: boolean,
+    deadline?: number,
+  ): Promise<NegotiatedConnection> {
     if (this.closing) throw this.closedError();
     const raw = await RawDesktopConnection.open(
       this.socketPath,
@@ -319,7 +327,7 @@ export class DesktopProtocolSession {
       (message) => this.receiveBroadcast(message),
       (observation) => this.emit(observation),
       {
-        connectTimeoutMs: this.limits.handshakeTimeoutMs,
+        connectTimeoutMs: reconnectStageTimeout(this.limits, deadline),
         ...(this.createConnection == null
           ? {}
           : { createConnection: this.createConnection }),
@@ -337,13 +345,14 @@ export class DesktopProtocolSession {
     try {
       return await negotiateDesktopConnection(
         raw,
-        this.limits.handshakeTimeoutMs,
+        reconnectStageTimeout(this.limits, deadline),
         reconnected,
         this.followedThreads,
         (observation) => this.emit(observation),
         () => {
           if (this.closing) throw this.closedError();
         },
+        deadline,
       );
     } catch (cause) {
       raw.close();

@@ -311,7 +311,6 @@ async function rejectedStart(error: string) {
         threadId: "thread-1",
         clientUserMessageId: "delivery-1",
         input: [],
-        createdAt: 1,
       });
     } finally {
       protocol.close();
