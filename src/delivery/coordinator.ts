@@ -1,14 +1,17 @@
-import { Context, Effect, Layer } from "effect";
+import { Context, Effect, Exit, Layer } from "effect";
 import { Logger } from "../logger.js";
 import type { ThreadId, TurnRequest } from "../types.js";
+import { decideDesktopEvidence } from "./coordinator-policy.js";
 import {
+  CanonicalDeliveryPort,
   type CoordinatedDeliveryResult,
   type DeliveryEvidence,
   type DeliveryProof,
   type DeliveryReceipt,
+  type DeliveryRef,
   type DesktopCircuitState,
-  DesktopSession,
-  LocalCodexService,
+  DesktopDeliveryPort,
+  type RoutingDiagnostic,
 } from "./routing-contracts.js";
 
 export interface DeliveryCoordinatorService {
@@ -18,8 +21,10 @@ export interface DeliveryCoordinatorService {
   readonly circuitState: (
     threadId: ThreadId,
   ) => Effect.Effect<DesktopCircuitState>;
-  /** Called only after an attachment transition has independently proven health. */
-  readonly resetDesktopCircuit: (threadId: ThreadId) => Effect.Effect<void>;
+  /** A health transition may close an Open circuit, never an in-flight one. */
+  readonly resetOpenDesktopCircuit: (
+    threadId: ThreadId,
+  ) => Effect.Effect<void>;
 }
 
 export class DeliveryCoordinator extends Context.Tag(
@@ -34,275 +39,333 @@ interface DesktopReconciliation {
   >;
 }
 
-interface DirectAppServer {
-  readonly _tag: "DirectAppServer";
-  readonly desktopReceipt: DeliveryReceipt | null;
-  readonly desktopEvidence: DeliveryEvidence | null;
-  readonly canonicalEvidence: DeliveryEvidence | null;
-}
-
 type RoutePlan =
   | DesktopReconciliation
-  | DirectAppServer
+  | { readonly _tag: "DirectAppServer"; readonly receipt: DeliveryReceipt | null }
   | { readonly _tag: "Terminal"; readonly result: CoordinatedDeliveryResult };
 
-const emptyProof = (): DeliveryProof => ({
+const EMPTY_PROOF: DeliveryProof = {
   desktopReceipt: null,
-  appServerReceipt: null,
   desktopEvidence: null,
-  canonicalEvidence: null,
-});
+  canonicalAfterDesktop: null,
+  appServerReceipt: null,
+  canonicalAfterAppServer: null,
+};
 
-function base(request: TurnRequest) {
+const AMBIGUOUS: RoutingDiagnostic = { code: "write-ambiguous" };
+const TIMEOUT: RoutingDiagnostic = { code: "timeout" };
+
+function reference(request: TurnRequest): DeliveryRef {
   return {
     deliveryId: request.deliveryId,
     threadId: request.threadId,
-  } as const;
+  };
 }
 
-function evidenceConflict(
-  receipt: DeliveryReceipt,
-  desktop: DeliveryEvidence,
-  canonical: Extract<DeliveryEvidence, { readonly _tag: "Found" }>,
-): string | null {
-  if (receipt._tag === "Acknowledged" && receipt.turnId !== canonical.turnId) {
-    return "desktop receipt and canonical evidence identify different turns";
-  }
-  if (desktop._tag === "Found" && desktop.turnId !== canonical.turnId) {
-    return "desktop state and canonical evidence identify different turns";
-  }
-  return null;
+function boundedEvidence(
+  effect: Effect.Effect<DeliveryEvidence>,
+  timeout: TurnRequest["turnTimeout"],
+): Effect.Effect<DeliveryEvidence> {
+  return effect.pipe(
+    Effect.timeoutTo({
+      duration: timeout,
+      onTimeout: () => ({ _tag: "Unresolved", diagnostic: TIMEOUT }),
+      onSuccess: (evidence) => evidence,
+    }),
+  );
+}
+
+interface TaskGate {
+  readonly semaphore: Effect.Semaphore;
+  users: number;
 }
 
 export function DeliveryCoordinatorLive(
-  logger = new Logger(),
-): Layer.Layer<DeliveryCoordinator, never, DesktopSession | LocalCodexService> {
+  logger: Logger,
+): Layer.Layer<
+  DeliveryCoordinator,
+  never,
+  DesktopDeliveryPort | CanonicalDeliveryPort
+> {
   return Layer.effect(
     DeliveryCoordinator,
     Effect.gen(function* () {
-      const desktop = yield* DesktopSession;
-      const local = yield* LocalCodexService;
-      const gateCreation = yield* Effect.makeSemaphore(1);
-      const gates = new Map<ThreadId, Effect.Semaphore>();
-      const circuits = new Map<ThreadId, Exclude<DesktopCircuitState, { _tag: "Closed" }>>();
+      const desktop = yield* DesktopDeliveryPort;
+      const local = yield* CanonicalDeliveryPort;
+      const gates = new Map<ThreadId, TaskGate>();
+      type ActiveCircuit = Exclude<DesktopCircuitState, { _tag: "Closed" }>;
+      const circuits = new Map<ThreadId, ActiveCircuit>();
 
-      const gateFor = (threadId: ThreadId) =>
-        gateCreation.withPermits(1)(
-          Effect.gen(function* () {
-            const existing = gates.get(threadId);
-            if (existing != null) return existing;
-            const created = yield* Effect.makeSemaphore(1);
-            gates.set(threadId, created);
-            return created;
-          }),
-        );
+      const acquireGate = (threadId: ThreadId): Effect.Effect<TaskGate> =>
+        Effect.sync(() => {
+          let gate = gates.get(threadId);
+          if (gate == null) {
+            gate = { semaphore: Effect.unsafeMakeSemaphore(1), users: 0 };
+            gates.set(threadId, gate);
+          }
+          gate.users += 1;
+          return gate;
+        });
 
-      const open = (
-        request: TurnRequest,
-        detail: string,
+      const releaseGate = (threadId: ThreadId, gate: TaskGate) =>
+        Effect.sync(() => {
+          gate.users -= 1;
+          if (gate.users === 0 && gates.get(threadId) === gate) {
+            gates.delete(threadId);
+          }
+        });
+
+      const markReconciling = (delivery: DeliveryRef): void => {
+        circuits.set(delivery.threadId, {
+          _tag: "Reconciling",
+          deliveryId: delivery.deliveryId,
+        });
+      };
+
+      const openDesktopCircuit = (
+        delivery: DeliveryRef,
+        diagnostic: RoutingDiagnostic,
       ): void => {
-        circuits.set(request.threadId, {
+        circuits.set(delivery.threadId, {
           _tag: "Open",
-          deliveryId: request.deliveryId,
-          detail,
+          deliveryId: delivery.deliveryId,
+          diagnostic,
         });
         logger.warn("desktop_delivery_circuit_opened", {
-          deliveryId: request.deliveryId,
-          threadId: request.threadId,
-          detail,
+          deliveryId: delivery.deliveryId,
+          threadId: delivery.threadId,
+          diagnosticCode: diagnostic.code,
         });
+      };
+
+      const closeIfOwnedBy = (delivery: DeliveryRef): void => {
+        const current = circuits.get(delivery.threadId);
+        if (current?._tag === "Reconciling" &&
+            current.deliveryId === delivery.deliveryId) {
+          circuits.delete(delivery.threadId);
+        }
       };
 
       const submitAppServer = (
         request: TurnRequest,
-        prior: Omit<DeliveryProof, "appServerReceipt">,
+        prior: Pick<
+          DeliveryProof,
+          "desktopReceipt" | "desktopEvidence" | "canonicalAfterDesktop"
+        >,
       ): Effect.Effect<CoordinatedDeliveryResult> =>
         Effect.gen(function* () {
+          const delivery = reference(request);
           const receipt = yield* local.deliver(request);
-          const proof = { ...prior, appServerReceipt: receipt };
+          const proof: DeliveryProof = {
+            ...prior,
+            appServerReceipt: receipt,
+            canonicalAfterAppServer: null,
+          };
+          // App-server is canonical, so its acknowledgement needs no barrier.
           if (receipt._tag === "Acknowledged") {
             return {
-              ...base(request),
+              ...delivery,
               _tag: "ConfirmedAppServer",
               route: "app-server",
               turnId: receipt.turnId,
               proof,
-            };
+            } as const;
           }
-          if (receipt._tag === "Rejected" || receipt._tag === "RejectedBeforeWrite") {
+          if (receipt._tag === "Rejected") {
             return {
-              ...base(request),
+              ...delivery,
               _tag: "Rejected",
               route: "app-server",
-              detail: receipt.detail,
+              diagnostic: receipt.diagnostic,
               proof,
             };
           }
-          if (receipt._tag === "UnavailableBeforeWrite") {
+          if (receipt._tag === "NotSubmitted") {
             return {
-              ...base(request),
+              ...delivery,
               _tag: "Unavailable",
               route: "app-server",
-              detail: receipt.detail,
+              diagnostic: receipt.diagnostic,
               proof,
             };
           }
-          const canonical = yield* local.reconcile(request, "app-server");
-          const reconciledProof = { ...proof, canonicalEvidence: canonical };
+          const canonical = yield* boundedEvidence(
+            local.reconcile(delivery, "app-server"),
+            request.turnTimeout,
+          );
+          const reconciled: DeliveryProof = {
+            ...proof,
+            canonicalAfterAppServer: canonical,
+          };
           if (canonical._tag === "Found") {
             return {
-              ...base(request),
+              ...delivery,
               _tag: "ConfirmedAppServer",
               route: "app-server",
               turnId: canonical.turnId,
-              proof: reconciledProof,
+              proof: reconciled,
             };
           }
           if (canonical._tag === "Absent") {
             return {
-              ...base(request),
+              ...delivery,
               _tag: "Unavailable",
               route: "app-server",
-              detail: canonical.detail,
-              proof: reconciledProof,
+              diagnostic: { code: "app-server-unavailable" },
+              proof: reconciled,
             };
           }
           return {
-            ...base(request),
+            ...delivery,
             _tag: "Ambiguous",
             route: "app-server",
-            detail: canonical.detail,
-            proof: reconciledProof,
+            diagnostic: canonical.diagnostic,
+            proof: reconciled,
           };
         });
 
-      const chooseRoute = (request: TurnRequest): Effect.Effect<RoutePlan> =>
+      const attemptDesktopRoute = (
+        request: TurnRequest,
+      ): Effect.Effect<RoutePlan> =>
         Effect.gen(function* () {
+          const delivery = reference(request);
           if (circuits.has(request.threadId)) {
-            return {
-              _tag: "DirectAppServer",
-              desktopReceipt: null,
-              desktopEvidence: null,
-              canonicalEvidence: null,
-            };
+            return { _tag: "DirectAppServer", receipt: null };
           }
           const state = yield* desktop.routeState(request.threadId);
           if (state._tag !== "HealthyAttached") {
-            return {
-              _tag: "DirectAppServer",
-              desktopReceipt: null,
-              desktopEvidence: null,
-              canonicalEvidence: null,
-            };
+            return { _tag: "DirectAppServer", receipt: null };
           }
-          const receipt = yield* desktop.inject(request);
+          // The gate spans state, injection, and marker installation so a
+          // second command cannot inject before submission truth is recorded.
+          const receipt = yield* Effect.uninterruptibleMask((restore) =>
+            restore(desktop.inject(request)).pipe(
+              Effect.tap((result) => Effect.sync(() => {
+                if (result._tag === "Acknowledged" ||
+                    result._tag === "Uncertain") {
+                  markReconciling(delivery);
+                }
+              })),
+              Effect.onExit((exit) => Effect.sync(() => {
+                if (!Exit.isSuccess(exit)) {
+                  openDesktopCircuit(delivery, AMBIGUOUS);
+                }
+              })),
+            ));
           if (receipt._tag === "Rejected") {
             return {
               _tag: "Terminal",
               result: {
-                ...base(request),
+                ...delivery,
                 _tag: "Rejected",
                 route: "desktop",
-                detail: receipt.detail,
-                proof: { ...emptyProof(), desktopReceipt: receipt },
+                diagnostic: receipt.diagnostic,
+                proof: { ...EMPTY_PROOF, desktopReceipt: receipt },
               },
             };
           }
-          if (receipt._tag === "RejectedBeforeWrite" ||
-              receipt._tag === "UnavailableBeforeWrite") {
-            return {
-              _tag: "DirectAppServer",
-              desktopReceipt: receipt,
-              desktopEvidence: null,
-              canonicalEvidence: null,
-            };
-          }
-          circuits.set(request.threadId, {
-            _tag: "Reconciling",
-            deliveryId: request.deliveryId,
-          });
-          return { _tag: "ReconcileDesktop", receipt };
+          return receipt._tag === "NotSubmitted"
+            ? { _tag: "DirectAppServer", receipt }
+            : { _tag: "ReconcileDesktop", receipt };
         });
 
       const reconcileDesktop = (
         request: TurnRequest,
         receipt: DesktopReconciliation["receipt"],
-      ): Effect.Effect<CoordinatedDeliveryResult> =>
-        Effect.gen(function* () {
+      ): Effect.Effect<CoordinatedDeliveryResult> => {
+        const delivery = reference(request);
+        return Effect.gen(function* () {
           const [desktopEvidence, canonical] = yield* Effect.all(
-            [desktop.evidence(request), local.reconcile(request, "desktop")],
+            [
+              boundedEvidence(desktop.evidence(delivery), request.turnTimeout),
+              boundedEvidence(
+                local.reconcile(delivery, "desktop"),
+                request.turnTimeout,
+              ),
+            ],
             { concurrency: "unbounded" },
           );
           const proof: DeliveryProof = {
             desktopReceipt: receipt,
-            appServerReceipt: null,
             desktopEvidence,
-            canonicalEvidence: canonical,
+            canonicalAfterDesktop: canonical,
+            appServerReceipt: null,
+            canonicalAfterAppServer: null,
           };
-          if (canonical._tag === "Found") {
-            const conflict = evidenceConflict(receipt, desktopEvidence, canonical);
-            if (conflict != null) {
-              open(request, conflict);
-              return {
-                ...base(request),
-                _tag: "Ambiguous",
-                route: "desktop",
-                detail: conflict,
-                proof,
-              };
-            }
-            const current = circuits.get(request.threadId);
-            if (current?._tag === "Reconciling" &&
-                current.deliveryId === request.deliveryId) {
-              circuits.delete(request.threadId);
-            }
+          const decision = decideDesktopEvidence(
+            receipt,
+            desktopEvidence,
+            canonical,
+          );
+          if (decision._tag === "Confirm") {
+            closeIfOwnedBy(delivery);
             return {
-              ...base(request),
+              ...delivery,
               _tag: "ConfirmedDesktop",
               route: "desktop",
-              turnId: canonical.turnId,
+              turnId: decision.turnId,
               proof,
-            };
+            } as const;
           }
-          if (canonical._tag === "Absent") {
-            open(request, "desktop write proven absent from canonical store");
+          if (decision._tag === "Fallback") {
+            closeIfOwnedBy(delivery);
             return yield* submitAppServer(request, {
               desktopReceipt: receipt,
               desktopEvidence,
-              canonicalEvidence: canonical,
+              canonicalAfterDesktop: canonical,
             });
           }
-          open(request, canonical.detail);
+          openDesktopCircuit(delivery, decision.diagnostic);
           return {
-            ...base(request),
+            ...delivery,
             _tag: "Ambiguous",
             route: "desktop",
-            detail: canonical.detail,
+            diagnostic: decision.diagnostic,
             proof,
-          };
+          } as const;
         });
+      };
 
-      const deliver = (request: TurnRequest) =>
-        Effect.gen(function* () {
-          const gate = yield* gateFor(request.threadId);
-          const plan = yield* gate.withPermits(1)(chooseRoute(request));
-          if (plan._tag === "Terminal") return plan.result;
-          if (plan._tag === "DirectAppServer") {
-            return yield* submitAppServer(request, {
-              desktopReceipt: plan.desktopReceipt,
-              desktopEvidence: plan.desktopEvidence,
-              canonicalEvidence: plan.canonicalEvidence,
-            });
-          }
-          return yield* reconcileDesktop(request, plan.receipt);
-        });
+      const deliver = (request: TurnRequest) => {
+        const delivery = reference(request);
+        return Effect.acquireUseRelease(
+          acquireGate(request.threadId),
+          (gate) => Effect.gen(function* () {
+            const plan = yield* gate.semaphore.withPermits(1)(
+              attemptDesktopRoute(request),
+            );
+            if (plan._tag === "Terminal") return plan.result;
+            if (plan._tag === "DirectAppServer") {
+              return yield* submitAppServer(request, {
+                desktopReceipt: plan.receipt,
+                desktopEvidence: null,
+                canonicalAfterDesktop: null,
+              });
+            }
+            return yield* reconcileDesktop(request, plan.receipt);
+          }).pipe(
+            Effect.onExit((exit) => Effect.sync(() => {
+              if (!Exit.isSuccess(exit)) {
+                const current = circuits.get(delivery.threadId);
+                if (current?._tag === "Reconciling" &&
+                    current.deliveryId === delivery.deliveryId) {
+                  openDesktopCircuit(delivery, AMBIGUOUS);
+                }
+              }
+            })),
+          ),
+          (gate) => releaseGate(request.threadId, gate),
+        );
+      };
 
       return DeliveryCoordinator.of({
         deliver,
         circuitState: (threadId) => Effect.sync(() =>
           circuits.get(threadId) ?? { _tag: "Closed" as const }),
-        resetDesktopCircuit: (threadId) => Effect.sync(() => {
-          circuits.delete(threadId);
+        resetOpenDesktopCircuit: (threadId) => Effect.sync(() => {
+          if (circuits.get(threadId)?._tag === "Open") {
+            circuits.delete(threadId);
+          }
         }),
       });
     }),

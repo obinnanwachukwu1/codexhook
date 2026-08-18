@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Effect } from "effect";
+import { Effect, Fiber } from "effect";
+import { DeliveryCoordinator } from "../src/delivery/coordinator.js";
 import type { DeliveryEvidence } from "../src/delivery/routing-contracts.js";
 import { TurnId } from "../src/types.js";
 import {
@@ -8,31 +9,36 @@ import {
   request,
 } from "./support/coordinator-fixture.js";
 
-async function waitFor(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 1_000;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error("condition timed out");
-    await new Promise((resolve) => setTimeout(resolve, 2));
-  }
+const unresolved: DeliveryEvidence = {
+  _tag: "Unresolved",
+  diagnostic: { code: "timeout" },
+};
+
+function latch<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
-test("a reconciling desktop write does not block a later app-server command", async () => {
-  let resolveCanonical!: (value: DeliveryEvidence) => void;
-  const canonical = new Promise<DeliveryEvidence>((resolve) => {
-    resolveCanonical = resolve;
-  });
+test("reconciling does not block a later app-server command", async () => {
+  const canonical = latch<DeliveryEvidence>();
+  const entered = latch<void>();
   const fixture = coordinatorFixture({
-    desktopReceipt: {
+    desktopReceipt: () => Effect.succeed({
       _tag: "Uncertain",
-      detail: "desktop disconnected after sending",
-    },
-    desktopEvidence: {
-      _tag: "Unresolved",
-      detail: "desktop state unavailable",
-    },
-    canonicalEvidence: (input, source) =>
-      source === "desktop" && input.deliveryId === "delivery-1"
-        ? Effect.promise(() => canonical)
+      diagnostic: { code: "disconnected" },
+    }),
+    desktopEvidence: () => Effect.succeed(unresolved),
+    canonicalEvidence: (delivery, source) =>
+      source === "desktop" && delivery.deliveryId === "delivery-1"
+        ? Effect.sync(() => entered.resolve()).pipe(
+            Effect.zipRight(Effect.promise(() => canonical.promise)),
+          )
         : Effect.succeed({ _tag: "Found", turnId: TurnId("turn-2") }),
     localReceipt: (input) => Effect.succeed({
       _tag: "Acknowledged",
@@ -41,54 +47,113 @@ test("a reconciling desktop write does not block a later app-server command", as
   });
   try {
     const first = fixture.deliver(request("delivery-1"));
-    await waitFor(() => fixture.recorder.reconciliations.length === 1);
-    assert.equal((await fixture.circuitState(request().threadId))._tag, "Reconciling");
+    await entered.promise;
+    assert.equal((await fixture.circuitState(request().threadId))._tag,
+      "Reconciling");
 
-    const second = fixture.deliver(request("delivery-2"));
-    const secondResult = await Promise.race([
-      second,
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("later command was blocked")), 100)),
-    ]);
+    const secondResult = await fixture.deliver(request("delivery-2"));
     assert.equal(secondResult._tag, "ConfirmedAppServer");
     assert.deepEqual(fixture.recorder.desktopInjections, ["delivery-1"]);
     assert.deepEqual(fixture.recorder.localDeliveries, ["delivery-2"]);
 
-    resolveCanonical({ _tag: "Unresolved", detail: "event barrier timed out" });
-    const firstResult = await first;
-    assert.equal(firstResult._tag, "Ambiguous");
+    canonical.resolve(unresolved);
+    assert.equal((await first)._tag, "Ambiguous");
     assert.equal((await fixture.circuitState(request().threadId))._tag, "Open");
   } finally {
     await fixture.runtime.dispose();
   }
 });
 
-test("simultaneous commands cannot both cross the desktop injection barrier", async () => {
-  let resolveCanonical!: (value: DeliveryEvidence) => void;
-  const canonical = new Promise<DeliveryEvidence>((resolve) => {
-    resolveCanonical = resolve;
-  });
+test("reset cannot clear an in-flight reconciliation", async () => {
+  const canonical = latch<DeliveryEvidence>();
+  const entered = latch<void>();
   const fixture = coordinatorFixture({
-    desktopReceipt: {
+    desktopReceipt: () => Effect.succeed({
       _tag: "Uncertain",
-      detail: "write outcome unknown",
-    },
-    canonicalEvidence: (_input, source) => source === "desktop"
-      ? Effect.promise(() => canonical)
-      : Effect.succeed({ _tag: "Found", turnId: TurnId("turn-app") }),
-    localReceipt: {
-      _tag: "Acknowledged",
-      turnId: TurnId("turn-app"),
-    },
+      diagnostic: { code: "write-ambiguous" },
+    }),
+    canonicalEvidence: (delivery, source) =>
+      source === "desktop" && delivery.deliveryId === "delivery-1"
+        ? Effect.sync(() => entered.resolve()).pipe(
+            Effect.zipRight(Effect.promise(() => canonical.promise)),
+          )
+        : Effect.succeed({ _tag: "Found", turnId: TurnId("turn-2") }),
   });
   try {
-    const first = fixture.deliver(request("delivery-a"));
-    const second = fixture.deliver(request("delivery-b"));
-    await waitFor(() => fixture.recorder.localDeliveries.length === 1);
+    const first = fixture.deliver(request("delivery-1"));
+    await entered.promise;
+    await fixture.resetCircuit(request().threadId);
+    assert.equal((await fixture.circuitState(request().threadId))._tag,
+      "Reconciling");
+
+    assert.equal(
+      (await fixture.deliver(request("delivery-2")))._tag,
+      "ConfirmedAppServer",
+    );
+    assert.deepEqual(fixture.recorder.desktopInjections, ["delivery-1"]);
+    canonical.resolve(unresolved);
+    await first;
+  } finally {
+    await fixture.runtime.dispose();
+  }
+});
+
+test("an open circuit bypasses Desktop until verified reset", async () => {
+  let canonicalCalls = 0;
+  const fixture = coordinatorFixture({
+    canonicalEvidence: () => Effect.succeed(
+      ++canonicalCalls === 1
+        ? unresolved
+        : { _tag: "Found", turnId: TurnId("turn-3") },
+    ),
+    desktopEvidence: () => Effect.succeed(unresolved),
+    desktopReceipt: () => Effect.succeed({
+      _tag: "Uncertain",
+      diagnostic: { code: "write-ambiguous" },
+    }),
+  });
+  try {
+    assert.equal((await fixture.deliver(request("delivery-1")))._tag,
+      "Ambiguous");
+    assert.equal((await fixture.deliver(request("delivery-2")))._tag,
+      "ConfirmedAppServer");
+    assert.deepEqual(fixture.recorder.routeStateQueries, ["thread-1"]);
+
+    await fixture.resetCircuit(request().threadId);
+    assert.equal((await fixture.deliver(request("delivery-3")))._tag,
+      "ConfirmedDesktop");
+    assert.deepEqual(fixture.recorder.routeStateQueries,
+      ["thread-1", "thread-1"]);
+  } finally {
+    await fixture.runtime.dispose();
+  }
+});
+
+test("simultaneous commands cannot both cross the desktop barrier", async () => {
+  const canonical = latch<DeliveryEvidence>();
+  const entered = latch<void>();
+  const fixture = coordinatorFixture({
+    desktopReceipt: () => Effect.succeed({
+      _tag: "Uncertain",
+      diagnostic: { code: "write-ambiguous" },
+    }),
+    canonicalEvidence: (_delivery, source) => source === "desktop"
+      ? Effect.sync(() => entered.resolve()).pipe(
+          Effect.zipRight(Effect.promise(() => canonical.promise)),
+        )
+      : Effect.succeed({ _tag: "Found", turnId: TurnId("turn-app") }),
+  });
+  try {
+    const deliveries = [
+      fixture.deliver(request("delivery-a")),
+      fixture.deliver(request("delivery-b")),
+    ] as const;
+    await entered.promise;
+    const appServerResult = await Promise.race(deliveries);
+    assert.equal(appServerResult._tag, "ConfirmedAppServer");
     assert.equal(fixture.recorder.desktopInjections.length, 1);
-    assert.equal(fixture.recorder.localDeliveries.length, 1);
-    resolveCanonical({ _tag: "Unresolved", detail: "not proven" });
-    const results = await Promise.all([first, second]);
+    canonical.resolve(unresolved);
+    const results = await Promise.all(deliveries);
     assert.deepEqual(
       results.map((result) => result._tag).sort(),
       ["Ambiguous", "ConfirmedAppServer"],
@@ -99,34 +164,64 @@ test("simultaneous commands cannot both cross the desktop injection barrier", as
 });
 
 test("per-task gates do not serialize independent tasks", async () => {
+  const bothEntered = latch<void>();
+  const release = latch<void>();
   const entered = new Set<string>();
-  let release!: () => void;
-  const blocked = new Promise<void>((resolve) => {
-    release = resolve;
-  });
   const fixture = coordinatorFixture({
     desktopReceipt: (input) => Effect.sync(() => {
       entered.add(input.threadId);
+      if (entered.size === 2) bothEntered.resolve();
     }).pipe(
-      Effect.zipRight(Effect.promise(() => blocked)),
-      Effect.as({ _tag: "Acknowledged", turnId: TurnId(`turn-${input.threadId}`) }),
+      Effect.zipRight(Effect.promise(() => release.promise)),
+      Effect.as({
+        _tag: "Acknowledged",
+        turnId: TurnId(`turn-${input.threadId}`),
+      }),
     ),
-    desktopEvidence: (input) => Effect.succeed({
+    desktopEvidence: (delivery) => Effect.succeed({
       _tag: "Found",
-      turnId: TurnId(`turn-${input.threadId}`),
+      turnId: TurnId(`turn-${delivery.threadId}`),
     }),
-    canonicalEvidence: (input) => Effect.succeed({
+    canonicalEvidence: (delivery) => Effect.succeed({
       _tag: "Found",
-      turnId: TurnId(`turn-${input.threadId}`),
+      turnId: TurnId(`turn-${delivery.threadId}`),
     }),
   });
   try {
-    const first = fixture.deliver(request("delivery-a", "thread-a"));
-    const second = fixture.deliver(request("delivery-b", "thread-b"));
-    await waitFor(() => entered.size === 2);
-    release();
-    const results = await Promise.all([first, second]);
-    assert.equal(results.every((result) => result._tag === "ConfirmedDesktop"), true);
+    const deliveries = [
+      fixture.deliver(request("delivery-a", "thread-a")),
+      fixture.deliver(request("delivery-b", "thread-b")),
+    ] as const;
+    await bothEntered.promise;
+    release.resolve();
+    const results = await Promise.all(deliveries);
+    assert.equal(results.every((result) => result._tag === "ConfirmedDesktop"),
+      true);
+  } finally {
+    await fixture.runtime.dispose();
+  }
+});
+
+test("interruption converts Reconciling to an open circuit", async () => {
+  const entered = latch<void>();
+  const fixture = coordinatorFixture({
+    canonicalEvidence: (_delivery, source) => source === "desktop"
+      ? Effect.sync(() => entered.resolve()).pipe(Effect.zipRight(Effect.never))
+      : Effect.succeed({ _tag: "Found", turnId: TurnId("turn-app") }),
+  });
+  try {
+    const state = await fixture.runtime.runPromise(
+      Effect.gen(function* () {
+        const coordinator = yield* DeliveryCoordinator;
+        const fiber = yield* Effect.fork(
+          coordinator.deliver(request("delivery-interrupted")),
+        );
+        yield* Effect.promise(() => entered.promise);
+        yield* Fiber.interrupt(fiber);
+        return yield* coordinator.circuitState(request().threadId);
+      }),
+    );
+    assert.equal(state._tag, "Open");
   } finally {
     await fixture.runtime.dispose();
   }

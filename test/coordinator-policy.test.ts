@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Effect } from "effect";
+import { decideDesktopEvidence } from "../src/delivery/coordinator-policy.js";
 import type {
   DeliveryEvidence,
   DeliveryReceipt,
@@ -18,29 +20,52 @@ const acknowledged = {
 } as const satisfies DeliveryReceipt;
 const uncertain = {
   _tag: "Uncertain",
-  detail: "desktop disconnected after sending",
+  diagnostic: { code: "write-ambiguous" },
 } as const satisfies DeliveryReceipt;
-const found = {
-  _tag: "Found",
-  turnId,
-} as const satisfies DeliveryEvidence;
-const absent = {
-  _tag: "Absent",
-  detail: "delivery id absent after canonical event barrier",
-} as const satisfies DeliveryEvidence;
+const found = { _tag: "Found", turnId } as const satisfies DeliveryEvidence;
+const absent = { _tag: "Absent" } as const satisfies DeliveryEvidence;
 const unresolved = {
   _tag: "Unresolved",
-  detail: "canonical event barrier timed out",
+  diagnostic: { code: "timeout" },
 } as const satisfies DeliveryEvidence;
+
+test("desktop evidence decision table is exhaustive and pure", () => {
+  const receipts = [acknowledged, uncertain] as const;
+  const desktopEvidence = [found, absent, unresolved] as const;
+  const canonicalEvidence = [found, absent, unresolved] as const;
+  for (const receipt of receipts) {
+    for (const desktopProof of desktopEvidence) {
+      for (const canonicalProof of canonicalEvidence) {
+        const result = decideDesktopEvidence(
+          receipt,
+          desktopProof,
+          canonicalProof,
+        );
+        const expected = canonicalProof._tag === "Found"
+          ? "Confirm"
+          : canonicalProof._tag === "Absent"
+            ? "Fallback"
+            : "Ambiguous";
+        assert.equal(
+          result._tag,
+          expected,
+          `${receipt._tag}/${desktopProof._tag}/${canonicalProof._tag}`,
+        );
+      }
+    }
+  }
+});
 
 test("unattached and unhealthy tasks route directly through app-server", async (t) => {
   const states: DesktopRouteState[] = [
-    { _tag: "Unattached", detail: "no desktop owner" },
-    { _tag: "Unhealthy", detail: "desktop heartbeat expired" },
+    { _tag: "Unattached" },
+    { _tag: "Unhealthy" },
   ];
   for (const routeState of states) {
     await t.test(routeState._tag, async () => {
-      const fixture = coordinatorFixture({ routeState, localReceipt: acknowledged });
+      const fixture = coordinatorFixture({
+        routeState: () => Effect.succeed(routeState),
+      });
       try {
         const result = await fixture.deliver(request());
         assert.equal(result._tag, "ConfirmedAppServer");
@@ -53,74 +78,24 @@ test("unattached and unhealthy tasks route directly through app-server", async (
   }
 });
 
-test("desktop reconciliation decision table is exhaustive", async (t) => {
-  const receipts = [acknowledged, uncertain] as const;
-  const desktopEvidence = [found, absent, unresolved] as const;
-  const canonicalEvidence = [found, absent, unresolved] as const;
-  for (const receipt of receipts) {
-    for (const desktopProof of desktopEvidence) {
-      for (const canonicalProof of canonicalEvidence) {
-        const name = `${receipt._tag}/${desktopProof._tag}/${canonicalProof._tag}`;
-        await t.test(name, async () => {
-          const fixture = coordinatorFixture({
-            desktopReceipt: receipt,
-            desktopEvidence: desktopProof,
-            canonicalEvidence: canonicalProof,
-            localReceipt: acknowledged,
-          });
-          try {
-            const result = await fixture.deliver(request());
-            const expected = canonicalProof._tag === "Found"
-              ? "ConfirmedDesktop"
-              : canonicalProof._tag === "Absent"
-                ? "ConfirmedAppServer"
-                : "Ambiguous";
-            assert.equal(result._tag, expected);
-            assert.equal(result.proof.desktopReceipt?._tag, receipt._tag);
-            assert.equal(result.proof.desktopEvidence?._tag, desktopProof._tag);
-            assert.equal(result.proof.canonicalEvidence?._tag, canonicalProof._tag);
-            assert.equal(
-              fixture.recorder.localDeliveries.length,
-              canonicalProof._tag === "Absent" ? 1 : 0,
-            );
-          } finally {
-            await fixture.runtime.dispose();
-          }
-        });
-      }
-    }
-  }
-});
-
-test("only a proven pre-write desktop failure may fall back immediately", async (t) => {
+test("canonical evidence drives the outcome and circuit transition", async (t) => {
   const cases = [
-    {
-      receipt: { _tag: "RejectedBeforeWrite", detail: "version mismatch" },
-      expected: "ConfirmedAppServer",
-      localWrites: 1,
-    },
-    {
-      receipt: { _tag: "UnavailableBeforeWrite", detail: "socket closed" },
-      expected: "ConfirmedAppServer",
-      localWrites: 1,
-    },
-    {
-      receipt: { _tag: "Rejected", detail: "handler rejected request" },
-      expected: "Rejected",
-      localWrites: 0,
-    },
+    { canonical: found, outcome: "ConfirmedDesktop", circuit: "Closed" },
+    { canonical: absent, outcome: "ConfirmedAppServer", circuit: "Closed" },
+    { canonical: unresolved, outcome: "Ambiguous", circuit: "Open" },
   ] as const;
   for (const entry of cases) {
-    await t.test(entry.receipt._tag, async () => {
+    await t.test(entry.canonical._tag, async () => {
       const fixture = coordinatorFixture({
-        desktopReceipt: entry.receipt,
-        localReceipt: acknowledged,
+        canonicalEvidence: () => Effect.succeed(entry.canonical),
       });
       try {
         const result = await fixture.deliver(request());
-        assert.equal(result._tag, entry.expected);
-        assert.equal(fixture.recorder.localDeliveries.length, entry.localWrites);
-        assert.deepEqual(fixture.recorder.desktopEvidence, []);
+        assert.equal(result._tag, entry.outcome);
+        assert.equal(
+          (await fixture.circuitState(request().threadId))._tag,
+          entry.circuit,
+        );
       } finally {
         await fixture.runtime.dispose();
       }
@@ -128,7 +103,48 @@ test("only a proven pre-write desktop failure may fall back immediately", async 
   }
 });
 
-test("app-server receipts report confirmed, rejected, unavailable, and ambiguous truthfully", async (t) => {
+test("only confirmed non-submission may fall back immediately", async (t) => {
+  const cases: ReadonlyArray<{
+    receipt: DeliveryReceipt;
+    expected: string;
+    localWrites: number;
+  }> = [
+    {
+      receipt: {
+        _tag: "NotSubmitted",
+        diagnostic: { code: "desktop-incompatible" },
+      },
+      expected: "ConfirmedAppServer",
+      localWrites: 1,
+    },
+    {
+      receipt: {
+        _tag: "Rejected",
+        diagnostic: { code: "request-rejected" },
+      },
+      expected: "Rejected",
+      localWrites: 0,
+    },
+  ];
+  for (const entry of cases) {
+    await t.test(entry.receipt._tag, async () => {
+      const fixture = coordinatorFixture({
+        desktopReceipt: () => Effect.succeed(entry.receipt),
+      });
+      try {
+        const result = await fixture.deliver(request());
+        assert.equal(result._tag, entry.expected);
+        assert.equal(fixture.recorder.localDeliveries.length, entry.localWrites);
+        assert.deepEqual(fixture.recorder.desktopEvidence, []);
+        assert.deepEqual(fixture.recorder.reconciliations, []);
+      } finally {
+        await fixture.runtime.dispose();
+      }
+    });
+  }
+});
+
+test("app-server receipts report all four submission truths", async (t) => {
   const cases: ReadonlyArray<{
     receipt: DeliveryReceipt;
     canonical: DeliveryEvidence;
@@ -136,19 +152,20 @@ test("app-server receipts report confirmed, rejected, unavailable, and ambiguous
   }> = [
     { receipt: acknowledged, canonical: found, expected: "ConfirmedAppServer" },
     {
-      receipt: { _tag: "RejectedBeforeWrite", detail: "invalid request" },
-      canonical: unresolved,
-      expected: "Rejected",
-    },
-    {
-      receipt: { _tag: "Rejected", detail: "app-server rejected request" },
-      canonical: unresolved,
-      expected: "Rejected",
-    },
-    {
-      receipt: { _tag: "UnavailableBeforeWrite", detail: "not running" },
+      receipt: {
+        _tag: "NotSubmitted",
+        diagnostic: { code: "app-server-unavailable" },
+      },
       canonical: unresolved,
       expected: "Unavailable",
+    },
+    {
+      receipt: {
+        _tag: "Rejected",
+        diagnostic: { code: "request-rejected" },
+      },
+      canonical: unresolved,
+      expected: "Rejected",
     },
     { receipt: uncertain, canonical: found, expected: "ConfirmedAppServer" },
     { receipt: uncertain, canonical: absent, expected: "Unavailable" },
@@ -157,14 +174,18 @@ test("app-server receipts report confirmed, rejected, unavailable, and ambiguous
   for (const [index, entry] of cases.entries()) {
     await t.test(`${index}-${entry.expected}`, async () => {
       const fixture = coordinatorFixture({
-        routeState: { _tag: "Unattached", detail: "CLI-originated task" },
-        localReceipt: entry.receipt,
-        canonicalEvidence: entry.canonical,
+        routeState: () => Effect.succeed({ _tag: "Unattached" }),
+        localReceipt: () => Effect.succeed(entry.receipt),
+        canonicalEvidence: () => Effect.succeed(entry.canonical),
       });
       try {
         const result = await fixture.deliver(request());
         assert.equal(result._tag, entry.expected);
         assert.equal(result.proof.appServerReceipt?._tag, entry.receipt._tag);
+        assert.equal(
+          fixture.recorder.reconciliations.length,
+          entry.receipt._tag === "Uncertain" ? 1 : 0,
+        );
       } finally {
         await fixture.runtime.dispose();
       }
@@ -172,20 +193,57 @@ test("app-server receipts report confirmed, rejected, unavailable, and ambiguous
   }
 });
 
-test("conflicting desktop and canonical turn identity is ambiguous", async () => {
+test("fallback proof preserves both canonical observations", async () => {
   const fixture = coordinatorFixture({
-    desktopReceipt: acknowledged,
-    desktopEvidence: found,
-    canonicalEvidence: { _tag: "Found", turnId: TurnId("turn-other") },
+    canonicalEvidence: (_delivery, source) => Effect.succeed(
+      source === "desktop" ? absent : found,
+    ),
+    localReceipt: () => Effect.succeed(uncertain),
+  });
+  try {
+    const result = await fixture.deliver(request());
+    assert.equal(result._tag, "ConfirmedAppServer");
+    assert.equal(result.proof.canonicalAfterDesktop?._tag, "Absent");
+    assert.equal(result.proof.canonicalAfterAppServer?._tag, "Found");
+  } finally {
+    await fixture.runtime.dispose();
+  }
+});
+
+test("conflicting desktop state and canonical identity is ambiguous", async () => {
+  const fixture = coordinatorFixture({
+    desktopReceipt: () => Effect.succeed(uncertain),
+    desktopEvidence: () => Effect.succeed({
+      _tag: "Found",
+      turnId: TurnId("turn-desktop"),
+    }),
+    canonicalEvidence: () => Effect.succeed({
+      _tag: "Found",
+      turnId: TurnId("turn-canonical"),
+    }),
   });
   try {
     const result = await fixture.deliver(request());
     assert.equal(result._tag, "Ambiguous");
-    assert.match(
-      result._tag === "Ambiguous" ? result.detail : "",
-      /different turns/,
+    assert.equal(
+      result._tag === "Ambiguous" && result.diagnostic.code,
+      "write-ambiguous",
     );
-    assert.equal((await fixture.circuitState(request().threadId))._tag, "Open");
+  } finally {
+    await fixture.runtime.dispose();
+  }
+});
+
+test("message contents never enter proof, results, or circuit logs", async () => {
+  const fixture = coordinatorFixture({
+    desktopReceipt: () => Effect.succeed(uncertain),
+    canonicalEvidence: () => Effect.succeed(unresolved),
+  });
+  try {
+    const result = await fixture.deliver(request());
+    const serialized = JSON.stringify({ result, logs: fixture.recorder.logs });
+    assert.equal(serialized.includes("private webhook body"), false);
+    assert.equal(serialized.includes("write-ambiguous"), true);
   } finally {
     await fixture.runtime.dispose();
   }

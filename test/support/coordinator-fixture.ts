@@ -5,13 +5,14 @@ import {
   DeliveryCoordinatorLive,
 } from "../../src/delivery/coordinator.js";
 import {
+  CanonicalDeliveryPort,
+  type CanonicalDeliveryPortService,
   type DeliveryEvidence,
   type DeliveryReceipt,
+  type DeliveryRef,
   type DesktopRouteState,
-  DesktopSession,
-  type DesktopSessionService,
-  LocalCodexService,
-  type LocalCodexServiceApi,
+  DesktopDeliveryPort,
+  type DesktopDeliveryPortService,
 } from "../../src/delivery/routing-contracts.js";
 import { Logger } from "../../src/logger.js";
 import {
@@ -22,27 +23,31 @@ import {
 } from "../../src/types.js";
 
 export interface CoordinatorRecorder {
-  desktopEvidence: string[];
-  desktopInjections: string[];
-  localDeliveries: string[];
-  reconciliations: Array<{ deliveryId: string; source: string }>;
+  readonly desktopEvidence: string[];
+  readonly desktopInjections: string[];
+  readonly localDeliveries: string[];
+  readonly logs: Array<Record<string, unknown>>;
+  readonly reconciliations: Array<{ deliveryId: string; source: string }>;
+  readonly routeStateQueries: string[];
 }
 
 export interface CoordinatorFixtureOptions {
-  readonly routeState?: DesktopRouteState | ((request: ThreadId) => DesktopRouteState);
-  readonly desktopReceipt?: DeliveryReceipt | ((request: TurnRequest) => Effect.Effect<DeliveryReceipt>);
-  readonly desktopEvidence?: DeliveryEvidence | ((request: TurnRequest) => Effect.Effect<DeliveryEvidence>);
-  readonly localReceipt?: DeliveryReceipt | ((request: TurnRequest) => Effect.Effect<DeliveryReceipt>);
-  readonly canonicalEvidence?: DeliveryEvidence | ((request: TurnRequest, source: "desktop" | "app-server") => Effect.Effect<DeliveryEvidence>);
-}
-
-function valueEffect<A, B>(
-  value: A | ((input: B) => Effect.Effect<A>),
-  input: B,
-): Effect.Effect<A> {
-  return typeof value === "function"
-    ? (value as (item: B) => Effect.Effect<A>)(input)
-    : Effect.succeed(value);
+  readonly routeState?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<DesktopRouteState>;
+  readonly desktopReceipt?: (
+    request: TurnRequest,
+  ) => Effect.Effect<DeliveryReceipt>;
+  readonly desktopEvidence?: (
+    delivery: DeliveryRef,
+  ) => Effect.Effect<DeliveryEvidence>;
+  readonly localReceipt?: (
+    request: TurnRequest,
+  ) => Effect.Effect<DeliveryReceipt>;
+  readonly canonicalEvidence?: (
+    delivery: DeliveryRef,
+    source: "desktop" | "app-server",
+  ) => Effect.Effect<DeliveryEvidence>;
 }
 
 export function request(
@@ -64,55 +69,74 @@ export function coordinatorFixture(options: CoordinatorFixtureOptions = {}) {
     desktopEvidence: [],
     desktopInjections: [],
     localDeliveries: [],
+    logs: [],
     reconciliations: [],
+    routeStateQueries: [],
   };
-  const routeState = options.routeState ?? { _tag: "HealthyAttached" };
-  const desktopReceipt = options.desktopReceipt ?? {
-    _tag: "Acknowledged",
-    turnId: TurnId("turn-1"),
-  };
-  const desktopEvidence = options.desktopEvidence ?? {
-    _tag: "Found",
-    turnId: TurnId("turn-1"),
-  };
-  const localReceipt = options.localReceipt ?? desktopReceipt;
-  const canonicalEvidence = options.canonicalEvidence ?? desktopEvidence;
-
-  const desktop: DesktopSessionService = {
-    routeState: (threadId) => Effect.sync(() =>
-      typeof routeState === "function" ? routeState(threadId) : routeState),
+  const desktop: DesktopDeliveryPortService = {
+    routeState: (threadId) => Effect.sync(() => {
+      recorder.routeStateQueries.push(threadId);
+    }).pipe(
+      Effect.zipRight(
+        options.routeState?.(threadId) ??
+          Effect.succeed({ _tag: "HealthyAttached" }),
+      ),
+    ),
     inject: (input) => Effect.sync(() => {
       recorder.desktopInjections.push(input.deliveryId);
-    }).pipe(Effect.zipRight(valueEffect(desktopReceipt, input))),
-    evidence: (input) => Effect.sync(() => {
-      recorder.desktopEvidence.push(input.deliveryId);
-    }).pipe(Effect.zipRight(valueEffect(desktopEvidence, input))),
+    }).pipe(
+      Effect.zipRight(
+        options.desktopReceipt?.(input) ?? Effect.succeed({
+          _tag: "Acknowledged",
+          turnId: TurnId("turn-1"),
+        }),
+      ),
+    ),
+    evidence: (delivery) => Effect.sync(() => {
+      recorder.desktopEvidence.push(delivery.deliveryId);
+    }).pipe(
+      Effect.zipRight(
+        options.desktopEvidence?.(delivery) ?? Effect.succeed({
+          _tag: "Found",
+          turnId: TurnId("turn-1"),
+        }),
+      ),
+    ),
   };
-  const local: LocalCodexServiceApi = {
+  const local: CanonicalDeliveryPortService = {
     deliver: (input) => Effect.sync(() => {
       recorder.localDeliveries.push(input.deliveryId);
-    }).pipe(Effect.zipRight(valueEffect(localReceipt, input))),
-    reconcile: (input, source) => Effect.sync(() => {
+    }).pipe(
+      Effect.zipRight(
+        options.localReceipt?.(input) ?? Effect.succeed({
+          _tag: "Acknowledged",
+          turnId: TurnId("turn-app"),
+        }),
+      ),
+    ),
+    reconcile: (delivery, source) => Effect.sync(() => {
       recorder.reconciliations.push({
-        deliveryId: input.deliveryId,
+        deliveryId: delivery.deliveryId,
         source,
       });
     }).pipe(
       Effect.zipRight(
-        typeof canonicalEvidence === "function"
-          ? canonicalEvidence(input, source)
-          : Effect.succeed(canonicalEvidence),
+        options.canonicalEvidence?.(delivery, source) ?? Effect.succeed({
+          _tag: "Found",
+          turnId: TurnId("turn-1"),
+        }),
       ),
     ),
   };
   const logger = new Logger(new Writable({
-    write(_chunk, _encoding, callback) {
+    write(chunk, _encoding, callback) {
+      recorder.logs.push(JSON.parse(String(chunk)));
       callback();
     },
   }));
   const dependencies = Layer.merge(
-    Layer.succeed(DesktopSession, DesktopSession.of(desktop)),
-    Layer.succeed(LocalCodexService, LocalCodexService.of(local)),
+    Layer.succeed(DesktopDeliveryPort, DesktopDeliveryPort.of(desktop)),
+    Layer.succeed(CanonicalDeliveryPort, CanonicalDeliveryPort.of(local)),
   );
   const runtime = ManagedRuntime.make(
     DeliveryCoordinatorLive(logger).pipe(Layer.provide(dependencies)),
@@ -127,6 +151,10 @@ export function coordinatorFixture(options: CoordinatorFixtureOptions = {}) {
     circuitState: (threadId: ThreadId) => runtime.runPromise(
       Effect.flatMap(DeliveryCoordinator, (coordinator) =>
         coordinator.circuitState(threadId)),
+    ),
+    resetCircuit: (threadId: ThreadId) => runtime.runPromise(
+      Effect.flatMap(DeliveryCoordinator, (coordinator) =>
+        coordinator.resetOpenDesktopCircuit(threadId)),
     ),
   };
 }

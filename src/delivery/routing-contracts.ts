@@ -6,40 +6,56 @@ import type {
   TurnRequest,
 } from "../types.js";
 
+export type RoutingDiagnosticCode =
+  | "desktop-unavailable"
+  | "desktop-incompatible"
+  | "app-server-unavailable"
+  | "app-server-incompatible"
+  | "task-not-found"
+  | "write-ambiguous"
+  | "request-rejected"
+  | "timeout"
+  | "disconnected"
+  | "internal";
+
+/** Closed, content-free diagnostic safe for logs and result metadata. */
+export interface RoutingDiagnostic {
+  readonly code: RoutingDiagnosticCode;
+}
+
+export interface DeliveryRef {
+  readonly threadId: ThreadId;
+  readonly deliveryId: DeliveryId;
+}
+
 export type DesktopRouteState =
   | { readonly _tag: "HealthyAttached" }
-  | { readonly _tag: "Unattached"; readonly detail: string }
-  | { readonly _tag: "Unhealthy"; readonly detail: string };
+  | { readonly _tag: "Unattached" }
+  | { readonly _tag: "Unhealthy" };
 
-/**
- * A receipt describes only what the selected transport can prove about its
- * write. It deliberately does not imply that the canonical local store
- * contains the command.
- */
+/** Desktop acknowledgement is a receipt; app-server acknowledgement is canonical. */
 export type DeliveryReceipt =
   | { readonly _tag: "Acknowledged"; readonly turnId: TurnId }
-  | { readonly _tag: "RejectedBeforeWrite"; readonly detail: string }
-  | { readonly _tag: "UnavailableBeforeWrite"; readonly detail: string }
-  | { readonly _tag: "Rejected"; readonly detail: string }
-  | { readonly _tag: "Uncertain"; readonly detail: string };
+  | { readonly _tag: "NotSubmitted"; readonly diagnostic: RoutingDiagnostic }
+  | { readonly _tag: "Rejected"; readonly diagnostic: RoutingDiagnostic }
+  | { readonly _tag: "Uncertain"; readonly diagnostic: RoutingDiagnostic };
 
 export type DeliveryEvidence =
   | { readonly _tag: "Found"; readonly turnId: TurnId }
-  | { readonly _tag: "Absent"; readonly detail: string }
-  | { readonly _tag: "Unresolved"; readonly detail: string };
+  | { readonly _tag: "Absent" }
+  | { readonly _tag: "Unresolved"; readonly diagnostic: RoutingDiagnostic };
 
 export type DeliveryRoute = "desktop" | "app-server";
 
 export interface DeliveryProof {
   readonly desktopReceipt: DeliveryReceipt | null;
-  readonly appServerReceipt: DeliveryReceipt | null;
   readonly desktopEvidence: DeliveryEvidence | null;
-  readonly canonicalEvidence: DeliveryEvidence | null;
+  readonly canonicalAfterDesktop: DeliveryEvidence | null;
+  readonly appServerReceipt: DeliveryReceipt | null;
+  readonly canonicalAfterAppServer: DeliveryEvidence | null;
 }
 
-interface DeliveryResultBase {
-  readonly deliveryId: DeliveryId;
-  readonly threadId: ThreadId;
+interface DeliveryResultBase extends DeliveryRef {
   readonly proof: DeliveryProof;
 }
 
@@ -57,20 +73,21 @@ export type CoordinatedDeliveryResult =
   | (DeliveryResultBase & {
       readonly _tag: "Ambiguous";
       readonly route: DeliveryRoute;
-      readonly detail: string;
+      readonly diagnostic: RoutingDiagnostic;
     })
   | (DeliveryResultBase & {
       readonly _tag: "Unavailable";
       readonly route: "app-server";
-      readonly detail: string;
+      readonly diagnostic: RoutingDiagnostic;
     })
   | (DeliveryResultBase & {
       readonly _tag: "Rejected";
       readonly route: DeliveryRoute;
-      readonly detail: string;
+      readonly diagnostic: RoutingDiagnostic;
     });
 
-export interface DesktopSessionService {
+/** Internal adapter port. PR #8 owns the eventual public Desktop contracts. */
+export interface DesktopDeliveryPortService {
   readonly routeState: (
     threadId: ThreadId,
   ) => Effect.Effect<DesktopRouteState>;
@@ -78,36 +95,34 @@ export interface DesktopSessionService {
     request: TurnRequest,
   ) => Effect.Effect<DeliveryReceipt>;
   readonly evidence: (
-    request: TurnRequest,
+    delivery: DeliveryRef,
   ) => Effect.Effect<DeliveryEvidence>;
 }
 
-export class DesktopSession extends Context.Tag(
-  "codexhook/DesktopSession",
-)<DesktopSession, DesktopSessionService>() {}
+export class DesktopDeliveryPort extends Context.Tag(
+  "codexhook/DesktopDeliveryPort",
+)<DesktopDeliveryPort, DesktopDeliveryPortService>() {}
 
-export interface LocalCodexServiceApi {
+/** Internal adapter port. PR #8 owns the eventual public LocalCodexService. */
+export interface CanonicalDeliveryPortService {
   readonly deliver: (
     request: TurnRequest,
   ) => Effect.Effect<DeliveryReceipt>;
   readonly reconcile: (
-    request: TurnRequest,
+    delivery: DeliveryRef,
     source: DeliveryRoute,
   ) => Effect.Effect<DeliveryEvidence>;
 }
 
-export class LocalCodexService extends Context.Tag(
-  "codexhook/LocalCodexService",
-)<LocalCodexService, LocalCodexServiceApi>() {}
+export class CanonicalDeliveryPort extends Context.Tag(
+  "codexhook/CanonicalDeliveryPort",
+)<CanonicalDeliveryPort, CanonicalDeliveryPortService>() {}
 
 export type DesktopCircuitState =
   | { readonly _tag: "Closed" }
-  | {
-      readonly _tag: "Reconciling";
-      readonly deliveryId: DeliveryId;
-    }
+  | { readonly _tag: "Reconciling"; readonly deliveryId: DeliveryId }
   | {
       readonly _tag: "Open";
       readonly deliveryId: DeliveryId;
-      readonly detail: string;
+      readonly diagnostic: RoutingDiagnostic;
     };
