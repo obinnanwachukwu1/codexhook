@@ -51,6 +51,7 @@ export interface CompatibilityReportPayload {
     readonly desktop: "available" | "unavailable";
   };
   readonly diagnostics: {
+    readonly journalAvailable: boolean;
     readonly entries: number;
     readonly invalidEntries: number;
     readonly outcomeCounts: Partial<Record<DeliveryOutcomeTag, number>>;
@@ -196,6 +197,7 @@ export function buildCompatibilityReport(
     daemon: daemonDetails(input.daemon),
     planes: planes(input),
     diagnostics: {
+      journalAvailable: input.journal.available,
       entries: input.journal.records.length,
       invalidEntries: input.journal.invalidLines,
       ...diagnostics,

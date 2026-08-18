@@ -258,6 +258,7 @@ export async function doctor(arguments_: string[]): Promise<void> {
       desktopIpcAvailable,
     },
     diagnostics: {
+      journalAvailable: journalSnapshot.available,
       entries: journalSnapshot.records.length,
       invalidEntries: journalSnapshot.invalidLines,
       limits: journalSnapshot.limits,

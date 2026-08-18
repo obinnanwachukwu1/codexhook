@@ -101,7 +101,24 @@ test("journal records all terminal truths without identifiers or free text", () 
       "private error text",
       "elapsedMs",
     ]) assert.equal(serialized.includes(forbidden), false);
-    assert.equal(statSync(journal.filePath).mode & 0o777, 0o600);
+    if (process.platform !== "win32") {
+      assert.equal(statSync(journal.filePath).mode & 0o777, 0o600);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable journal degrades without hiding doctor evidence", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "codexhook-journal-"));
+  try {
+    const journal = new DiagnosticJournal(directory);
+    assert.deepEqual(journal.read(), {
+      records: [],
+      invalidLines: 0,
+      available: false,
+      limits: { bytes: 256 * 1024, entries: 512 },
+    });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -190,6 +207,7 @@ test("compatibility payload is allowlisted, local, and consent-gated", () => {
       desktop: "available",
     });
     assert.equal(payload.diagnostics.outcomeCounts.Ambiguous, 1);
+    assert.equal(payload.diagnostics.journalAvailable, true);
     assert.equal(payload.diagnostics.recentFailures[0]?.count, 1);
     const serialized = JSON.stringify(payload);
     for (const forbidden of [

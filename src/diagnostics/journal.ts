@@ -75,6 +75,7 @@ export interface DiagnosticJournalOptions {
 export interface DiagnosticJournalSnapshot {
   readonly records: ReadonlyArray<DiagnosticRecord>;
   readonly invalidLines: number;
+  readonly available: boolean;
   readonly limits: { readonly bytes: number; readonly entries: number };
 }
 
@@ -230,8 +231,17 @@ export class DiagnosticJournal implements DiagnosticRecorder {
   }
 
   read(): DiagnosticJournalSnapshot {
-    const snapshot = this.readAll();
-    return { ...snapshot, records: snapshot.records.slice(-this.maxEntries) };
+    try {
+      const snapshot = this.readAll();
+      return { ...snapshot, records: snapshot.records.slice(-this.maxEntries) };
+    } catch {
+      return {
+        records: [],
+        invalidLines: 0,
+        available: false,
+        limits: { bytes: this.maxBytes, entries: this.maxEntries },
+      };
+    }
   }
 
   private append(record: DiagnosticRecord): void {
@@ -302,6 +312,7 @@ export class DiagnosticJournal implements DiagnosticRecorder {
       return {
         records: [],
         invalidLines: 0,
+        available: true,
         limits: { bytes: this.maxBytes, entries: this.maxEntries },
       };
     }
@@ -320,6 +331,7 @@ export class DiagnosticJournal implements DiagnosticRecorder {
     return {
       records,
       invalidLines,
+      available: true,
       limits: { bytes: this.maxBytes, entries: this.maxEntries },
     };
   }
