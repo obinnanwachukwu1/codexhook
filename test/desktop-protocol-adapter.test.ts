@@ -9,6 +9,11 @@ import {
   type DesktopTaskChange,
   DesktopIpcProtocol,
 } from "../src/transport/desktop-task-protocol.js";
+import {
+  fixture,
+  listen,
+  testEndpoint,
+} from "./support/desktop-ipc-router.js";
 
 function frame(value: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(value));
@@ -248,4 +253,52 @@ test("Desktop broadcasts decode state deltas and delivery identities", async () 
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+async function rejectedStart(error: string) {
+  const endpoint = await testEndpoint();
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message, send) => {
+      if (message.method !== "thread-follower-start-turn") return;
+      send({
+        type: "response",
+        requestId: message.requestId,
+        resultType: "error",
+        error,
+      });
+    },
+  );
+  try {
+    const protocol = await DesktopIpcProtocol.connect(endpoint.socketPath);
+    try {
+      return await protocol.inject({
+        kind: "start",
+        threadId: "thread-1",
+        clientUserMessageId: "delivery-1",
+        input: [],
+      });
+    } finally {
+      protocol.close();
+    }
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
+}
+
+test("Desktop rejection truth distinguishes safe and unknown writes", async () => {
+  assert.deepEqual(await rejectedStart("request-version-mismatch"), {
+    _tag: "Rejected",
+    reason: "request-version-mismatch",
+    notWritten: true,
+    confirmedNoSubmission: true,
+  });
+  assert.deepEqual(await rejectedStart("unexpected-owner-handler-failure"), {
+    _tag: "Rejected",
+    reason: "unknown",
+    notWritten: false,
+    confirmedNoSubmission: false,
+  });
 });

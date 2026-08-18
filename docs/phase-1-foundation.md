@@ -6,9 +6,9 @@ the CLI. It does not create a second daemon, remote store, copied conversation
 database, or alternate task namespace.
 
 The contracts in `src/contracts/` describe the boundary between discovery,
-Desktop IPC, routing, and diagnostics. The unified daemon now runs through
-these canonical services; the older `CodexTransport` remains exported only as
-a transitional compatibility surface for callers that have not migrated.
+Desktop IPC, routing, and diagnostics. The unified daemon runs exclusively
+through these canonical services; `LocalDeliveryCoordinator` is the only
+high-level routing and fallback authority.
 
 ## Authority and routing invariants
 
@@ -82,28 +82,17 @@ The Phase 1 runtime cutover follows this completed order:
 4. Adapt the current per-task delivery lanes to call the coordinator. Preserve
    the `DeliveryService.submit` acceptance contract until a separately planned
    public API change.
-5. Keep legacy `CodexTransport`, `TurnOutcome`, transport fallback, and Desktop
-   visibility code outside the active daemon path until downstream callers are
-   migrated; remove them in a separate compatibility cleanup.
+5. Remove the superseded transport fallback and Desktop visibility route after
+   canonical parity coverage passes. This cleanup is complete; do not
+   reintroduce a second routing surface.
 
-## Expected cherry-pick seams
+## Current implementation boundaries
 
-The foundation owns `src/contracts/**`, this document, its focused contract
-tests, and the single barrel export in `src/index.ts`. Subsystem branches should
-prefer new implementation files and import these contracts rather than editing
-them independently.
+The raw Desktop IPC modules own framing, handshake, correlation, reconnect, and
+write-state facts. The semantic Desktop attachment maps those facts to the
+canonical Desktop contracts. App-server RPC and peer modules remain private
+transport primitives behind `LocalCodexService`. Delivery lanes call only the
+coordinator; they never invoke either transport directly.
 
-Likely shared conflict points during integration are:
-
-- `src/index.ts`, when new adapters are exported;
-- `src/transport/desktop.ts` and `src/transport/desktop-ipc-client.ts`, when the
-  Desktop adapter is introduced;
-- `src/transport/transport.ts`, `src/transport/attempts.ts`, and
-  `src/delivery/delivery.ts`, when the coordinator replaces legacy routing;
-- `src/server.ts` and health/doctor code, when truthful outcome and availability
-  reporting is surfaced;
-- transport test fixtures, which currently model the legacy transport outcome.
-
-Do not resolve those conflicts by weakening local provenance, adding retries,
-or falling back after an ambiguous write. Keep legacy adapters until the new
-contracts have equivalent behavioral coverage.
+Future changes must not weaken local provenance, add automatic retries, or
+fall back after an ambiguous write.

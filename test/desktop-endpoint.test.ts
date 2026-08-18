@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { chmod, symlink } from "node:fs/promises";
 import test from "node:test";
 import { desktopSocketIsPrivate } from "../src/transport/desktop-endpoint.js";
-import { isAbsentDesktopEndpointError } from "../src/transport/desktop-ipc/index.js";
+import {
+  DesktopProtocolError,
+  DesktopProtocolSession,
+  isAbsentDesktopEndpointError,
+} from "../src/transport/desktop-ipc/index.js";
 import { listen, testEndpoint } from "./support/desktop-ipc-router.js";
 
 test("only missing and refused endpoint errors prove Desktop absent", () => {
@@ -36,7 +40,15 @@ test("Desktop endpoint privacy rejects exposed and symlinked sockets", async () 
 test("a missing Desktop endpoint is not private", async () => {
   const endpoint = await testEndpoint();
   try {
-    assert.equal(await desktopSocketIsPrivate(endpoint.socketPath), false);
+    if (process.platform !== "win32") {
+      assert.equal(await desktopSocketIsPrivate(endpoint.socketPath), false);
+    }
+    await assert.rejects(
+      DesktopProtocolSession.probe(endpoint.socketPath),
+      (error: unknown) =>
+        error instanceof DesktopProtocolError &&
+        error.failure === "socket-unavailable",
+    );
   } finally {
     await endpoint.cleanup();
   }

@@ -83,11 +83,12 @@ The installer retains the current and previous runtime directories.
 
 ## A hit returned 202 but nothing arrived
 
-Read the newest `delivery_failed` entry in the platform log described above. A
-`DesktopVisibilityUnconfirmed` failure means a fallback turn was submitted but
-the open app did not expose it. The surrounding `transport_attempt_failed`
-entries identify the failed connection and stage without logging the webhook
-body or URL.
+Read the newest `delivery_finished` or `delivery_failed` entry in the platform
+log described above. `delivery_finished` reports the canonical outcome; an
+`Ambiguous`, `Unavailable`, or `Rejected` status includes a sanitized
+`diagnosticCode`. `delivery_failed` indicates that the canonical local task
+could not be resolved before coordination. Neither event logs the webhook body
+or URL.
 
 A limited-use hook is already spent. Never retry an ambiguous submission
 automatically because that can duplicate a turn; mint a new URL only when the
