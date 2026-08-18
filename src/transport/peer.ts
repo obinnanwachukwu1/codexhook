@@ -14,10 +14,7 @@ import {
   INITIALIZE_PARAMS,
   type Turn,
 } from "./protocol.js";
-import {
-  TransportIncompatible,
-  TransportUnavailable,
-} from "./errors.js";
+import { TransportIncompatible, TransportUnavailable } from "./errors.js";
 import type { TransportSpec } from "./spec.js";
 import {
   type AppServerPeer,
@@ -31,6 +28,7 @@ import {
   type WireConnection,
   type WireMessage,
 } from "./rpc.js";
+import { AppServerNotifications } from "./notifications.js";
 
 const HANDSHAKE_TIMEOUT = Duration.seconds(15);
 const MAX_TURN_SLOTS = 1_000;
@@ -38,8 +36,6 @@ const MAX_TURN_SLOTS = 1_000;
 function durationMillis(input: Duration.DurationInput): number {
   return Duration.toMillis(Duration.decode(input));
 }
-
-
 export function connectWirePeer(
   spec: TransportSpec,
   connection: WireConnection,
@@ -61,6 +57,7 @@ export function connectWirePeer(
       Deferred.Deferred<Turn, RpcDisconnected>
     >();
     const disconnected = yield* Deferred.make<never, RpcDisconnected>();
+    const notifications = new AppServerNotifications();
 
     const turnSlot = (
       id: string,
@@ -278,16 +275,22 @@ export function connectWirePeer(
             Effect.catchAll(() => Effect.void),
           );
         }
+        const observed = notifications.emit(message.method, message.params);
         if (message.method === "turn/completed") {
           const params = message.params as { turn?: Turn } | undefined;
           if (params?.turn != null) {
-            return Deferred.succeed(
-              turnSlot(params.turn.id),
-              params.turn,
-            ).pipe(Effect.asVoid);
+            return observed.pipe(
+              Effect.zipRight(
+                Deferred.succeed(
+                  turnSlot(params.turn.id),
+                  params.turn,
+                ),
+              ),
+              Effect.asVoid,
+            );
           }
         }
-        return Effect.void;
+        return observed;
       });
 
     const readline = createInterface({ input: connection.input });
@@ -340,6 +343,8 @@ export function connectWirePeer(
             }),
           ),
         ),
+      observe: (listener) =>
+        notifications.observe(disconnected, listener),
     };
 
     yield* peer

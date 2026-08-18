@@ -17,6 +17,7 @@ test("the published single-file runtime starts and exposes only public commands"
   assert.equal(stderr, "");
   assert.match(stdout, /codexhook setup/);
   assert.match(stdout, /codexhook uninstall/);
+  assert.match(stdout, /codexhook status/);
   assert.doesNotMatch(stdout, /codexhook ensure/);
   assert.doesNotMatch(stdout, /codexhook service/);
   assert.doesNotMatch(stdout, /codexhook serve/);

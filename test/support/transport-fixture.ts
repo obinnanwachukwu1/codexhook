@@ -191,6 +191,7 @@ function fakePeer(
         }
         return { id: turnId, status: "completed" as const };
       }),
+    observe: () => Effect.never,
   };
 }
 

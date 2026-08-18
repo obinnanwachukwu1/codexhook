@@ -82,6 +82,15 @@ export interface AppServerPeer {
     turnId: TurnId,
     timeout: Duration.DurationInput,
   ) => Effect.Effect<Turn, RpcDisconnected | RpcTimeout>;
+  /** Observe app-server notifications for the lifetime of the caller scope. */
+  readonly observe: (
+    listener: (notification: AppServerNotification) => void,
+  ) => Effect.Effect<never, RpcDisconnected>;
+}
+
+export interface AppServerNotification {
+  readonly method: string;
+  readonly params: unknown;
 }
 
 export interface WireConnection {

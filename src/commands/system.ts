@@ -2,16 +2,15 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { Effect, Layer, ManagedRuntime, Option } from "effect";
+import { Effect, Option } from "effect";
 import {
   DEFAULT_HOST,
   DEFAULT_PORT,
   dataDirectory,
-  databasePath,
   defaultBaseUrl,
 } from "../config.js";
+import { startUnifiedDaemon } from "../daemon.js";
 import { probeDaemon, requireDaemon } from "../daemon-control.js";
-import { DeliveryLive } from "../delivery/delivery.js";
 import {
   installationPaths,
   installationServicePaths,
@@ -22,12 +21,8 @@ import {
 import { backgroundServiceExists } from "../background-service.js";
 import { Logger } from "../logger.js";
 import { chooseInstallationPort, parsePort } from "../port.js";
-import { WebhookRegistry } from "../registry.js";
-import { listen } from "../server.js";
 import { desktopProbe } from "../transport/desktop-endpoint.js";
 import { discoverStandalone } from "../transport/discovery.js";
-import { TransportProviderLive } from "../transport/provider.js";
-import { makeCodexTransportLive } from "../transport/transport.js";
 import { VERSION } from "../version.js";
 
 export async function setup(arguments_: string[]): Promise<void> {
@@ -104,30 +99,57 @@ export async function serve(arguments_: string[]): Promise<void> {
   const port = parsePort(values.port ?? String(DEFAULT_PORT));
   const directory = values["data-directory"] ?? dataDirectory();
   const logger = new Logger();
-  const store = new WebhookRegistry(databasePath(directory));
-  const appLayer = DeliveryLive(logger).pipe(
-    Layer.provideMerge(makeCodexTransportLive(logger)),
-    Layer.provide(TransportProviderLive(logger)),
-  );
-  const runtime = ManagedRuntime.make(appLayer);
-  const server = await listen({
+  const daemon = await startUnifiedDaemon({
     host,
     port,
-    registry: store,
-    runtime,
+    dataDirectory: directory,
     logger,
   });
-  logger.info("server_listening", { host, port, database: store.path });
+  let reason: string;
+  try {
+    reason = await new Promise<string>((resolve, reject) => {
+      const onInterrupt = () => resolve("SIGINT");
+      const onTerminate = () => resolve("SIGTERM");
+      const onError = (error: Error) => reject(error);
+      process.once("SIGINT", onInterrupt);
+      process.once("SIGTERM", onTerminate);
+      daemon.server.once("error", onError);
+      daemon.server.once("close", () => {
+        process.off("SIGINT", onInterrupt);
+        process.off("SIGTERM", onTerminate);
+        daemon.server.off("error", onError);
+      });
+    });
+  } catch (error) {
+    await daemon.stop("server-error");
+    throw error;
+  }
+  await daemon.stop(reason);
+}
 
-  const shutdown = async (signal: string) => {
-    logger.info("server_stopping", { signal });
-    server.close();
-    await runtime.dispose();
-    store.close();
-    process.exit(0);
-  };
-  process.once("SIGINT", () => void shutdown("SIGINT"));
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+export async function status(arguments_: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: arguments_,
+    strict: true,
+    options: { json: { type: "boolean", default: false } },
+  });
+  const manifest = readInstallManifest();
+  const port = manifest?.port ?? DEFAULT_PORT;
+  const daemon = await probeDaemon(defaultBaseUrl(DEFAULT_HOST, port));
+  const report = { daemon, port, baseUrl: manifest?.baseUrl ?? null };
+  if (values.json) {
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+  } else if (daemon.state === "running") {
+    process.stdout.write(
+      `codexhook ${daemon.health.state} on ${DEFAULT_HOST}:${port} (${daemon.health.phase}).\n`,
+    );
+    process.stdout.write(
+      `delivery: ${daemon.health.delivery}; task access: ${daemon.health.taskAccessAvailable ? "available" : "unavailable"}; Desktop IPC: ${daemon.health.desktopIpcAvailable ? "available" : "unavailable"}.\n`,
+    );
+  } else {
+    process.stdout.write(`codexhook daemon: ${daemon.state}.\n`);
+    process.exitCode = 1;
+  }
 }
 
 function nodeVersion(executable: string): string | null {

@@ -1,5 +1,7 @@
 import {
   Context,
+  Deferred,
+  Duration,
   Effect,
   HashMap,
   Layer,
@@ -22,13 +24,23 @@ import {
 } from "../transport/errors.js";
 import { CodexTransport } from "../transport/transport.js";
 import { composeMessage } from "./compose.js";
+import {
+  capacityUnavailable,
+  deliveryFailure,
+  deliverySuccess,
+  type DeliveryTruth,
+} from "../service/delivery-coordinator.js";
 
 const MAX_LANES = 1_000;
 const LANE_CAPACITY = 100;
+const MAX_TRANSPORTS = 32;
+const STEER_CAPACITY = 100;
+const STEER_WORKERS = 8;
 
 interface Job {
   readonly hookId: string;
   readonly request: TurnRequest;
+  readonly completion?: Deferred.Deferred<DeliveryTruth> | undefined;
 }
 
 interface Lane {
@@ -39,6 +51,9 @@ interface Lane {
 export interface DeliverySnapshot {
   readonly lanes: number;
   readonly depths: Readonly<Record<string, number>>;
+  readonly accepting: boolean;
+  readonly pending: number;
+  readonly steerDepth: number;
 }
 
 export interface DeliveryService {
@@ -47,6 +62,13 @@ export interface DeliveryService {
     body: string,
   ) => Effect.Effect<Option.Option<DeliveryId>>;
   readonly snapshot: Effect.Effect<DeliverySnapshot>;
+  readonly coordinate: (
+    request: TurnRequest,
+  ) => Effect.Effect<DeliveryTruth>;
+  readonly stopAccepting: Effect.Effect<void>;
+  readonly drain: (
+    timeout: Duration.DurationInput,
+  ) => Effect.Effect<boolean>;
 }
 
 export class Delivery extends Context.Tag("codexhook/Delivery")<
@@ -71,6 +93,12 @@ export function DeliveryLive(
       const lanes = yield* SynchronizedRef.make(
         HashMap.empty<ThreadId, Lane>(),
       );
+      const control = yield* SynchronizedRef.make({
+        accepting: true,
+        steerPending: 0,
+      });
+      const steerQueue = yield* Queue.dropping<Job>(STEER_CAPACITY);
+      const transports = yield* Effect.makeSemaphore(MAX_TRANSPORTS);
 
       const runJob = (job: Job): Effect.Effect<void> => {
         const startedAt = Date.now();
@@ -80,7 +108,7 @@ export function DeliveryLive(
           threadId: job.request.threadId,
           mode: job.request.mode,
         });
-        return transport.deliver(job.request).pipe(
+        return transports.withPermits(1)(transport.deliver(job.request)).pipe(
           Effect.match({
             onSuccess: (outcome) => {
               logger.info("delivery_finished", {
@@ -91,6 +119,7 @@ export function DeliveryLive(
                 transport: outcome.transport,
                 durationMs: Date.now() - startedAt,
               });
+              return deliverySuccess(outcome);
             },
             onFailure: (error) => {
               logger.error("delivery_failed", {
@@ -102,8 +131,14 @@ export function DeliveryLive(
                 error: String(error),
                 durationMs: Date.now() - startedAt,
               });
+              return deliveryFailure(error);
             },
           }),
+          Effect.flatMap((truth) =>
+            job.completion == null
+              ? Effect.void
+              : Deferred.succeed(job.completion, truth).pipe(Effect.asVoid),
+          ),
         );
       };
 
@@ -173,6 +208,48 @@ export function DeliveryLive(
           });
         });
 
+      const offerSteer = (job: Job): Effect.Effect<boolean> =>
+        SynchronizedRef.modifyEffect(control, (state) => {
+          if (!state.accepting || state.steerPending >= STEER_CAPACITY) {
+            return Effect.succeed([false, state] as const);
+          }
+          return Queue.offer(steerQueue, job).pipe(
+            Effect.map((accepted) => [
+              accepted,
+              accepted
+                ? { ...state, steerPending: state.steerPending + 1 }
+                : state,
+            ] as const),
+          );
+        });
+
+      const steerWorker = Effect.forever(
+        Queue.take(steerQueue).pipe(
+          Effect.flatMap(runJob),
+          Effect.ensuring(
+            SynchronizedRef.update(control, (state) => ({
+              ...state,
+              steerPending: Math.max(0, state.steerPending - 1),
+            })),
+          ),
+        ),
+      );
+      yield* Effect.forEach(
+        Array.from({ length: STEER_WORKERS }),
+        () => Effect.forkIn(steerWorker, layerScope),
+        { discard: true },
+      );
+
+      const enqueue = (job: Job): Effect.Effect<boolean> =>
+        SynchronizedRef.get(control).pipe(
+          Effect.flatMap((state) => {
+            if (!state.accepting) return Effect.succeed(false);
+            return job.request.mode === "steer"
+              ? offerSteer(job)
+              : offer(job.request.threadId, job);
+          }),
+        );
+
       const submit: DeliveryService["submit"] = (hook, body) =>
         Effect.gen(function* () {
           const deliveryId = DeliveryId(randomUUID());
@@ -187,16 +264,26 @@ export function DeliveryLive(
               turnTimeout: "30 minutes",
             },
           };
-          if (hook.mode === "steer") {
-            yield* Effect.forkIn(runJob(job), layerScope);
-            return Option.some(deliveryId);
-          }
-          const accepted = yield* offer(hook.threadId, job);
+          const accepted = yield* enqueue(job);
           return accepted ? Option.some(deliveryId) : Option.none();
         });
 
-      const snapshot = SynchronizedRef.get(lanes).pipe(
-        Effect.map((map) => ({
+      const coordinate: DeliveryService["coordinate"] = (request) =>
+        Effect.gen(function* () {
+          const completion = yield* Deferred.make<DeliveryTruth>();
+          const accepted = yield* enqueue({
+            hookId: "service",
+            request,
+            completion,
+          });
+          return accepted ? yield* Deferred.await(completion) : capacityUnavailable;
+        });
+
+      const snapshot = Effect.all({
+        lanes: SynchronizedRef.get(lanes),
+        control: SynchronizedRef.get(control),
+      }).pipe(
+        Effect.map(({ lanes: map, control: state }) => ({
           lanes: HashMap.size(map),
           depths: Object.fromEntries(
             [...HashMap.entries(map)].map(([threadId, lane]) => [
@@ -204,10 +291,39 @@ export function DeliveryLive(
               lane.pending,
             ]),
           ),
+          accepting: state.accepting,
+          pending:
+            state.steerPending +
+            [...HashMap.values(map)].reduce(
+              (total, lane) => total + lane.pending,
+              0,
+            ),
+          steerDepth: state.steerPending,
         })),
       );
 
-      return Delivery.of({ submit, snapshot });
+      const stopAccepting = SynchronizedRef.update(control, (state) => ({
+        ...state,
+        accepting: false,
+      }));
+
+      const drain: DeliveryService["drain"] = (timeout) =>
+        Effect.gen(function* () {
+          const deadline = Date.now() + Duration.toMillis(Duration.decode(timeout));
+          while ((yield* snapshot).pending > 0) {
+            if (Date.now() >= deadline) return false;
+            yield* Effect.sleep("10 millis");
+          }
+          return true;
+        });
+
+      return Delivery.of({
+        submit,
+        snapshot,
+        coordinate,
+        stopAccepting,
+        drain,
+      });
     }),
   );
 }
