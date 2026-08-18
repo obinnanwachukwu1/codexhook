@@ -12,15 +12,7 @@ import type {
   DeliveryRoute,
   PreSubmissionFailureReason,
   RouteSubmissionOutcome,
-} from "./submission.js";
-
-export type { DeliveryStage } from "./stages.js";
-export { DELIVERY_STAGES } from "./stages.js";
-export type {
-  DeliveryOperation,
-  DeliveryRoute,
-  PreSubmissionFailureReason,
-  RouteSubmissionOutcome,
+  SubmissionTruth,
 } from "./submission.js";
 
 export interface DeliveryRequest {
@@ -35,7 +27,7 @@ export interface DeliveryRequest {
 export interface DeliveryAttempt {
   readonly route: DeliveryRoute;
   readonly stage: DeliveryStage;
-  readonly submission: "confirmed" | "not-submitted" | "unknown" | "rejected";
+  readonly submission: SubmissionTruth;
   readonly elapsedMs: number;
   readonly diagnostic?: SanitizedDiagnostic;
 }
@@ -45,25 +37,21 @@ interface ConfirmedDelivery {
   readonly deliveryId: DeliveryId;
   readonly turnId: TurnId;
   readonly operation: DeliveryOperation;
-  readonly submission: "confirmed";
   readonly attempts: ReadonlyArray<DeliveryAttempt>;
 }
 
 export type DeliveryOutcome =
   | (ConfirmedDelivery & {
       readonly _tag: "ConfirmedDesktop";
-      readonly confirmedBy: "desktop";
     })
   | (ConfirmedDelivery & {
       readonly _tag: "ConfirmedAppServer";
-      readonly confirmedBy: "app-server";
     })
   | {
       readonly _tag: "Ambiguous";
       readonly task: LocalTaskRef;
       readonly deliveryId: DeliveryId;
       readonly route: DeliveryRoute;
-      readonly submission: "unknown";
       readonly attempts: ReadonlyArray<DeliveryAttempt>;
       readonly diagnostic: SanitizedDiagnostic;
     }
@@ -71,7 +59,6 @@ export type DeliveryOutcome =
       readonly _tag: "Unavailable";
       readonly task: LocalTaskRef;
       readonly deliveryId: DeliveryId;
-      readonly submission: "not-submitted";
       readonly attempts: ReadonlyArray<DeliveryAttempt>;
       readonly diagnostic: SanitizedDiagnostic;
     }
@@ -80,7 +67,6 @@ export type DeliveryOutcome =
       readonly task: LocalTaskRef;
       readonly deliveryId: DeliveryId;
       readonly route: DeliveryRoute;
-      readonly submission: "rejected";
       readonly attempts: ReadonlyArray<DeliveryAttempt>;
       readonly diagnostic: SanitizedDiagnostic;
     };
@@ -109,19 +95,21 @@ export const PHASE_ONE_DELIVERY_POLICY = Object.freeze({
   retry: "none",
 }) satisfies DeliveryPolicy;
 
-export type FallbackReason = PreSubmissionFailureReason;
-
 export function mayFallback(
   outcome: RouteSubmissionOutcome,
-  policy: DeliveryPolicy = PHASE_ONE_DELIVERY_POLICY,
 ): boolean {
-  return outcome.route === policy.preferredRoute &&
+  return outcome.route === PHASE_ONE_DELIVERY_POLICY.preferredRoute &&
     outcome._tag === "NotSubmitted" &&
-    policy.fallbackAfter.includes(outcome.reason);
+    // This explicit allowlist remains fail-closed if new reasons are added.
+    PHASE_ONE_DELIVERY_POLICY.fallbackAfter.includes(outcome.reason);
 }
 
 export interface DeliveryCoordinator {
   readonly policy: DeliveryPolicy;
+  /**
+   * Owns any Desktop scope for one delivery and returns a classified outcome;
+   * no non-fatal adapter failure or defect may escape the effect.
+   */
   readonly deliver: (
     request: DeliveryRequest,
   ) => Effect.Effect<DeliveryOutcome>;

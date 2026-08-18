@@ -1,29 +1,25 @@
-import { Context, Effect, Stream } from "effect";
+import { Context, type Effect, type Stream } from "effect";
 import {
-  ThreadId,
   type DeliveryId,
   type DeliveryMode,
+  type ThreadId,
   type TurnId,
 } from "../types.js";
-import type {
-  ProtocolCompatibility,
-  ProtocolOffer,
-} from "./compatibility.js";
-import { sanitizeDiagnostic } from "./diagnostics.js";
+import type { ProtocolAvailability } from "./compatibility.js";
 import type { SanitizedDiagnostic } from "./diagnostics.js";
 import type { RouteSubmissionOutcome } from "./submission.js";
 
 export type TaskOrigin = "desktop" | "cli" | "unknown";
 
+declare const localTaskRefBrand: unique symbol;
+
 export interface TaskProvenance {
   readonly scope: "local";
-  readonly store: "codex";
-  readonly hostId: "local";
-  readonly discoveredVia: "app-server";
   readonly origin: TaskOrigin;
 }
 
 export interface LocalTaskRef {
+  readonly [localTaskRefBrand]: true;
   readonly threadId: ThreadId;
   readonly provenance: TaskProvenance;
 }
@@ -36,12 +32,12 @@ export interface LocalTaskSummary extends LocalTaskRef {
 export interface LocalTurn {
   readonly id: TurnId;
   readonly status: "completed" | "interrupted" | "failed" | "in-progress";
+  readonly deliveryIds: ReadonlyArray<DeliveryId>;
 }
 
 export interface LocalTaskHistory {
   readonly task: LocalTaskRef;
   readonly turns: ReadonlyArray<LocalTurn>;
-  readonly cursor: string | null;
 }
 
 export type LocalTaskEvent =
@@ -63,19 +59,7 @@ export type LocalTaskEvent =
       readonly cursor: string;
     };
 
-export type LocalCodexAvailability =
-  | {
-      readonly status: "available";
-      readonly offer: ProtocolOffer;
-      readonly compatibility: Extract<
-        ProtocolCompatibility,
-        { readonly status: "compatible" }
-      >;
-    }
-  | {
-      readonly status: "unavailable" | "incompatible";
-      readonly diagnostic: SanitizedDiagnostic;
-    };
+export type LocalCodexAvailability = ProtocolAvailability;
 
 export interface LocalSubmissionRequest {
   readonly task: LocalTaskRef;
@@ -98,10 +82,21 @@ export interface LocalCodexService {
   readonly readHistory: (
     task: LocalTaskRef,
   ) => Effect.Effect<LocalTaskHistory, LocalCodexFailure>;
+  /** Resolve only through the canonical local app-server. */
+  readonly resolveTask: (
+    threadId: ThreadId,
+  ) => Effect.Effect<LocalTaskRef, LocalCodexFailure>;
+  /**
+   * Snapshot-first canonical stream. Reconciliation must use this stream,
+   * never a readHistory-then-subscribe sequence.
+   */
   readonly events: (
     task: LocalTaskRef,
-    afterCursor?: string,
   ) => Stream.Stream<LocalTaskEvent, LocalCodexFailure>;
+  /**
+   * Convert every non-fatal failure or defect into an outcome. Any cause at or
+   * after a possible write must become Ambiguous instead of escaping.
+   */
   readonly submit: (
     request: LocalSubmissionRequest,
   ) => Effect.Effect<RouteSubmissionOutcome<"app-server">>;
@@ -111,57 +106,3 @@ export class LocalCodex extends Context.Tag("codexhook/LocalCodex")<
   LocalCodex,
   LocalCodexService
 >() {}
-
-export function localTaskRef(
-  threadId: ThreadId,
-  origin: TaskOrigin = "unknown",
-): LocalTaskRef {
-  return {
-    threadId,
-    provenance: {
-      scope: "local",
-      store: "codex",
-      hostId: "local",
-      discoveredVia: "app-server",
-      origin,
-    },
-  };
-}
-
-export type LocalTaskValidation =
-  | { readonly ok: true; readonly task: LocalTaskRef }
-  | {
-      readonly ok: false;
-      readonly diagnostic: SanitizedDiagnostic;
-    };
-
-export function validateLocalTask(value: unknown): LocalTaskValidation {
-  if (value == null || typeof value !== "object") {
-    return { ok: false, diagnostic: notLocal() };
-  }
-  const task = value as Partial<LocalTaskRef>;
-  const provenance = task.provenance as
-    | Partial<TaskProvenance>
-    | undefined;
-  const local = typeof task.threadId === "string" &&
-    provenance?.scope === "local" &&
-    provenance.store === "codex" &&
-    provenance.hostId === "local" &&
-    provenance.discoveredVia === "app-server" &&
-    (provenance.origin === "desktop" ||
-      provenance.origin === "cli" ||
-      provenance.origin === "unknown");
-  return local
-    ? {
-        ok: true,
-        task: localTaskRef(
-          ThreadId(task.threadId as string),
-          provenance.origin as TaskOrigin,
-        ),
-      }
-    : { ok: false, diagnostic: notLocal() };
-}
-
-function notLocal(): SanitizedDiagnostic {
-  return sanitizeDiagnostic({ code: "task-not-local", stage: "resolve-task" });
-}

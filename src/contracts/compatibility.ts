@@ -1,3 +1,5 @@
+import type { SanitizedDiagnostic } from "./diagnostics.js";
+
 export const PROTOCOL_FEATURES = [
   "task-list",
   "task-history",
@@ -42,6 +44,22 @@ export type ProtocolCompatibility =
         | "revision-too-old"
         | "missing-feature";
       readonly missingFeatures: ReadonlyArray<ProtocolFeature>;
+    };
+
+export type CompatibleProtocol = Extract<
+  ProtocolCompatibility,
+  { readonly status: "compatible" }
+>;
+
+export type ProtocolAvailability =
+  | {
+      readonly status: "available";
+      readonly offer: ProtocolOffer;
+      readonly compatibility: CompatibleProtocol;
+    }
+  | {
+      readonly status: "unavailable" | "incompatible";
+      readonly diagnostic: SanitizedDiagnostic;
     };
 
 export function checkProtocolCompatibility(

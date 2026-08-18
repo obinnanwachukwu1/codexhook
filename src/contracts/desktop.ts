@@ -5,26 +5,14 @@ import type {
   TurnId,
 } from "../types.js";
 import type {
-  ProtocolCompatibility,
-  ProtocolOffer,
+  CompatibleProtocol,
+  ProtocolAvailability,
 } from "./compatibility.js";
 import type { SanitizedDiagnostic } from "./diagnostics.js";
 import type { LocalTaskRef, LocalTurn } from "./local-codex.js";
 import type { RouteSubmissionOutcome } from "./submission.js";
 
-export type DesktopAvailability =
-  | {
-      readonly status: "available";
-      readonly offer: ProtocolOffer;
-      readonly compatibility: Extract<
-        ProtocolCompatibility,
-        { readonly status: "compatible" }
-      >;
-    }
-  | {
-      readonly status: "unavailable" | "incompatible";
-      readonly diagnostic: SanitizedDiagnostic;
-    };
+export type DesktopAvailability = ProtocolAvailability;
 
 export interface DesktopFailure {
   readonly _tag: "DesktopFailure";
@@ -42,36 +30,24 @@ export interface DesktopSubmissionRequest {
 export interface DesktopTaskObservation {
   readonly task: LocalTaskRef;
   readonly turns: ReadonlyArray<LocalTurn>;
-  readonly revision: number;
 }
 
-export type DesktopSubmissionObservation =
-  | {
-      readonly status: "observed";
-      readonly deliveryId: DeliveryId;
-      readonly turnId: TurnId;
-    }
-  | {
-      readonly status: "not-observed";
-      readonly deliveryId: DeliveryId;
-    };
-
-/** A scoped, initialized Desktop IPC connection. */
+/**
+ * A scoped, initialized Desktop IPC connection owned by one delivery. The
+ * coordinator does not share a session across concurrent deliveries.
+ */
 export interface DesktopSession {
-  readonly compatibility: Extract<
-    ProtocolCompatibility,
-    { readonly status: "compatible" }
-  >;
+  readonly compatibility: CompatibleProtocol;
   readonly follow: (
     task: LocalTaskRef,
   ) => Effect.Effect<DesktopTaskObservation, DesktopFailure>;
+  /**
+   * Convert every non-fatal failure or defect into an outcome. Any cause at or
+   * after a possible write must become Ambiguous instead of escaping.
+   */
   readonly submit: (
     request: DesktopSubmissionRequest,
   ) => Effect.Effect<RouteSubmissionOutcome<"desktop">>;
-  readonly observeSubmission: (
-    task: LocalTaskRef,
-    deliveryId: DeliveryId,
-  ) => Effect.Effect<DesktopSubmissionObservation, DesktopFailure>;
 }
 
 /** Desktop transport boundary; it is never the task-list authority. */

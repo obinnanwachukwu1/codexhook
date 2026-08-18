@@ -7,6 +7,11 @@ export type PreSubmissionFailureReason =
   | "unavailable"
   | "incompatible"
   | "pre-submit-failure";
+export type SubmissionTruth =
+  | "confirmed"
+  | "not-submitted"
+  | "unknown"
+  | "rejected";
 
 export type RouteSubmissionOutcome<
   Route extends DeliveryRoute = DeliveryRoute,
@@ -40,7 +45,7 @@ export type RouteSubmissionOutcome<
 
 export function submissionTruth(
   outcome: RouteSubmissionOutcome,
-): "confirmed" | "not-submitted" | "unknown" | "rejected" {
+): SubmissionTruth {
   switch (outcome._tag) {
     case "Confirmed":
       return "confirmed";

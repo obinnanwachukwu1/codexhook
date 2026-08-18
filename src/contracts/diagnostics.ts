@@ -19,7 +19,6 @@ export type DiagnosticCode = (typeof DIAGNOSTIC_CODES)[number];
 
 export interface SanitizedDiagnostic {
   readonly code: DiagnosticCode;
-  readonly summary: string;
   readonly stage?: DeliveryStage;
   readonly route?: DeliveryRoute;
   readonly attempt?: number;
@@ -41,19 +40,19 @@ const SUMMARIES = {
   internal: "An internal delivery error occurred",
 } as const satisfies Record<DiagnosticCode, string>;
 
-function record(value: unknown): Record<string, unknown> {
+function asRecord(value: unknown): Record<string, unknown> {
   return value != null && typeof value === "object"
     ? value as Record<string, unknown>
     : {};
 }
 
-function code(value: unknown): DiagnosticCode {
+function asDiagnosticCode(value: unknown): DiagnosticCode {
   return typeof value === "string" && CODES.has(value)
     ? value as DiagnosticCode
     : "internal";
 }
 
-function route(value: unknown): DeliveryRoute | undefined {
+function asRoute(value: unknown): DeliveryRoute | undefined {
   return value === "desktop" || value === "app-server"
     ? value
     : undefined;
@@ -73,20 +72,23 @@ function nonNegativeInteger(value: unknown): number | undefined {
  * error text cannot cross the public/logging contract by accident.
  */
 export function sanitizeDiagnostic(value: unknown): SanitizedDiagnostic {
-  const source = record(value);
-  const safeCode = code(source.code);
+  const source = asRecord(value);
+  const safeCode = asDiagnosticCode(source.code);
   const safeStage = isDeliveryStage(source.stage)
     ? source.stage
     : undefined;
-  const safeRoute = route(source.route);
+  const safeRoute = asRoute(source.route);
   const attempt = nonNegativeInteger(source.attempt);
   const protocolRevision = nonNegativeInteger(source.protocolRevision);
   return Object.freeze({
     code: safeCode,
-    summary: SUMMARIES[safeCode],
     ...(safeStage == null ? {} : { stage: safeStage }),
     ...(safeRoute == null ? {} : { route: safeRoute }),
     ...(attempt == null ? {} : { attempt }),
     ...(protocolRevision == null ? {} : { protocolRevision }),
   });
+}
+
+export function diagnosticSummary(code: DiagnosticCode): string {
+  return SUMMARIES[code];
 }
