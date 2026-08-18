@@ -23,6 +23,7 @@ import {
 import { sanitizeDiagnostic } from "../src/contracts/diagnostics.js";
 import { Delivery, DeliveryLive } from "../src/delivery/delivery.js";
 import { Logger } from "../src/logger.js";
+import type { DiagnosticRecorder } from "../src/diagnostics/journal.js";
 import {
   DeliveryId,
   ThreadId,
@@ -63,6 +64,7 @@ function runtime(
   logger = memoryLogger().logger,
   resolve: LocalCodexService["resolveTask"] = (threadId) =>
     Effect.succeed(localTask(threadId)),
+  diagnostics?: DiagnosticRecorder,
 ) {
   const local = LocalCodex.of({
     availability: Effect.die("unused"),
@@ -72,12 +74,14 @@ function runtime(
     events: () => Stream.die("unused"),
     submit: () => Effect.die("unused"),
   } satisfies LocalCodexService);
-  return ManagedRuntime.make(DeliveryLive(logger).pipe(Layer.provide(
-    Layer.merge(
-      Layer.succeed(LocalCodex, local),
-      Layer.succeed(LocalDeliveryCoordinator, coordinator),
-    ),
-  )));
+  return ManagedRuntime.make(
+    DeliveryLive(logger, diagnostics).pipe(Layer.provide(
+      Layer.merge(
+        Layer.succeed(LocalCodex, local),
+        Layer.succeed(LocalDeliveryCoordinator, coordinator),
+      ),
+    )),
+  );
 }
 
 function hook(mode: "queue" | "steer" = "queue"): WebhookRecord {
@@ -185,6 +189,80 @@ test("resolution failure is logged without fabricating a local task", async () =
     const failed = entries.find((entry) => entry.event === "delivery_failed");
     assert.equal(failed?.stage, "resolve-task");
     assert.equal(failed?.diagnosticCode, "task-not-found");
+  } finally {
+    await service.dispose();
+  }
+});
+
+test("records one terminal outcome and isolates recorder failure", async () => {
+  const recorded: DeliveryOutcome[] = [];
+  const recorder: DiagnosticRecorder = {
+    recordOutcome(outcome) {
+      recorded.push(outcome);
+      throw new Error("best effort sink failed after recording");
+    },
+    recordDiagnostic() {},
+  };
+  const coordinator = LocalDeliveryCoordinator.of({
+    policy: PHASE_ONE_DELIVERY_POLICY,
+    deliver: (request) => Effect.succeed(
+      confirmedOutcome(request.task, request.deliveryId),
+    ),
+  });
+  const { entries, logger } = memoryLogger();
+  const service = runtime(coordinator, logger, undefined, recorder);
+  try {
+    const accepted = await service.runPromise(
+      Effect.flatMap(Delivery, (delivery) => delivery.submit(hook(), "one")),
+    );
+    assert.equal(Option.isSome(accepted), true);
+    await waitFor(() => entries.some((entry) =>
+      entry.event === "delivery_finished"
+    ));
+    assert.equal(recorded.length, 1);
+    assert.equal(recorded[0]?._tag, "ConfirmedDesktop");
+  } finally {
+    await service.dispose();
+  }
+});
+
+test("records a sanitized resolution failure without a terminal outcome", async () => {
+  const recorded = { outcomes: 0, diagnostics: [] as string[] };
+  const recorder: DiagnosticRecorder = {
+    recordOutcome() {
+      recorded.outcomes += 1;
+    },
+    recordDiagnostic(value) {
+      recorded.diagnostics.push(value.code);
+    },
+  };
+  const failure = sanitizeDiagnostic({
+    code: "task-not-found",
+    stage: "resolve-task",
+    body: "secret",
+  });
+  const coordinator = LocalDeliveryCoordinator.of({
+    policy: PHASE_ONE_DELIVERY_POLICY,
+    deliver: () => Effect.die("must not coordinate"),
+  });
+  const { entries, logger } = memoryLogger();
+  const service = runtime(
+    coordinator,
+    logger,
+    () => Effect.fail({ _tag: "LocalCodexFailure", diagnostic: failure }),
+    recorder,
+  );
+  try {
+    await service.runPromise(
+      Effect.flatMap(Delivery, (delivery) => delivery.submit(hook(), "one")),
+    );
+    await waitFor(() => entries.some((entry) =>
+      entry.event === "delivery_failed"
+    ));
+    assert.deepEqual(recorded, {
+      outcomes: 0,
+      diagnostics: ["task-not-found"],
+    });
   } finally {
     await service.dispose();
   }

@@ -8,6 +8,8 @@ export * from "./delivery/delivery.js";
 export { LocalDeliveryCoordinatorLive } from "./delivery/coordinator.js";
 export * from "./server.js";
 export * from "./daemon.js";
+export * from "./diagnostics/journal.js";
+export * from "./diagnostics/support-report.js";
 export * from "./transport/errors.js";
 export * from "./transport/spec.js";
 export * from "./transport/discovery.js";

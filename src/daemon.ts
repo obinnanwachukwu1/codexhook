@@ -7,6 +7,7 @@ import {
   DEFAULT_HOST,
   SHUTDOWN_GRACE_MS,
   databasePath,
+  diagnosticJournalPath,
 } from "./config.js";
 import { Delivery, DeliveryLive } from "./delivery/delivery.js";
 import { LocalCodex } from "./contracts/local-codex.js";
@@ -21,6 +22,10 @@ import type { RequestAuthenticator } from "./service/auth.js";
 import { ServiceLifecycle } from "./service/lifecycle.js";
 import { TransportProviderLive } from "./transport/provider.js";
 import { DesktopProtocolLive } from "./transport/desktop-contract.js";
+import {
+  DiagnosticJournal,
+  type DiagnosticRecorder,
+} from "./diagnostics/journal.js";
 
 type DaemonRuntime = ManagedRuntime.ManagedRuntime<
   Delivery | LocalCodex | Desktop | LocalDeliveryCoordinator,
@@ -41,14 +46,17 @@ export interface UnifiedDaemon {
   readonly stop: (reason?: string) => Promise<void>;
 }
 
-function makeRuntime(logger: Logger): DaemonRuntime {
+function makeRuntime(
+  logger: Logger,
+  diagnostics: DiagnosticRecorder,
+): DaemonRuntime {
   const planes = Layer.merge(LocalCodexLive, DesktopProtocolLive).pipe(
     Layer.provide(TransportProviderLive(logger)),
   );
   const coordinator = LocalDeliveryCoordinatorLive.pipe(
     Layer.provide(planes),
   );
-  const delivery = DeliveryLive(logger).pipe(
+  const delivery = DeliveryLive(logger, diagnostics).pipe(
     Layer.provide(Layer.merge(planes, coordinator)),
   );
   const services = Layer.mergeAll(planes, coordinator, delivery);
@@ -63,7 +71,10 @@ export async function startUnifiedDaemon(
   const graceMs = options.shutdownGraceMs ?? SHUTDOWN_GRACE_MS;
   const lifecycle = new ServiceLifecycle();
   const registry = new WebhookRegistry(databasePath(options.dataDirectory));
-  const runtime = makeRuntime(logger);
+  const diagnostics = new DiagnosticJournal(
+    diagnosticJournalPath(options.dataDirectory),
+  );
+  const runtime = makeRuntime(logger, diagnostics);
   let server: http.Server;
   try {
     // Materialize every daemon-owned service before the listener advertises

@@ -29,6 +29,10 @@ export function databasePath(directory = dataDirectory()): string {
   return path.join(directory, "codexhook.sqlite");
 }
 
+export function diagnosticJournalPath(directory = dataDirectory()): string {
+  return path.join(directory, "diagnostics.jsonl");
+}
+
 export function defaultBaseUrl(
   host = DEFAULT_HOST,
   port = DEFAULT_PORT,

@@ -19,7 +19,7 @@ Usage:
   codexhook revoke <id>
   codexhook revoke --thread <thread-id>
   codexhook revoke --all
-  codexhook doctor [--json]
+  codexhook doctor [--json] [--data-directory <path>] [--compatibility-report [--consent]]
   codexhook status [--json]
   codexhook uninstall [--purge]
 `;

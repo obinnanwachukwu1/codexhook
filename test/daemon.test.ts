@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -10,6 +10,7 @@ import type { AddressInfo } from "node:net";
 import { startUnifiedDaemon } from "../src/daemon.js";
 import { probeDaemon } from "../src/daemon-control.js";
 import { Logger } from "../src/logger.js";
+import { diagnosticJournalPath } from "../src/config.js";
 
 function memoryLogger(): {
   readonly entries: Array<Record<string, unknown>>;
@@ -75,6 +76,11 @@ test("the unified daemon starts healthy and stops idempotently", async () => {
     assert.equal(
       entries.some((entry) => entry.event === "server_stopped"),
       true,
+    );
+    assert.equal(
+      existsSync(diagnosticJournalPath(dataDirectory)),
+      false,
+      "an idle daemon does not create an empty journal",
     );
     await assert.rejects(fetch(`${origin}/healthz`));
   } finally {
