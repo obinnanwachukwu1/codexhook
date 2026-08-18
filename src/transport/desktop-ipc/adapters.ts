@@ -23,6 +23,12 @@ export interface DesktopHandshake {
 
 export interface DesktopProtocolAdapter {
   readonly id: string;
+  readonly methods: {
+    readonly follow: string;
+    readonly history: string;
+    readonly start: string;
+    readonly steer: string;
+  };
   readonly version: number;
   decodeStart(value: unknown): DesktopStartResult;
   decodeSteer(value: unknown): DesktopSteerResult;
@@ -32,20 +38,21 @@ export interface DesktopProtocolAdapter {
   steerParams(threadId: string, params: Record<string, unknown>): unknown;
 }
 
+const V1_METHODS = {
+  follow: "thread-stream-following-changed",
+  history: "thread-follower-load-complete-history",
+  start: "thread-follower-start-turn",
+  steer: "thread-follower-steer-turn",
+} as const;
+
 const CAPABILITY_ALIASES: Record<
   DesktopProtocolCapability,
   ReadonlyArray<string>
 > = {
-  completeHistory: [
-    "completeHistory",
-    "thread-follower-load-complete-history",
-  ],
-  startTurn: ["startTurn", "thread-follower-start-turn"],
-  steerTurn: ["steerTurn", "thread-follower-steer-turn"],
-  threadStream: [
-    "threadStream",
-    "thread-stream-following-changed",
-  ],
+  completeHistory: ["completeHistory", V1_METHODS.history],
+  startTurn: ["startTurn", V1_METHODS.start],
+  steerTurn: ["steerTurn", V1_METHODS.steer],
+  threadStream: ["threadStream", V1_METHODS.follow],
 };
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -221,8 +228,6 @@ function applicationResult(value: unknown): unknown {
 function turnId(value: unknown): string | null {
   const result = record(value);
   if (result == null) return null;
-  const immediate = turnIdFast(result);
-  if (immediate != null) return immediate;
   const queue: Array<{ readonly depth: number; readonly value: unknown }> = [
     { depth: 0, value: result },
   ];
@@ -233,11 +238,10 @@ function turnId(value: unknown): string | null {
     visited += 1;
     const item = record(current.value);
     if (item == null) continue;
-    if (item !== result) {
-      const found = turnIdFast(item);
-      if (found != null) return found;
-    }
+    const found = turnIdFast(item);
+    if (found != null) return found;
     for (const child of Object.values(item)) {
+      if (queue.length >= 512) break;
       queue.push({ depth: current.depth + 1, value: child });
     }
   }
@@ -248,7 +252,11 @@ function turnIdFast(result: Record<string, unknown>): string | null {
   const turn = record(result.turn);
   const submission = record(result.submission);
   for (const candidate of [result.turnId, turn?.id, submission?.turnId]) {
-    if (typeof candidate === "string" && candidate.length > 0) {
+    if (
+      typeof candidate === "string" &&
+      candidate.length > 0 &&
+      candidate.length <= 256
+    ) {
       return candidate;
     }
   }
@@ -267,6 +275,7 @@ function malformedAccepted(operation: string): never {
 function makeV1Adapter(id: string): DesktopProtocolAdapter {
   return {
     id,
+    methods: V1_METHODS,
     version: 1,
     followParams: (threadId) => ({
       conversationId: threadId,

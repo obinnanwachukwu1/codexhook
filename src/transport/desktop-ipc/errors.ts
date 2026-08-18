@@ -22,7 +22,6 @@ export class DesktopProtocolError extends Error {
     readonly stage: "connect" | "framing" | "handshake" | "operation",
     readonly writeState: DesktopWriteState,
     message: string,
-    readonly requestId?: string,
   ) {
     super(message);
   }

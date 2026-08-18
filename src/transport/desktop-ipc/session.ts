@@ -83,7 +83,6 @@ export class DesktopProtocolSession {
   ): Promise<DesktopProtocolSession> {
     const session = new DesktopProtocolSession(socketPath, options);
     session.connection = await session.open(false);
-    session.emit({ _tag: "Connected", profile: session.connection.profile });
     return session;
   }
 
@@ -100,7 +99,7 @@ export class DesktopProtocolSession {
   }
 
   get alive(): boolean {
-    return this.connection?.raw.alive === true;
+    return !this.closing;
   }
 
   get profile(): DesktopProtocolProfile {
@@ -134,13 +133,12 @@ export class DesktopProtocolSession {
   async followThread(threadId: string): Promise<DesktopWriteReceipt> {
     const connection = await this.ready("threadStream");
     await connection.raw.broadcast(
-      "thread-stream-following-changed",
+      connection.adapter.methods.follow,
       connection.adapter.followParams(threadId),
       connection.adapter.version,
     );
     this.followedThreads.add(threadId);
     return {
-      adapterId: connection.adapter.id,
       fingerprint: connection.profile.fingerprint,
       operation: "follow-thread",
       writeState: "written",
@@ -153,7 +151,7 @@ export class DesktopProtocolSession {
   ): Promise<DesktopRequestReceipt<unknown>> {
     const connection = await this.ready("completeHistory");
     const response = await connection.raw.request(
-      "thread-follower-load-complete-history",
+      connection.adapter.methods.history,
       connection.adapter.historyParams(threadId),
       connection.adapter.version,
       timeoutMs,
@@ -168,7 +166,7 @@ export class DesktopProtocolSession {
   ): Promise<DesktopRequestReceipt<DesktopStartResult>> {
     const connection = await this.ready("startTurn");
     const response = await connection.raw.request(
-      "thread-follower-start-turn",
+      connection.adapter.methods.start,
       connection.adapter.startParams(threadId, params),
       connection.adapter.version,
       timeoutMs,
@@ -188,7 +186,7 @@ export class DesktopProtocolSession {
   ): Promise<DesktopRequestReceipt<DesktopSteerResult>> {
     const connection = await this.ready("steerTurn");
     const response = await connection.raw.request(
-      "thread-follower-steer-turn",
+      connection.adapter.methods.steer,
       connection.adapter.steerParams(threadId, params),
       connection.adapter.version,
       timeoutMs,
@@ -207,8 +205,19 @@ export class DesktopProtocolSession {
     response: DesktopResponseEnvelope,
     decode: (value: unknown) => A,
   ): DesktopRequestReceipt<A> {
+    if (
+      response.resultType != null &&
+      response.resultType !== "success" &&
+      response.resultType !== "error"
+    ) {
+      throw new DesktopProtocolError(
+        "response-malformed",
+        "operation",
+        "written",
+        "Desktop IPC response has an unknown result type",
+      );
+    }
     return {
-      adapterId: connection.adapter.id,
       fingerprint: connection.profile.fingerprint,
       operation,
       requestId: response.requestId,
@@ -260,8 +269,10 @@ export class DesktopProtocolSession {
       connection.raw.close();
       throw this.closedError();
     }
-    this.connection = connection;
-    this.emit({ _tag: "Reconnected", profile: connection.profile });
+    if (this.connection !== connection) {
+      this.connection = connection;
+      this.emit({ _tag: "Reconnected", profile: connection.profile });
+    }
     return this.connection;
   }
 
@@ -287,6 +298,16 @@ export class DesktopProtocolSession {
           "Desktop IPC initialize request was rejected",
         );
       }
+      if (
+        response.resultType != null && response.resultType !== "success"
+      ) {
+        throw new DesktopProtocolError(
+          "handshake-malformed",
+          "handshake",
+          "not-written",
+          "Desktop IPC initialize response has an unknown result type",
+        );
+      }
       const handshake = decodeDesktopHandshake(response.result);
       raw.setInitializedClientId(handshake.clientId);
       const adapter = selectDesktopAdapter(handshake);
@@ -295,9 +316,10 @@ export class DesktopProtocolSession {
         fingerprint: fingerprintDesktopProtocol(handshake, adapter),
       };
       if (reconnected) {
+        this.emit({ _tag: "Reconnecting", profile });
         for (const threadId of this.followedThreads) {
           await raw.broadcast(
-            "thread-stream-following-changed",
+            adapter.methods.follow,
             adapter.followParams(threadId),
             adapter.version,
           );

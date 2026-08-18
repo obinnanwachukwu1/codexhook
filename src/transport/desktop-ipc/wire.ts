@@ -91,6 +91,7 @@ export class RawDesktopConnection {
     onBroadcast: DesktopBroadcastListener,
     onObservation: DesktopObservationListener,
   ): Promise<RawDesktopConnection> {
+    const endpointIdentity = await desktopEndpointIdentity(socketPath);
     const socket = net.createConnection(socketPath);
     try {
       await new Promise<void>((resolve, reject) => {
@@ -118,7 +119,7 @@ export class RawDesktopConnection {
     }
     return new RawDesktopConnection(
       socket,
-      await desktopEndpointIdentity(socketPath),
+      endpointIdentity,
       limits,
       onBroadcast,
       onObservation,
@@ -134,9 +135,9 @@ export class RawDesktopConnection {
   }
 
   close(): void {
+    this.socket.destroy();
     if (this.ended) return;
     this.ended = true;
-    this.socket.destroy();
     this.rejectAll("closed", "Desktop IPC connection closed");
     this.onObservation({ _tag: "Disconnected", reason: "closed" });
   }
@@ -195,7 +196,6 @@ export class RawDesktopConnection {
           "operation",
           pending.written ? "unknown" : "not-written",
           `Desktop IPC ${method} request timed out`,
-          requestId,
         ));
       }, timeoutMs);
       const pending: PendingRequest = {
@@ -305,10 +305,7 @@ export class RawDesktopConnection {
     if (message.type !== "response" || message.requestId == null) return;
     const pending = this.pending.get(message.requestId);
     if (pending == null) {
-      this.onObservation({
-        _tag: "OrphanResponse",
-        requestId: message.requestId,
-      });
+      this.onObservation({ _tag: "OrphanResponse" });
       return;
     }
     this.pending.delete(message.requestId);

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   DesktopFrameDecoder,
   encodeDesktopFrame,
-} from "../../src/transport/desktop-ipc/index.js";
+} from "../../src/transport/desktop-ipc/framing.js";
 import type { DesktopWireEnvelope } from "../../src/transport/desktop-ipc/index.js";
 
 export type MessageHandler = (
@@ -20,6 +20,7 @@ export type MessageHandler = (
 export interface RouterOptions {
   readonly afterInitialize?: (send: (message: unknown) => void) => void;
   readonly initializeDelayMs?: number;
+  readonly initializeResultType?: string;
   readonly onConnection?: () => void;
   readonly onInitialize?: (message: DesktopWireEnvelope) => void;
 }
@@ -61,7 +62,7 @@ export async function listen(
               send({
                 type: "response",
                 requestId: message.requestId,
-                resultType: "success",
+                resultType: options.initializeResultType ?? "success",
                 result: initialize,
               });
               options.afterInitialize?.(send);

@@ -42,11 +42,7 @@ function wireEnvelope(value: unknown): DesktopWireEnvelope | null {
   ) {
     return null;
   }
-  if (
-    record.resultType != null &&
-    record.resultType !== "success" &&
-    record.resultType !== "error"
-  ) {
+  if (record.resultType != null && typeof record.resultType !== "string") {
     return null;
   }
   return record as unknown as DesktopWireEnvelope;
@@ -60,29 +56,14 @@ export function encodeDesktopFrame(
   try {
     serialized = JSON.stringify(value);
   } catch {
-    throw new DesktopProtocolError(
-      "frame-invalid",
-      "framing",
-      "not-written",
-      "Desktop IPC request could not be serialized",
-    );
+    throw encodeError("Desktop IPC request could not be serialized");
   }
   if (typeof serialized !== "string") {
-    throw new DesktopProtocolError(
-      "frame-invalid",
-      "framing",
-      "not-written",
-      "Desktop IPC request could not be serialized",
-    );
+    throw encodeError("Desktop IPC request could not be serialized");
   }
   const body = Buffer.from(serialized);
   if (body.length === 0 || body.length > maxFrameBytes) {
-    throw new DesktopProtocolError(
-      "frame-invalid",
-      "framing",
-      "not-written",
-      "Desktop IPC request exceeds the frame limit",
-    );
+    throw encodeError("Desktop IPC request exceeds the frame limit");
   }
   const frame = Buffer.allocUnsafe(body.length + 4);
   frame.writeUInt32LE(body.length, 0);
@@ -90,8 +71,17 @@ export function encodeDesktopFrame(
   return frame;
 }
 
+function encodeError(message: string): DesktopProtocolError {
+  return new DesktopProtocolError(
+    "frame-invalid",
+    "framing",
+    "not-written",
+    message,
+  );
+}
+
 export class DesktopFrameDecoder {
-  private buffer = Buffer.alloc(0);
+  private buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
 
   constructor(
     private readonly maxFrameBytes = DEFAULT_MAX_INBOUND_FRAME_BYTES,
@@ -100,35 +90,32 @@ export class DesktopFrameDecoder {
 
   push(chunk: Buffer): ReadonlyArray<DesktopWireEnvelope> {
     if (chunk.length === 0) return [];
-    let data = this.buffer.length === 0
+    const data = this.buffer.length === 0
       ? chunk
       : Buffer.concat([this.buffer, chunk]);
     this.buffer = Buffer.alloc(0);
     const messages: DesktopWireEnvelope[] = [];
-    while (data.length >= 4) {
-      const length = data.readUInt32LE(0);
+    let offset = 0;
+    while (data.length - offset >= 4) {
+      const length = data.readUInt32LE(offset);
       if (length === 0 || length > this.maxFrameBytes) {
         throw frameError("Desktop IPC frame length is outside bounds");
       }
-      if (data.length < length + 4) break;
-      const body = data.subarray(4, length + 4);
-      data = data.subarray(length + 4);
+      if (data.length - offset < length + 4) break;
+      const body = data.subarray(offset + 4, offset + length + 4);
+      offset += length + 4;
       let parsed: unknown;
       try {
         parsed = JSON.parse(decoder.decode(body));
-      } catch (cause) {
-        throw new DesktopProtocolError(
-          "frame-invalid",
-          "framing",
-          "unknown",
-          "Desktop IPC frame contains invalid JSON or UTF-8",
-        );
+      } catch {
+        throw frameError("Desktop IPC frame contains invalid JSON or UTF-8");
       }
       const envelope = wireEnvelope(parsed);
       if (envelope == null) this.onMalformedEnvelope();
       else messages.push(envelope);
     }
-    this.buffer = Buffer.from(data);
+    const remaining = data.subarray(offset);
+    this.buffer = offset === 0 ? data : Buffer.from(remaining);
     return messages;
   }
 }

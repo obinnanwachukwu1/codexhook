@@ -44,7 +44,7 @@ function ticketPayload(ticket: RpcTicket): {
   };
 }
 
-function safeIpcRejection(error: DesktopKnownRejection): boolean {
+function confirmsNoSubmission(error: DesktopKnownRejection): boolean {
   return error !== "unknown";
 }
 
@@ -68,6 +68,10 @@ function makePeer(
   client: DesktopProtocolSession,
 ): AppServerPeer {
   const states = new Map<string, DesktopThreadState>();
+  client.onObservation((observation) => {
+    if (observation._tag !== "Reconnecting") return;
+    for (const state of states.values()) state.reset();
+  });
   client.onBroadcast((message) => {
     for (const state of states.values()) {
       state.apply(message);
@@ -113,7 +117,7 @@ function makePeer(
           ? await client.steerTurn(threadId, input, 30_000)
           : await client.startTurn(threadId, input, 30_000);
         if (response.outcome._tag === "Rejected") {
-          if (safeIpcRejection(response.outcome.rejection)) {
+          if (confirmsNoSubmission(response.outcome.rejection)) {
             throw new RpcNotWritten({
               detail: `Desktop confirmed no submission (${response.outcome.rejection})`,
             });
@@ -301,9 +305,7 @@ export function connectDesktop(
         }
         return new TransportIncompatible({
           transport: "desktop",
-          stage: cause.failure === "unsupported-capability"
-            ? "capabilities"
-            : "malformed",
+          stage: "malformed",
           detail,
         });
       },

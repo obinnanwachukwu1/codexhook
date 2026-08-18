@@ -104,6 +104,66 @@ test("closing during reconnect cannot resurrect or leak a session", async () => 
   }
 });
 
+test("concurrent callers share one reconnect and one lifecycle observation", async () => {
+  const endpoint = await testEndpoint();
+  const initialize = await fixture("initialize-legacy.json");
+  const firstRouter = await listen(endpoint.socketPath, initialize);
+  const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+  await session.followThread("thread-1");
+  await firstRouter.close();
+
+  let follows = 0;
+  const secondRouter = await listen(
+    endpoint.socketPath,
+    initialize,
+    (message, send) => {
+      if (message.method === "thread-stream-following-changed") {
+        follows += 1;
+        return;
+      }
+      if (message.method !== "thread-follower-start-turn") return;
+      const params = message.params as {
+        turnStartParams?: { ordinal?: unknown };
+      };
+      send({
+        type: "response",
+        requestId: message.requestId,
+        resultType: "success",
+        result: {
+          result: {
+            turn: { id: `turn-${String(params.turnStartParams?.ordinal)}` },
+          },
+        },
+      });
+    },
+  );
+  const observations: DesktopProtocolObservation[] = [];
+  session.onObservation((observation) => observations.push(observation));
+  try {
+    const [first, second] = await Promise.all([
+      session.startTurn("thread-1", { ordinal: 1 }, 1_000),
+      session.startTurn("thread-1", { ordinal: 2 }, 1_000),
+    ]);
+    assert.equal(
+      first.outcome._tag === "Accepted" && first.outcome.value.turnId,
+      "turn-1",
+    );
+    assert.equal(
+      second.outcome._tag === "Accepted" && second.outcome.value.turnId,
+      "turn-2",
+    );
+    assert.equal(follows, 1);
+    assert.equal(
+      observations.filter((item) => item._tag === "Reconnected").length,
+      1,
+    );
+  } finally {
+    session.close();
+    await secondRouter.close();
+    await endpoint.cleanup();
+  }
+});
+
 test("responds to discovery and reports sanitized lifecycle observations", async () => {
   const endpoint = await testEndpoint();
   let discovery!: (value: unknown) => void;
@@ -155,6 +215,7 @@ test("responds to discovery and reports sanitized lifecycle observations", async
       "Disconnected",
     ]));
     assert.equal(JSON.stringify(observations).includes("turn-observed"), false);
+    assert.equal(JSON.stringify(observations).includes("orphan-request"), false);
   } finally {
     await router.close();
     await endpoint.cleanup();
@@ -164,11 +225,18 @@ test("responds to discovery and reports sanitized lifecycle observations", async
 test("enforces pending and timeout bounds before writing extra bytes", async () => {
   const endpoint = await testEndpoint();
   let starts = 0;
+  let firstStart!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    firstStart = resolve;
+  });
   const router = await listen(
     endpoint.socketPath,
     await fixture("initialize-legacy.json"),
     (message) => {
-      if (message.method === "thread-follower-start-turn") starts += 1;
+      if (message.method === "thread-follower-start-turn") {
+        starts += 1;
+        firstStart();
+      }
     },
   );
   try {
@@ -176,6 +244,7 @@ test("enforces pending and timeout bounds before writing extra bytes", async () 
       maxPendingRequests: 1,
     });
     const pending = session.startTurn("thread-1", {}, 30);
+    await firstStarted;
     await assert.rejects(
       session.startTurn("thread-1", {}, 30),
       (error: unknown) =>

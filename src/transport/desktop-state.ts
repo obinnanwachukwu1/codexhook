@@ -25,6 +25,15 @@ export class DesktopThreadState {
     return this.initialized;
   }
 
+  reset(): void {
+    this.entityTurns.clear();
+    this.initialized = false;
+    this.resync = false;
+    this.revision = null;
+    this.turns.clear();
+    for (const listener of this.listeners) listener();
+  }
+
   takeResyncRequest(): boolean {
     if (!this.resync) return false;
     this.resync = false;

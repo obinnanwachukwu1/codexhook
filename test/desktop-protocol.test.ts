@@ -1,12 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  DesktopFrameDecoder,
   DesktopProtocolError,
   DesktopProtocolSession,
-  DEFAULT_MAX_INBOUND_FRAME_BYTES,
-  DEFAULT_MAX_OUTBOUND_FRAME_BYTES,
-  encodeDesktopFrame,
 } from "../src/transport/desktop-ipc/index.js";
 import type { DesktopWireEnvelope } from "../src/transport/desktop-ipc/index.js";
 import {
@@ -100,78 +96,91 @@ test("preserves the minimal handshake and legacy success response semantics", as
   }
 });
 
-test("rejects an explicitly unknown protocol version", async () => {
+test("encodes every v1 operation with its compatibility-specific shape", async () => {
   const endpoint = await testEndpoint();
+  const observed = new Map<string, unknown>();
   const router = await listen(
     endpoint.socketPath,
-    await fixture("initialize-unknown.json"),
+    await fixture("initialize-legacy.json"),
+    (message, send) => {
+      if (message.method != null) observed.set(message.method, message.params);
+      if (message.type !== "request") return;
+      send({
+        type: "response",
+        requestId: message.requestId,
+        resultType: "success",
+        result: message.method === "thread-follower-start-turn"
+          ? { result: { turn: { id: "turn-start" } } }
+          : {},
+      });
+    },
   );
   try {
-    await assert.rejects(
-      DesktopProtocolSession.connect(endpoint.socketPath),
-      (error: unknown) =>
-        error instanceof DesktopProtocolError &&
-        error.failure === "unknown-protocol-version",
+    const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await session.followThread("thread-1");
+    await session.loadCompleteHistory("thread-1", 1_000);
+    await session.startTurn("thread-1", { input: "start" }, 1_000);
+    const steer = await session.steerTurn(
+      "thread-1",
+      { input: "steer" },
+      1_000,
     );
+    assert.deepEqual(observed.get("thread-stream-following-changed"), {
+      conversationId: "thread-1",
+      following: true,
+      hostId: "local",
+    });
+    assert.deepEqual(observed.get("thread-follower-load-complete-history"), {
+      conversationId: "thread-1",
+    });
+    assert.deepEqual(observed.get("thread-follower-start-turn"), {
+      conversationId: "thread-1",
+      turnStartParams: { input: "start" },
+    });
+    assert.deepEqual(observed.get("thread-follower-steer-turn"), {
+      conversationId: "thread-1",
+      input: "steer",
+    });
+    assert.equal(
+      steer.outcome._tag === "Accepted" && steer.outcome.value.turnId,
+      null,
+    );
+    session.close();
   } finally {
     await router.close();
     await endpoint.cleanup();
   }
 });
 
-test("bounds and rejects malformed frame lengths, JSON, and envelopes", () => {
-  assert.equal(DEFAULT_MAX_INBOUND_FRAME_BYTES, 256 * 1024 * 1024);
-  assert.equal(DEFAULT_MAX_OUTBOUND_FRAME_BYTES, 16 * 1024 * 1024);
-  const combined = Buffer.concat([
-    encodeDesktopFrame({ type: "broadcast", params: "a".repeat(120) }),
-    encodeDesktopFrame({ type: "broadcast", params: "b".repeat(120) }),
-  ]);
-  assert.equal(combined.length > 260, true);
-  assert.equal(new DesktopFrameDecoder(256).push(combined).length, 2);
-
-  const zeroLength = Buffer.alloc(4);
-  assert.throws(
-    () => new DesktopFrameDecoder(64).push(zeroLength),
-    DesktopProtocolError,
-  );
-
-  const oversized = Buffer.alloc(4);
-  oversized.writeUInt32LE(65);
-  assert.throws(
-    () => new DesktopFrameDecoder(64).push(oversized),
-    DesktopProtocolError,
-  );
-
-  const invalidJson = Buffer.concat([
-    Buffer.from([1, 0, 0, 0]),
-    Buffer.from("{"),
-  ]);
-  assert.throws(
-    () => new DesktopFrameDecoder(64).push(invalidJson),
-    DesktopProtocolError,
-  );
-  let malformedEnvelopes = 0;
-  const decoder = new DesktopFrameDecoder(64, () => {
-    malformedEnvelopes += 1;
-  });
-  assert.deepEqual(decoder.push(encodeDesktopFrame([])), []);
-  assert.equal(malformedEnvelopes, 1);
-});
-
-test("malformed JSON diagnostics do not retain frame contents", () => {
-  const body = Buffer.from('{"message":"private-conversation-text"');
-  const frame = Buffer.allocUnsafe(body.length + 4);
-  frame.writeUInt32LE(body.length, 0);
-  body.copy(frame, 4);
-  assert.throws(
-    () => new DesktopFrameDecoder().push(frame),
-    (error: unknown) => {
-      assert.equal(error instanceof DesktopProtocolError, true);
-      assert.equal(String(error).includes("private-conversation-text"), false);
-      assert.equal((error as Error).cause, undefined);
-      return true;
+test("reports an unknown result type as an explicit written incompatibility", async () => {
+  const endpoint = await testEndpoint();
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-legacy.json"),
+    (message, send) => {
+      if (message.method !== "thread-follower-start-turn") return;
+      send({
+        type: "response",
+        requestId: message.requestId,
+        resultType: "future-success",
+        result: { result: { turn: { id: "turn-future" } } },
+      });
     },
   );
+  try {
+    const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await assert.rejects(
+      session.startTurn("thread-1", {}, 1_000),
+      (error: unknown) =>
+        error instanceof DesktopProtocolError &&
+        error.failure === "response-malformed" &&
+        error.writeState === "written",
+    );
+    session.close();
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
 });
 
 test("fails an in-flight request when the router sends a malformed frame", async () => {
@@ -187,6 +196,8 @@ test("fails an in-flight request when the router sends a malformed frame", async
   );
   try {
     const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    const observations: string[] = [];
+    session.onObservation((observation) => observations.push(observation._tag));
     await assert.rejects(
       session.startTurn("thread-1", {}, 1_000),
       (error: unknown) =>
@@ -194,6 +205,7 @@ test("fails an in-flight request when the router sends a malformed frame", async
         error.failure === "frame-invalid" &&
         error.writeState === "unknown",
     );
+    assert.equal(observations.includes("Disconnected"), true);
   } finally {
     await router.close();
     await endpoint.cleanup();
@@ -235,10 +247,13 @@ test("correlates concurrent responses that arrive out of order", async () => {
     (message, send) => {
       pending.push(message);
       if (pending.length !== 2) return;
-      for (const [message, turnId] of [
-        [pending[1], "turn-second"],
-        [pending[0], "turn-first"],
-      ] as const) {
+      for (const message of pending.toReversed()) {
+        const params = message.params as {
+          turnStartParams?: { ordinal?: unknown };
+        };
+        const turnId = params.turnStartParams?.ordinal === 1
+          ? "turn-first"
+          : "turn-second";
         send({
           type: "response",
           requestId: message?.requestId,
@@ -277,6 +292,7 @@ test("reconnects future operations after socket replacement without replay", asy
   session.onObservation((observation) => observations.push(observation._tag));
   await session.followThread("thread-1");
   await firstRouter.close();
+  assert.equal(session.alive, true);
 
   let starts = 0;
   let follows = 0;

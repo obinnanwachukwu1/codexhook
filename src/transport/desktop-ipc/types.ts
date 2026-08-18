@@ -1,8 +1,11 @@
-export type DesktopProtocolOperation =
-  | "follow-thread"
+export type DesktopRequestOperation =
   | "load-history"
   | "start-turn"
   | "steer-turn";
+
+export type DesktopProtocolOperation =
+  | "follow-thread"
+  | DesktopRequestOperation;
 
 export type DesktopProtocolCapability =
   | "completeHistory"
@@ -37,7 +40,7 @@ export interface DesktopWireEnvelope {
   readonly params?: unknown;
   readonly requestId?: string;
   readonly result?: unknown;
-  readonly resultType?: "error" | "success";
+  readonly resultType?: string;
   readonly type: string;
   readonly version?: number;
 }
@@ -58,9 +61,8 @@ export type DesktopKnownRejection =
   | "unknown";
 
 export interface DesktopRequestReceipt<A> {
-  readonly adapterId: string;
   readonly fingerprint: DesktopProtocolFingerprint;
-  readonly operation: DesktopProtocolOperation;
+  readonly operation: DesktopRequestOperation;
   readonly requestId: string;
   readonly outcome:
     | { readonly _tag: "Accepted"; readonly value: A }
@@ -71,7 +73,6 @@ export interface DesktopRequestReceipt<A> {
 }
 
 export interface DesktopWriteReceipt {
-  readonly adapterId: string;
   readonly fingerprint: DesktopProtocolFingerprint;
   readonly operation: "follow-thread";
   readonly writeState: "written";
@@ -89,7 +90,7 @@ export interface DesktopSteerResult {
 
 export type DesktopProtocolObservation =
   | {
-      readonly _tag: "Connected" | "Reconnected";
+      readonly _tag: "Reconnected" | "Reconnecting";
       readonly profile: DesktopProtocolProfile;
     }
   | {
@@ -98,7 +99,6 @@ export type DesktopProtocolObservation =
     }
   | {
       readonly _tag: "OrphanResponse";
-      readonly requestId: string;
     }
   | {
       readonly _tag: "MalformedBroadcast";
