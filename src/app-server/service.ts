@@ -1,5 +1,12 @@
 import path from "node:path";
-import { Context, Effect, Layer, Scope } from "effect";
+import {
+  Context,
+  Effect,
+  ExecutionStrategy,
+  Exit,
+  Layer,
+  Scope,
+} from "effect";
 import type { TransportId } from "../types.js";
 import type { AppServerPeer } from "../transport/rpc.js";
 import { TransportProvider } from "../transport/provider.js";
@@ -11,14 +18,21 @@ export interface LocalPlaneIdentity {
   readonly scope: "local-machine";
   readonly provenance: "confirmed";
   readonly transport: Exclude<TransportId, "desktop">;
-  readonly codexHome: string;
   readonly platformFamily: string;
   readonly platformOs: string;
-  readonly userAgent: string;
 }
 
 export interface CanonicalAppServerService {
-  readonly availability: "available";
+  readonly availability: Effect.Effect<
+    | {
+        readonly status: "available";
+        readonly identity: LocalPlaneIdentity;
+      }
+    | {
+        readonly status: "unavailable";
+        readonly reason: "disconnected";
+      }
+  >;
   readonly identity: LocalPlaneIdentity;
   readonly client: CanonicalAppServerClient;
 }
@@ -47,6 +61,16 @@ function absoluteForPlatform(
     : path.posix.isAbsolute(pathname);
 }
 
+function localSocketPath(
+  pathname: string,
+  platform: NodeJS.Platform,
+): boolean {
+  if (platform !== "win32") return path.posix.isAbsolute(pathname);
+  const normalized = pathname.toLowerCase();
+  return normalized.startsWith("\\\\.\\pipe\\") ||
+    normalized.startsWith("\\\\?\\pipe\\");
+}
+
 export function confirmLocalPlane(
   peer: AppServerPeer,
   platform: NodeJS.Platform = process.platform,
@@ -60,7 +84,9 @@ export function confirmLocalPlane(
     }
     if (
       peer.spec._tag === "ChildProcess" &&
-      peer.spec.args.includes("--code-mode-host")
+      peer.spec.args.some((argument) =>
+        argument === "--code-mode-host" ||
+        argument.startsWith("--code-mode-host="))
     ) {
       return yield* new CanonicalPlaneUnavailable({
         reason: "scope-mismatch",
@@ -69,7 +95,7 @@ export function confirmLocalPlane(
     }
     if (
       peer.spec._tag === "UnixSocket" &&
-      !absoluteForPlatform(peer.spec.socketPath, platform)
+      !localSocketPath(peer.spec.socketPath, platform)
     ) {
       return yield* new CanonicalPlaneUnavailable({
         reason: "scope-unavailable",
@@ -96,22 +122,26 @@ export function confirmLocalPlane(
     ) {
       return yield* new CanonicalPlaneUnavailable({
         reason: "scope-mismatch",
-        detail:
-          `app-server reports ${info.platformFamily}/${info.platformOs}; ` +
-          `local machine is ${expected.family}/${expected.os}`,
+        detail: "app-server platform does not match the local machine",
       });
     }
+    const identity: LocalPlaneIdentity = {
+      scope: "local-machine",
+      provenance: "confirmed",
+      transport: peer.spec.id,
+      platformFamily: info.platformFamily,
+      platformOs: info.platformOs,
+    };
     return {
-      availability: "available",
-      identity: {
-        scope: "local-machine",
-        provenance: "confirmed",
-        transport: peer.spec.id,
-        codexHome: info.codexHome,
-        platformFamily: info.platformFamily,
-        platformOs: info.platformOs,
-        userAgent: info.userAgent,
-      },
+      availability: peer.isAlive.pipe(
+        Effect.map((alive) => alive
+          ? { status: "available" as const, identity }
+          : {
+              status: "unavailable" as const,
+              reason: "disconnected" as const,
+            }),
+      ),
+      identity,
       client: new CanonicalAppServerClient(peer),
     };
   });
@@ -146,19 +176,28 @@ function connectFirstLocal(
         reason: "no-local-app-server",
         detail: failures.length === 0
           ? "no local app-server candidate is installed"
-          : failures.join("; "),
+          : `local candidates rejected: ${failures.join(", ")}`,
       }),
     );
   }
-  return provider.connect(candidate).pipe(
-    Effect.flatMap((peer) => confirmLocalPlane(peer)),
-    Effect.catchAll((error) =>
-      connectFirstLocal(provider, rest, [
-        ...failures,
-        `${candidate.id}: ${"detail" in error ? String(error.detail) : String(error)}`,
-      ]),
-    ),
-  );
+  return Effect.gen(function* () {
+    const parent = yield* Scope.Scope;
+    const child = yield* Scope.fork(
+      parent,
+      ExecutionStrategy.sequential,
+    );
+    const attempt = yield* provider.connect(candidate).pipe(
+      Effect.flatMap((peer) => confirmLocalPlane(peer)),
+      Scope.extend(child),
+      Effect.exit,
+    );
+    if (Exit.isSuccess(attempt)) return attempt.value;
+    yield* Scope.close(child, attempt);
+    return yield* connectFirstLocal(provider, rest, [
+      ...failures,
+      candidate.id,
+    ]);
+  });
 }
 
 export const CanonicalAppServerLive: Layer.Layer<

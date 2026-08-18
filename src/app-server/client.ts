@@ -1,8 +1,7 @@
 import { Duration, Effect, Either, Schema } from "effect";
 import type { AppServerPeer } from "../transport/rpc.js";
-import { APP_SERVER_COMPATIBILITY } from "./compatibility.js";
 import {
-  CanonicalPaginationError,
+  CanonicalQueryFailure,
   type CanonicalMutationResult,
   type CanonicalQueryError,
   type MutationOperation,
@@ -22,31 +21,27 @@ import {
 
 const REQUEST_TIMEOUT = Duration.seconds(30);
 const PAGE_SIZE = 100;
-
-export type TaskProvenance =
+const MAX_PAGES = 10_000;
+export type AppServerTaskProvenance =
   | {
       readonly status: "known";
       readonly origin: "cli" | "vscode" | "exec" | "mcp" | "subagent";
       readonly source: SessionSource;
     }
-  | { readonly status: "unknown"; readonly source: SessionSource }
+  | { readonly status: "unknown"; readonly source: unknown }
   | { readonly status: "unavailable" };
 
 export interface CanonicalTask {
   readonly thread: CanonicalThread;
-  readonly provenance: TaskProvenance;
+  readonly provenance: AppServerTaskProvenance;
 }
 
-export interface CanonicalTaskHistory extends CanonicalTask {
-  readonly completeness: "complete";
-  readonly pagesRead: number;
-}
+export type CanonicalTaskHistory = CanonicalTask;
 
 export interface CanonicalEvent {
-  readonly scope: "local-machine";
   readonly method: string;
-  readonly params?: unknown;
   readonly threadId: string | null;
+  readonly turnId: string | null;
 }
 
 export type TurnVerification =
@@ -59,7 +54,11 @@ export type MessageVerification =
       readonly turn: CanonicalTurn;
       readonly item: unknown;
     }
-  | { readonly status: "absent" };
+  | { readonly status: "absent" }
+  | {
+      readonly status: "indeterminate";
+      readonly reason: "items-not-fully-loaded";
+    };
 
 export interface TurnInputRequest {
   readonly threadId: string;
@@ -71,18 +70,22 @@ export interface TurnSteerRequest extends TurnInputRequest {
   readonly expectedTurnId: string;
 }
 
-function provenance(source: SessionSource | undefined): TaskProvenance {
+function provenance(
+  source: unknown,
+): AppServerTaskProvenance {
   if (source == null) return { status: "unavailable" };
   if (typeof source === "string") {
-    if (source === "cli" || source === "vscode" || source === "exec") {
+    if (
+      source === "cli" ||
+      source === "vscode" ||
+      source === "exec" ||
+      source === "mcp"
+    ) {
       return { status: "known", origin: source, source };
-    }
-    if (source === "mcp") {
-      return { status: "known", origin: "mcp", source };
     }
     return { status: "unknown", source };
   }
-  if ("subagent" in source) {
+  if (typeof source === "object" && "subagent" in source) {
     return { status: "known", origin: "subagent", source };
   }
   return { status: "unknown", source };
@@ -94,25 +97,45 @@ function eventThreadId(params: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
-function paginationFailure(
-  method: "thread/list" | "thread/turns/list",
-  cursor: string,
-): CanonicalPaginationError {
-  return new CanonicalPaginationError({
-    method,
-    detail: `app-server repeated pagination cursor ${cursor}`,
-  });
+function eventTurnId(params: unknown): string | null {
+  if (params == null || typeof params !== "object") return null;
+  const record = params as Record<string, unknown>;
+  if (typeof record.turnId === "string") return record.turnId;
+  if (record.turn == null || typeof record.turn !== "object") return null;
+  const turnId = (record.turn as { readonly id?: unknown }).id;
+  return typeof turnId === "string" ? turnId : null;
 }
 
-function mutationDetail(error: { readonly _tag: string }): string {
-  if ("detail" in error) return String(error.detail);
-  if ("millis" in error) return `timed out after ${String(error.millis)}ms`;
-  return error._tag;
+function paginationFailure(): CanonicalQueryFailure {
+  return new CanonicalQueryFailure({ code: "pagination" });
+}
+
+function queryFailure(error: { readonly _tag: string }): CanonicalQueryFailure {
+  const code = error._tag === "RpcNotWritten"
+    ? "not-written"
+    : error._tag === "RpcWriteAmbiguous"
+      ? "write-ambiguous"
+      : error._tag === "RpcErrorReply"
+        ? "request-rejected"
+        : error._tag === "RpcDisconnected"
+          ? "disconnected"
+          : error._tag === "RpcTimeout"
+            ? "timeout"
+            : "malformed";
+  return new CanonicalQueryFailure({ code });
+}
+
+function ambiguousReason(
+  error: { readonly _tag: string },
+): "disconnected" | "timeout" | "malformed" {
+  return error._tag === "RpcDisconnected"
+    ? "disconnected"
+    : error._tag === "RpcTimeout"
+      ? "timeout"
+      : "malformed";
 }
 
 export class CanonicalAppServerClient {
-  readonly compatibility = APP_SERVER_COMPATIBILITY;
-
   constructor(readonly peer: AppServerPeer) {}
 
   listTasks(): Effect.Effect<ReadonlyArray<CanonicalTask>, CanonicalQueryError> {
@@ -144,13 +167,16 @@ export class CanonicalAppServerClient {
         { threadId, includeTurns: false },
         ThreadReadResponse,
         REQUEST_TIMEOUT,
-      );
+      ).pipe(Effect.mapError(queryFailure));
       const hydrated = yield* this.readTurns(threadId);
+      if (!hydrated.allItemsFull) {
+        return yield* new CanonicalQueryFailure({
+          code: "history-incomplete",
+        });
+      }
       return {
         thread: { ...metadata.thread, turns: hydrated.turns },
         provenance: provenance(metadata.thread.source),
-        completeness: "complete",
-        pagesRead: hydrated.pages,
       };
     });
   }
@@ -186,12 +212,19 @@ export class CanonicalAppServerClient {
           });
           if (item != null) return { status: "confirmed" as const, turn, item };
         }
-        return { status: "absent" as const };
+        return turns.some((turn) => turn.itemsView !== "full")
+          ? {
+              status: "indeterminate" as const,
+              reason: "items-not-fully-loaded" as const,
+            }
+          : { status: "absent" as const };
       }),
     );
   }
 
-  startTurn(request: TurnInputRequest) {
+  startTurn(
+    request: TurnInputRequest,
+  ): Effect.Effect<CanonicalMutationResult<typeof TurnStartResponse.Type>> {
     return this.mutate(
       "turn/start",
       request,
@@ -199,7 +232,9 @@ export class CanonicalAppServerClient {
     );
   }
 
-  steerTurn(request: TurnSteerRequest) {
+  steerTurn(
+    request: TurnSteerRequest,
+  ): Effect.Effect<CanonicalMutationResult<typeof TurnSteerResponse.Type>> {
     return this.mutate(
       "turn/steer",
       request,
@@ -207,7 +242,10 @@ export class CanonicalAppServerClient {
     );
   }
 
-  interruptTurn(threadId: string, turnId: string) {
+  interruptTurn(
+    threadId: string,
+    turnId: string,
+  ): Effect.Effect<CanonicalMutationResult<unknown>> {
     return this.mutate(
       "turn/interrupt",
       { threadId, turnId },
@@ -218,10 +256,9 @@ export class CanonicalAppServerClient {
   subscribe(listener: (event: CanonicalEvent) => void): () => void {
     return this.peer.onNotification((message) => {
       listener({
-        scope: "local-machine",
         method: message.method,
-        ...(message.params === undefined ? {} : { params: message.params }),
         threadId: eventThreadId(message.params),
+        turnId: eventTurnId(message.params),
       });
     });
   }
@@ -247,13 +284,16 @@ export class CanonicalAppServerClient {
             },
             ThreadListResponse,
             REQUEST_TIMEOUT,
-          );
+          ).pipe(Effect.mapError(queryFailure));
         data.push(...page.data);
         if (page.nextCursor != null && seen.has(page.nextCursor)) {
-          return yield* paginationFailure("thread/list", page.nextCursor);
+          return yield* paginationFailure();
         }
         if (page.nextCursor != null) seen.add(page.nextCursor);
         cursor = page.nextCursor;
+        if (seen.size >= MAX_PAGES && cursor != null) {
+          return yield* paginationFailure();
+        }
       } while (cursor != null);
       return data;
     });
@@ -261,13 +301,13 @@ export class CanonicalAppServerClient {
 
   private readTurns(threadId: string): Effect.Effect<{
     readonly turns: ReadonlyArray<CanonicalTurn>;
-    readonly pages: number;
+    readonly allItemsFull: boolean;
   }, CanonicalQueryError> {
     return Effect.gen(this, function* () {
       const turns: CanonicalTurn[] = [];
       const seen = new Set<string>();
       let cursor: string | null = null;
-      let pages = 0;
+      let allItemsFull = true;
       do {
         const page: typeof ThreadTurnsListResponse.Type =
           yield* this.peer.request(
@@ -281,19 +321,21 @@ export class CanonicalAppServerClient {
             },
             ThreadTurnsListResponse,
             REQUEST_TIMEOUT,
-          );
-        pages += 1;
+          ).pipe(Effect.mapError(queryFailure));
         turns.push(...page.data);
+        allItemsFull &&= page.data.every(
+          (turn) => turn.itemsView === "full",
+        );
         if (page.nextCursor != null && seen.has(page.nextCursor)) {
-          return yield* paginationFailure(
-            "thread/turns/list",
-            page.nextCursor,
-          );
+          return yield* paginationFailure();
         }
         if (page.nextCursor != null) seen.add(page.nextCursor);
         cursor = page.nextCursor;
+        if (seen.size >= MAX_PAGES && cursor != null) {
+          return yield* paginationFailure();
+        }
       } while (cursor != null);
-      return { turns, pages };
+      return { turns, allItemsFull };
     });
   }
 
@@ -310,7 +352,7 @@ export class CanonicalAppServerClient {
         return {
           truth: "unavailable",
           operation,
-          detail: prepared.left.detail,
+          reason: "pre-submit-failure",
         };
       }
       const submitted = yield* Effect.either(
@@ -321,12 +363,12 @@ export class CanonicalAppServerClient {
           ? {
               truth: "unavailable",
               operation,
-              detail: submitted.left.detail,
+              reason: "pre-submit-failure",
             }
           : {
               truth: "ambiguous",
               operation,
-              detail: submitted.left.detail,
+              reason: "write-error",
             };
       }
       const replied = yield* Effect.either(
@@ -343,13 +385,12 @@ export class CanonicalAppServerClient {
         ? {
             truth: "rejected",
             operation,
-            code: replied.left.code,
-            message: replied.left.message,
+            rpcCode: replied.left.code,
           }
         : {
             truth: "ambiguous",
             operation,
-            detail: mutationDetail(replied.left),
+            reason: ambiguousReason(replied.left),
           };
     });
   }

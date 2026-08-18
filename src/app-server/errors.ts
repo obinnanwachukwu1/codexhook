@@ -1,28 +1,21 @@
 import { Data } from "effect";
-import type {
-  RpcDisconnected,
-  RpcErrorReply,
-  RpcMalformed,
-  RpcNotWritten,
-  RpcTimeout,
-  RpcWriteAmbiguous,
-} from "../transport/rpc.js";
+export type CanonicalQueryFailureCode =
+  | "not-written"
+  | "write-ambiguous"
+  | "request-rejected"
+  | "disconnected"
+  | "timeout"
+  | "malformed"
+  | "pagination"
+  | "history-incomplete";
 
-export type CanonicalQueryError =
-  | RpcNotWritten
-  | RpcWriteAmbiguous
-  | RpcErrorReply
-  | RpcDisconnected
-  | RpcTimeout
-  | RpcMalformed
-  | CanonicalPaginationError;
-
-export class CanonicalPaginationError extends Data.TaggedError(
-  "CanonicalPaginationError",
+export class CanonicalQueryFailure extends Data.TaggedError(
+  "CanonicalQueryFailure",
 )<{
-  readonly method: "thread/list" | "thread/turns/list";
-  readonly detail: string;
+  readonly code: CanonicalQueryFailureCode;
 }> {}
+
+export type CanonicalQueryError = CanonicalQueryFailure;
 
 export class CanonicalPlaneUnavailable extends Data.TaggedError(
   "CanonicalPlaneUnavailable",
@@ -48,16 +41,19 @@ export type CanonicalMutationResult<A> =
   | {
       readonly truth: "rejected";
       readonly operation: MutationOperation;
-      readonly code: number;
-      readonly message: string;
+      readonly rpcCode: number;
     }
   | {
       readonly truth: "unavailable";
       readonly operation: MutationOperation;
-      readonly detail: string;
+      readonly reason: "pre-submit-failure";
     }
   | {
       readonly truth: "ambiguous";
       readonly operation: MutationOperation;
-      readonly detail: string;
+      readonly reason:
+        | "write-error"
+        | "disconnected"
+        | "timeout"
+        | "malformed";
     };

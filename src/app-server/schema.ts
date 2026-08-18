@@ -1,5 +1,11 @@
 import { Schema } from "effect";
+import {
+  TurnStartResult,
+  TurnSteerResult,
+} from "../transport/protocol.js";
 
+// Omission defaults to interactive sources, so the generated v2 enum must be
+// explicit to include exec, app-server, and subagent tasks from the local store.
 export const ALL_LOCAL_SOURCE_KINDS = [
   "cli",
   "vscode",
@@ -30,19 +36,14 @@ export type SessionSource = typeof SessionSource.Type;
 export const CanonicalTurn = Schema.Struct({
   id: Schema.String,
   items: Schema.Array(Schema.Unknown),
-  itemsView: Schema.Literal("notLoaded", "summary", "full"),
-  status: Schema.Literal(
-    "completed",
-    "interrupted",
-    "failed",
-    "inProgress",
-  ),
-  error: Schema.NullOr(
+  itemsView: Schema.String,
+  status: Schema.String,
+  error: Schema.optional(Schema.NullOr(
     Schema.Struct({ message: Schema.optional(Schema.String) }),
-  ),
-  startedAt: Schema.NullOr(Schema.Number),
-  completedAt: Schema.NullOr(Schema.Number),
-  durationMs: Schema.NullOr(Schema.Number),
+  )),
+  startedAt: Schema.optional(Schema.NullOr(Schema.Number)),
+  completedAt: Schema.optional(Schema.NullOr(Schema.Number)),
+  durationMs: Schema.optional(Schema.NullOr(Schema.Number)),
 });
 export type CanonicalTurn = typeof CanonicalTurn.Type;
 
@@ -55,10 +56,12 @@ export const CanonicalThread = Schema.Struct({
   status: Schema.Unknown,
   cwd: Schema.String,
   cliVersion: Schema.String,
-  source: Schema.optional(SessionSource),
+  source: Schema.optional(Schema.Unknown),
   canAcceptDirectInput: Schema.optional(Schema.NullOr(Schema.Boolean)),
-  name: Schema.NullOr(Schema.String),
-  turns: Schema.Array(CanonicalTurn),
+  name: Schema.optional(Schema.NullOr(Schema.String)),
+  turns: Schema.optionalWith(Schema.Array(CanonicalTurn), {
+    default: () => [],
+  }),
 });
 export type CanonicalThread = typeof CanonicalThread.Type;
 
@@ -78,9 +81,6 @@ export const ThreadTurnsListResponse = Schema.Struct({
   backwardsCursor: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
-export const TurnStartResponse = Schema.Struct({
-  turn: CanonicalTurn,
-});
-
-export const TurnSteerResponse = Schema.Struct({ turnId: Schema.String });
+export const TurnStartResponse = TurnStartResult;
+export const TurnSteerResponse = TurnSteerResult;
 export const TurnInterruptResponse = Schema.Unknown;

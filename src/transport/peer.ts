@@ -4,12 +4,14 @@ import {
   Duration,
   Effect,
   FiberId,
+  Option,
   Schema,
   Scope,
 } from "effect";
 import { Logger } from "../logger.js";
 import { TurnId } from "../types.js";
 import {
+  AppServerInfo,
   InitializeResult,
   INITIALIZE_PARAMS,
   type Turn,
@@ -30,15 +32,16 @@ import {
   RpcWriteAmbiguous,
   type WireConnection,
   type WireMessage,
-  type WireNotification,
 } from "./rpc.js";
-import { publishNotification } from "./notifications.js";
+import { NotificationFanout } from "./notifications.js";
 
 const HANDSHAKE_TIMEOUT = Duration.seconds(15);
 const MAX_TURN_SLOTS = 1_000;
+
 function durationMillis(input: Duration.DurationInput): number {
   return Duration.toMillis(Duration.decode(input));
 }
+
 export function connectWirePeer(
   spec: TransportSpec,
   connection: WireConnection,
@@ -55,10 +58,8 @@ export function connectWirePeer(
       string,
       Deferred.Deferred<unknown, RpcErrorReply | RpcDisconnected>
     >();
-    const notificationListeners = new Set<
-      (message: WireNotification) => void
-    >();
-    let serverInfo: typeof InitializeResult.Type | null = null;
+    const notifications = new NotificationFanout(logger);
+    let serverInfo: typeof AppServerInfo.Type | null = null;
     const turns = new Map<
       string,
       Deferred.Deferred<Turn, RpcDisconnected>
@@ -273,11 +274,10 @@ export function connectWirePeer(
           );
         }
         if (message.method != null) {
-          publishNotification(
-            notificationListeners,
-            { method: message.method, params: message.params },
-            logger,
-          );
+          notifications.publish({
+            method: message.method,
+            params: message.params,
+          });
         }
         if (message.method === "turn/completed") {
           const params = message.params as { turn?: Turn } | undefined;
@@ -325,10 +325,7 @@ export function connectWirePeer(
         return serverInfo;
       },
       isAlive: Effect.sync(() => alive && connection.isAlive()),
-      onNotification: (listener) => {
-        notificationListeners.add(listener);
-        return () => notificationListeners.delete(listener);
-      },
+      onNotification: (listener) => notifications.subscribe(listener),
       notify,
       prepare,
       submit,
@@ -349,7 +346,7 @@ export function connectWirePeer(
         ),
     };
 
-    serverInfo = yield* peer
+    const initialized = yield* peer
       .request(
         "initialize",
         INITIALIZE_PARAMS,
@@ -385,6 +382,9 @@ export function connectWirePeer(
           });
         }),
       );
+    serverInfo = Option.getOrNull(
+      Schema.decodeUnknownOption(AppServerInfo)(initialized),
+    );
     yield* peer.notify("initialized", {}).pipe(
       Effect.mapError(
         (error) =>
