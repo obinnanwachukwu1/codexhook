@@ -7,7 +7,10 @@ import {
   Schema,
 } from "effect";
 import { Logger } from "../logger.js";
-import type { DiagnosticObserver } from "../diagnostics/contracts.js";
+import {
+  NO_DIAGNOSTICS,
+  type DiagnosticObserver,
+} from "../diagnostics/contracts.js";
 import type {
   DeliveryId,
   ThreadId,
@@ -331,7 +334,7 @@ function runTurn(
 
 export function makeCodexTransportLive(
   logger = new Logger(),
-  diagnostics?: DiagnosticObserver,
+  diagnostics: DiagnosticObserver = NO_DIAGNOSTICS,
 ): Layer.Layer<
   CodexTransport,
   never,

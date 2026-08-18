@@ -6,6 +6,7 @@ import {
   DISPOSITIONS,
   SubmitAmbiguous,
 } from "../src/transport/errors.js";
+import { deliverySucceededEvent } from "../src/diagnostics/events.js";
 import {
   daemon,
   desktop,
@@ -83,6 +84,10 @@ test("reconciles a daemon fallback through Desktop", async () => {
     { transport: "daemon", method: "turn/start" },
   ]);
   assert.equal((outcome as { transport: string }).transport, "daemon");
+  assert.equal(
+    deliverySucceededEvent(outcome).deliveryTruth,
+    "confirmed_app_server",
+  );
   assert.equal(recorder.maxLive, 1);
   assert.equal(
     recorder.logs.some(

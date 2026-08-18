@@ -129,12 +129,29 @@ export class DesktopThreadState {
         return;
       }
       const patches = change.patches ?? [];
-      if (this.hasReorderedEntityPatch(patches)) {
-        this.onDiagnostic("reordered_patch");
-      }
-      for (const patch of patches.filter(isTurnIdPatch)) this.readPatch(patch);
-      for (const patch of patches.filter((patch) => !isTurnIdPatch(patch))) {
+      const deferredStatuses = new Map<string, Patch[]>();
+      for (const patch of patches) {
+        const key = entityKey(patch);
+        if (
+          key != null &&
+          patch.path?.at(-1) === "status" &&
+          typeof patch.value === "string" &&
+          this.entityTurns.get(key) == null
+        ) {
+          const deferred = deferredStatuses.get(key) ?? [];
+          deferred.push(patch);
+          deferredStatuses.set(key, deferred);
+          continue;
+        }
         this.readPatch(patch);
+        if (key != null && this.entityTurns.has(key)) {
+          const deferred = deferredStatuses.get(key);
+          if (deferred != null) {
+            for (const statusPatch of deferred) this.readPatch(statusPatch);
+            deferredStatuses.delete(key);
+            this.onDiagnostic("reordered_patch");
+          }
+        }
       }
       if (typeof change.revision === "number") {
         this.revision = change.revision;
@@ -204,22 +221,6 @@ export class DesktopThreadState {
     });
   }
 
-  private hasReorderedEntityPatch(patches: ReadonlyArray<Patch>): boolean {
-    const turnIdIndex = new Map<string, number>();
-    patches.forEach((patch, index) => {
-      const key = entityKey(patch);
-      if (key != null && isTurnIdPatch(patch)) turnIdIndex.set(key, index);
-    });
-    return patches.some((patch, index) => {
-      const key = entityKey(patch);
-      const association = key == null ? undefined : turnIdIndex.get(key);
-      return key != null &&
-        patch.path?.at(-1) === "status" &&
-        this.entityTurns.get(key) == null &&
-        association != null &&
-        index < association;
-    });
-  }
 }
 
 function entityKey(patch: Patch): string | null {
@@ -227,12 +228,6 @@ function entityKey(patch: Patch): string | null {
   const index = path.indexOf("entitiesByKey");
   const key = index < 0 ? undefined : path[index + 1];
   return typeof key === "string" ? key : null;
-}
-
-function isTurnIdPatch(patch: Patch): boolean {
-  return entityKey(patch) != null &&
-    patch.path?.at(-1) === "turnId" &&
-    typeof patch.value === "string";
 }
 
 function normalizeStatus(value: unknown): Turn["status"] {

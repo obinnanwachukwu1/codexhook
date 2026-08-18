@@ -142,6 +142,9 @@ payload. Nothing is transmitted. Adding `--consent` produces a locally
 authorized envelope for a future support/upload integration; codexhook does
 not currently have or contact a hosted analytics backend.
 
+When diagnosing a daemon started with a custom store, pass the same location
+to `doctor --data-directory <path>`.
+
 Run setup again to update or repair codexhook:
 
 ```sh

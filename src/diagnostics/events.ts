@@ -1,24 +1,18 @@
-import { turnOutcomeTruth, type TransportId, type TurnOutcome } from "../types.js";
+import type { TransportId, TurnOutcome } from "../types.js";
+import { turnOutcomeTruth } from "./truth.js";
 import {
   deliveryTruth,
   errorTransport,
   type DeliveryError,
 } from "../transport/errors.js";
 import type { TransportAttemptStage } from "../transport/attempts.js";
+import type { DesktopStateDiagnostic } from "../transport/desktop-state.js";
 import type {
   DiagnosticEvent,
   DiagnosticOutcome,
   DiagnosticStage,
   JournalCode,
 } from "./contracts.js";
-
-export function deliveryStartedEvent(): DiagnosticEvent {
-  return {
-    stage: "submission",
-    outcome: "started",
-    code: "submission.started",
-  };
-}
 
 export function deliverySucceededEvent(outcome: TurnOutcome): DiagnosticEvent {
   return {
@@ -113,31 +107,13 @@ function classifyDeliveryFailure(error: DeliveryError): FailureClassification {
   }
 }
 
-export function attemptStartedEvent(transport: TransportId): DiagnosticEvent {
-  return transport === "desktop"
-    ? {
-        stage: "attachment",
-        outcome: "started",
-        code: "attachment.attempt_started",
-        transport,
-      }
-    : {
-        stage: "protocol",
-        outcome: "started",
-        code: "protocol.attempt_started",
-        transport,
-      };
-}
-
 export function attemptFailedEvent(
   transport: TransportId,
   attemptStage: TransportAttemptStage,
   error: DeliveryError,
 ): DiagnosticEvent {
-  const terminal = deliveryFailedEvent(error);
   if (error._tag === "TransportUnavailable" && transport === "desktop") {
-    const { deliveryTruth: _, ...attempt } = terminal;
-    return { ...attempt, transport };
+    return { ...classifyDeliveryFailure(error), transport };
   }
   if (attemptStage === "resume" || attemptStage === "await") {
     return {
@@ -147,6 +123,111 @@ export function attemptFailedEvent(
       transport,
     };
   }
-  const { deliveryTruth: _, ...attempt } = terminal;
-  return { ...attempt, transport };
+  return { ...classifyDeliveryFailure(error), transport };
+}
+
+export function fallbackAttemptedEvent(
+  transport: TransportId,
+): DiagnosticEvent {
+  return {
+    stage: "fallback",
+    outcome: "started",
+    code: "fallback.attempted",
+    transport,
+  };
+}
+
+export function desktopConnectedEvent(): DiagnosticEvent {
+  return {
+    stage: "attachment",
+    outcome: "succeeded",
+    code: "attachment.desktop_connected",
+    transport: "desktop",
+  };
+}
+
+export function fallbackSelectedEvent(
+  transport: TransportId,
+): DiagnosticEvent {
+  return {
+    stage: "fallback",
+    outcome: "succeeded",
+    code: "fallback.selected",
+    transport,
+  };
+}
+
+export function canonicalFoundEvent(): DiagnosticEvent {
+  return {
+    stage: "canonical_verification",
+    outcome: "succeeded",
+    code: "canonical.found",
+    transport: "desktop",
+  };
+}
+
+export function canonicalAbsentEvent(): DiagnosticEvent {
+  return {
+    stage: "canonical_verification",
+    outcome: "failed",
+    code: "canonical.absent",
+  };
+}
+
+export function canonicalUnknownEvent(
+  outcome: "deferred" | "failed",
+): DiagnosticEvent {
+  return {
+    stage: "canonical_verification",
+    outcome,
+    code: "canonical.unknown",
+    transport: "desktop",
+  };
+}
+
+const DESKTOP_STATE_EVENTS = {
+  revision_gap: { outcome: "failed", code: "state.revision_gap" },
+  resynchronized: { outcome: "recovered", code: "state.resynchronized" },
+  reordered_patch: { outcome: "deferred", code: "state.reordered_patch" },
+  stale_active_turn: {
+    outcome: "deferred",
+    code: "state.stale_active_turn",
+  },
+} as const satisfies Record<
+  DesktopStateDiagnostic,
+  Pick<DiagnosticEvent, "outcome" | "code">
+>;
+
+export function desktopStateEvent(
+  event: DesktopStateDiagnostic,
+): DiagnosticEvent {
+  return {
+    stage: "state_synchronization",
+    ...DESKTOP_STATE_EVENTS[event],
+    transport: "desktop",
+  };
+}
+
+export function circuitBreakerEvent(
+  transition: "opened" | "half-open" | "recovered",
+): DiagnosticEvent {
+  if (transition === "opened") {
+    return {
+      stage: "circuit_breaker",
+      outcome: "failed",
+      code: "circuit.opened",
+    };
+  }
+  if (transition === "half-open") {
+    return {
+      stage: "circuit_breaker",
+      outcome: "started",
+      code: "circuit.half_open",
+    };
+  }
+  return {
+    stage: "circuit_breaker",
+    outcome: "recovered",
+    code: "circuit.recovered",
+  };
 }

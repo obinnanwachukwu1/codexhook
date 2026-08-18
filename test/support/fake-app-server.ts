@@ -3,7 +3,6 @@ import type { WireConnection, WireMessage } from "../../src/transport/rpc.js";
 
 export type FakeAppServerBehavior =
   | "normal"
-  | "disconnect-before-write"
   | "disconnect-after-write"
   | "lost-acknowledgement"
   | "incompatible-initialize";
@@ -32,7 +31,7 @@ export function fakeAppServer(
     signal: string | null,
   ) => void>();
   const behavior = options.behavior ?? "normal";
-  let alive = behavior !== "disconnect-before-write";
+  let alive = true;
 
   const exit = () => {
     if (!alive) return;
@@ -63,7 +62,10 @@ export function fakeAppServer(
       const canonicalItem = options.canonicalItems?.[threadId] ??
         options.canonicalItem;
       if (canonicalItem === "unknown") {
-        send({ id, result: { incompatible: true } });
+        send({
+          id,
+          error: { code: -32_001, message: "canonical state unavailable" },
+        });
         return;
       }
       const turns = canonicalItem === "found"
@@ -71,7 +73,7 @@ export function fakeAppServer(
         : [];
       send({
         id,
-        result: { thread: { id: "thread-1", turns } },
+        result: { thread: { id: threadId, turns } },
       });
       return;
     }
@@ -113,8 +115,8 @@ export function fakeAppServer(
       callback();
       handle(message);
     },
-    onError(listener) {
-      void listener;
+    onError() {
+      // This in-memory connection models disconnects through onExit.
     },
     onExit(listener) {
       exitListeners.add(listener);

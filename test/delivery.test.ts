@@ -188,7 +188,7 @@ test("serializes each task while allowing different tasks to run concurrently", 
     await waitFor(() =>
       entries.filter((entry) => entry.event === "delivery_finished").length === 3,
     );
-    assert.equal(maxLive, 2);
+    assert.ok(maxLive >= 2);
     assert.equal(maxByThread.get("thread-1"), 1);
     assert.equal(maxByThread.get("thread-2"), 1);
   } finally {

@@ -1,11 +1,14 @@
 import { Data, Option } from "effect";
 import type {
-  DeliveryTruth,
   DeliveryId,
   ThreadId,
   TransportId,
   TurnId,
 } from "../types.js";
+import {
+  truthForTransport,
+  type DeliveryTruth,
+} from "../diagnostics/truth.js";
 
 export class TransportUnavailable extends Data.TaggedError(
   "TransportUnavailable",
@@ -164,18 +167,32 @@ export function deliveryTruth(error: DeliveryError): DeliveryTruth {
     case "unknown":
       return "ambiguous";
     case "submitted":
-      return errorTransport(error) === "desktop"
-        ? "confirmed_desktop"
-        : "confirmed_app_server";
+      return truthForTransport(errorTransport(error));
   }
 }
 
-export function errorTransport(error: DeliveryError): TransportId | undefined {
-  if (error._tag === "NoTransportAvailable") return undefined;
-  if (error._tag === "DesktopVisibilityUnconfirmed") {
-    return error.submittedTransport;
+export function errorTransport(error: NoTransportAvailable): undefined;
+export function errorTransport(error: TransportError): TransportId;
+export function errorTransport(error: DeliveryError): TransportId | undefined;
+export function errorTransport(
+  error: DeliveryError,
+): TransportId | undefined {
+  switch (error._tag) {
+    case "NoTransportAvailable":
+      return undefined;
+    case "DesktopVisibilityUnconfirmed":
+      return error.submittedTransport;
+    case "TransportUnavailable":
+    case "TransportIncompatible":
+    case "ThreadUnavailable":
+    case "ThreadBusy":
+    case "SubmitRejected":
+    case "SubmitAmbiguous":
+    case "TurnAbandoned":
+    case "TurnFailed":
+    case "TurnTimeout":
+      return error.transport;
   }
-  return "transport" in error ? error.transport : undefined;
 }
 
 type TryNextTag = {

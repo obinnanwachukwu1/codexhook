@@ -1,11 +1,16 @@
 import { Effect } from "effect";
 import {
+  NO_DIAGNOSTICS,
   recordDiagnostic,
   type DiagnosticObserver,
 } from "../diagnostics/contracts.js";
 import {
   attemptFailedEvent,
-  attemptStartedEvent,
+  canonicalFoundEvent,
+  canonicalUnknownEvent,
+  desktopConnectedEvent,
+  fallbackAttemptedEvent,
+  fallbackSelectedEvent,
 } from "../diagnostics/events.js";
 import { Logger } from "../logger.js";
 import type {
@@ -96,7 +101,7 @@ export function deliverWithFallback(
   candidates: ReadonlyArray<TransportSpec>,
   runner: TransportAttemptRunner,
   logger: Logger,
-  diagnostics?: DiagnosticObserver,
+  diagnostics: DiagnosticObserver = NO_DIAGNOSTICS,
 ): Effect.Effect<TurnOutcome, DeliveryError> {
   const attempt = (
     remaining: ReadonlyArray<TransportSpec>,
@@ -115,8 +120,6 @@ export function deliverWithFallback(
       transport: candidate.id,
       stage,
     });
-    recordDiagnostic(diagnostics, attemptStartedEvent(candidate.id));
-
     return runner.run(candidate, (next) => {
       stage = next;
     }).pipe(
@@ -147,12 +150,7 @@ export function deliverWithFallback(
             attemptFailedEvent(candidate.id, stage, error),
           );
           if (tryNext) {
-            recordDiagnostic(diagnostics, {
-              stage: "fallback",
-              outcome: "started",
-              code: "fallback.attempted",
-              transport: candidate.id,
-            });
+            recordDiagnostic(diagnostics, fallbackAttemptedEvent(candidate.id));
           }
           if (!tryNext) return Effect.fail(error);
           return attempt(
@@ -172,19 +170,12 @@ export function deliverWithFallback(
             status: outcome._tag,
           });
           if (candidate._tag === "Desktop") {
-            recordDiagnostic(diagnostics, {
-              stage: "attachment",
-              outcome: "succeeded",
-              code: "attachment.desktop_connected",
-              transport: "desktop",
-            });
+            recordDiagnostic(diagnostics, desktopConnectedEvent());
             if (failures.length > 0) {
-              recordDiagnostic(diagnostics, {
-                stage: "fallback",
-                outcome: "succeeded",
-                code: "fallback.selected",
-                transport: outcome.transport,
-              });
+              recordDiagnostic(
+                diagnostics,
+                fallbackSelectedEvent(outcome.transport),
+              );
             }
             logger.info("transport_selected", {
               deliveryId: request.deliveryId,
@@ -223,12 +214,7 @@ export function deliverWithFallback(
                     detail: errorDetail(error),
                     submittedTransport: outcome.transport,
                   });
-                  recordDiagnostic(diagnostics, {
-                    stage: "canonical_verification",
-                    outcome: "failed",
-                    code: "canonical.unknown",
-                    transport: "desktop",
-                  });
+                  recordDiagnostic(diagnostics, canonicalUnknownEvent("failed"));
                 }),
               ),
               Effect.tap((visibility) =>
@@ -252,23 +238,17 @@ export function deliverWithFallback(
                           : undefined,
                     },
                   );
-                  recordDiagnostic(diagnostics, {
-                    stage: "canonical_verification",
-                    outcome: visibility === "confirmed"
-                      ? "succeeded"
-                      : "deferred",
-                    code: visibility === "confirmed"
-                      ? "canonical.found"
-                      : "canonical.unknown",
-                    transport: "desktop",
-                  });
+                  recordDiagnostic(
+                    diagnostics,
+                    visibility === "confirmed"
+                      ? canonicalFoundEvent()
+                      : canonicalUnknownEvent("deferred"),
+                  );
                   if (failures.length > 0) {
-                    recordDiagnostic(diagnostics, {
-                      stage: "fallback",
-                      outcome: "succeeded",
-                      code: "fallback.selected",
-                      transport: outcome.transport,
-                    });
+                    recordDiagnostic(
+                      diagnostics,
+                      fallbackSelectedEvent(outcome.transport),
+                    );
                   }
                   logger.info("transport_selected", {
                     deliveryId: request.deliveryId,

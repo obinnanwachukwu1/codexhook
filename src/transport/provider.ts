@@ -1,6 +1,9 @@
 import { Context, Effect, Layer, Option, Scope } from "effect";
 import { Logger } from "../logger.js";
-import type { DiagnosticObserver } from "../diagnostics/contracts.js";
+import {
+  NO_DIAGNOSTICS,
+  type DiagnosticObserver,
+} from "../diagnostics/contracts.js";
 import { discoverStandalone } from "./discovery.js";
 import { connectDesktop } from "./desktop.js";
 import {
@@ -34,7 +37,7 @@ export class TransportProvider extends Context.Tag(
 
 export function TransportProviderLive(
   logger = new Logger(),
-  diagnostics?: DiagnosticObserver,
+  diagnostics: DiagnosticObserver = NO_DIAGNOSTICS,
 ): Layer.Layer<TransportProvider> {
   return Layer.effect(
     TransportProvider,

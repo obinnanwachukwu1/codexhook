@@ -8,10 +8,15 @@ import {
 import { connectDesktop } from "../src/transport/desktop.js";
 import {
   TransportIncompatible,
-  TransportUnavailable,
 } from "../src/transport/errors.js";
 import { connectWirePeer } from "../src/transport/peer.js";
-import type { AppServerPeer } from "../src/transport/rpc.js";
+import {
+  type AppServerPeer,
+  RpcDisconnected,
+  RpcErrorReply,
+  RpcNotWritten,
+  RpcTimeout,
+} from "../src/transport/rpc.js";
 import { ThreadResumeResult, TurnStartResult } from "../src/transport/protocol.js";
 import type { TransportSpec } from "../src/transport/spec.js";
 import { fakeAppServer } from "./support/fake-app-server.js";
@@ -30,6 +35,7 @@ test("fake Desktop IPC supports socket replacement and restart generations", asy
   assert.equal(await connectDesktopAlive(first.socketPath), true);
 
   const replacement = await first.replace();
+  assert.equal(replacement.socketPath, first.socketPath);
   const secondClient = await DesktopIpcClient.connect(replacement.socketPath);
   assert.equal(replacement.generation, 2);
   replacement.disconnectClients();
@@ -58,31 +64,37 @@ test("fake Desktop IPC exposes incompatible response shapes", async () => {
 });
 
 test("fake app-server distinguishes disconnect before and after write", async () => {
-  const before = fakeAppServer({ behavior: "disconnect-before-write" });
+  const before = fakeAppServer();
   const beforeExit = await Effect.runPromiseExit(
-    Effect.scoped(connectWirePeer(appSpec, before.connection)),
+    Effect.scoped(
+      connectWirePeer(appSpec, before.connection).pipe(
+        Effect.flatMap((peer) => peer.prepare("turn/start", {
+          threadId: "thread-1",
+          input: [{ type: "text", text: "payload" }],
+        }).pipe(
+          Effect.map((ticket) => ({ peer, ticket })),
+        )),
+        Effect.tap(() => Effect.sync(before.disconnect)),
+        Effect.flatMap(({ peer, ticket }) => peer.submit(ticket)),
+      ),
+    ),
   );
-  assert.equal(Exit.isFailure(beforeExit), true);
-  if (Exit.isFailure(beforeExit)) {
-    const failure = Cause.failureOption(beforeExit.cause);
-    assert.equal(
-      Option.isSome(failure) && failure.value instanceof TransportUnavailable,
-      true,
-    );
-  }
+  assertFailure(beforeExit, RpcNotWritten);
+  assert.equal(
+    before.requests.some((request) => request.method === "turn/start"),
+    false,
+  );
 
   const after = fakeAppServer({ behavior: "disconnect-after-write" });
   const afterExit = await Effect.runPromiseExit(submitTurn(after));
-  assert.equal(Exit.isFailure(afterExit), true);
-  assertFailure(afterExit, ["RpcWriteAmbiguous", "RpcDisconnected"]);
+  assertFailure(afterExit, RpcDisconnected);
   assert.equal(after.requests.some((request) => request.method === "turn/start"), true);
 });
 
 test("fake app-server models a lost acknowledgement without duplicate writes", async () => {
   const harness = fakeAppServer({ behavior: "lost-acknowledgement" });
   const exit = await Effect.runPromiseExit(submitTurn(harness, "200 millis"));
-  assert.equal(Exit.isFailure(exit), true);
-  assertFailure(exit, ["RpcTimeout"]);
+  assertFailure(exit, RpcTimeout);
   assert.equal(
     harness.requests.filter((request) => request.method === "turn/start").length,
     1,
@@ -120,10 +132,11 @@ test("fake app-server canonical lookup reports found, absent, and unknown", asyn
       ),
     );
     if (state === "unknown") {
-      assert.equal(Exit.isFailure(exit), true);
+      assertFailure(exit, RpcErrorReply);
     } else {
       assert.equal(Exit.isSuccess(exit), true);
       if (Exit.isSuccess(exit)) {
+        assert.equal(exit.value.thread.id, "thread-1");
         assert.equal(exit.value.thread.turns.length, state === "found" ? 1 : 0);
       }
     }
@@ -143,6 +156,14 @@ test("fake app-server handles concurrent tasks on one connection", async () => {
     ),
   ));
   assert.deepEqual(results, [1, 0]);
+  assert.deepEqual(
+    harness.requests
+      .filter((request) => request.method === "thread/resume")
+      .map((request) =>
+        (request.params as { readonly threadId: string }).threadId
+      ),
+    ["thread-1", "thread-2"],
+  );
 });
 
 function canonicalCount(
@@ -197,14 +218,12 @@ function connectDesktopAlive(socketPath: string): Promise<boolean> {
 
 function assertFailure(
   exit: Exit.Exit<unknown, unknown>,
-  expected: ReadonlyArray<string>,
+  expected: abstract new (...arguments_: never[]) => unknown,
 ): void {
   if (!Exit.isFailure(exit)) assert.fail("expected failure");
   const failure = Cause.failureOption(exit.cause);
   assert.equal(
-    Option.isSome(failure) && expected.includes(
-      String((failure.value as { readonly _tag?: unknown })._tag),
-    ),
+    Option.isSome(failure) && failure.value instanceof expected,
     true,
   );
 }

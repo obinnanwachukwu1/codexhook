@@ -1,9 +1,12 @@
 import {
   TRANSPORT_IDS,
-  type DeliveryTruth,
   type TransportId,
 } from "../types.js";
-export type { DeliveryTruth } from "../types.js";
+import {
+  DELIVERY_TRUTHS,
+  type DeliveryTruth,
+} from "./truth.js";
+export type { DeliveryTruth } from "./truth.js";
 
 export const DIAGNOSTIC_STAGES = [
   "protocol",
@@ -30,20 +33,10 @@ export const DIAGNOSTIC_OUTCOMES = [
 
 export type DiagnosticOutcome = (typeof DIAGNOSTIC_OUTCOMES)[number];
 
-export const DELIVERY_TRUTHS = [
-  "confirmed_desktop",
-  "confirmed_app_server",
-  "ambiguous",
-  "unavailable",
-  "rejected",
-] as const;
-
 export const JOURNAL_CODES = [
-  "protocol.attempt_started",
   "protocol.incompatible",
   "protocol.malformed_response",
   "protocol.unavailable",
-  "attachment.attempt_started",
   "attachment.desktop_unavailable",
   "attachment.desktop_connected",
   "state.resume_failed",
@@ -52,11 +45,9 @@ export const JOURNAL_CODES = [
   "state.resynchronized",
   "state.reordered_patch",
   "state.stale_active_turn",
-  "submission.started",
   "submission.confirmed",
   "submission.ambiguous",
   "submission.rejected",
-  "submission.unavailable",
   "canonical.found",
   "canonical.absent",
   "canonical.unknown",
@@ -90,6 +81,8 @@ export interface DiagnosticObserver {
   readonly record: (event: DiagnosticEvent) => void;
 }
 
+export const NO_DIAGNOSTICS: DiagnosticObserver = { record() {} };
+
 export interface DiagnosticFailureSummary {
   readonly stage: DiagnosticStage;
   readonly code: JournalCode;
@@ -108,9 +101,7 @@ export function isDiagnosticOutcome(value: unknown): value is DiagnosticOutcome 
 }
 
 export function isDeliveryTruth(value: unknown): value is DeliveryTruth {
-  return DELIVERY_TRUTHS.includes(
-    value as (typeof DELIVERY_TRUTHS)[number],
-  );
+  return DELIVERY_TRUTHS.includes(value as DeliveryTruth);
 }
 
 export function journalCode(value: unknown): JournalCode {
@@ -124,11 +115,11 @@ export function isTransportId(value: unknown): value is TransportId {
 }
 
 export function recordDiagnostic(
-  observer: DiagnosticObserver | undefined,
+  observer: DiagnosticObserver,
   event: DiagnosticEvent,
 ): void {
   try {
-    observer?.record(event);
+    observer.record(event);
   } catch {
     // Diagnostics are best effort and never participate in delivery control.
   }

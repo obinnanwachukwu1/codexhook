@@ -126,10 +126,7 @@ async function listen(
       if (process.platform !== "win32") {
         await unlink(socketPath).catch(() => undefined);
       }
-      const nextPath = process.platform === "win32"
-        ? `\\\\.\\pipe\\codexhook-fake-${randomUUID()}`
-        : socketPath;
-      return listen(owner, nextPath, nextBehavior, generation + 1);
+      return listen(owner, socketPath, nextBehavior, generation + 1);
     },
     close: closeOwner,
   };

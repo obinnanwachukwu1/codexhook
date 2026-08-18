@@ -181,6 +181,89 @@ test("a repeated turn association preserves a completed turn", () => {
   assert.equal(state.turn("turn-complete")?.status, "completed");
 });
 
+test("preserves in-order status changes across an entity reassociation", () => {
+  const diagnostics: string[] = [];
+  const state = new DesktopThreadState(threadId, (event) => {
+    diagnostics.push(event);
+  });
+  state.apply(desktopStateChange({
+    type: "snapshot",
+    revision: 1,
+    conversationState: {},
+  }));
+  state.apply(desktopStateChange({
+    type: "patches",
+    baseRevision: 1,
+    revision: 2,
+    patches: [
+      entityPatch("known", "turn-1", "turnId"),
+      entityPatch("known", "completed", "status"),
+      entityPatch("known", "turn-2", "turnId"),
+      entityPatch("known", "inProgress", "status"),
+    ],
+  }));
+  assert.equal(state.turn("turn-1")?.status, "completed");
+  assert.equal(state.turn("turn-2")?.status, "inProgress");
+  assert.deepEqual(diagnostics, []);
+});
+
+test("replays an early status when a whole entity supplies its association", () => {
+  const diagnostics: string[] = [];
+  const state = new DesktopThreadState(threadId, (event) => {
+    diagnostics.push(event);
+  });
+  state.apply(desktopStateChange({
+    type: "snapshot",
+    revision: 1,
+    conversationState: {},
+  }));
+  state.apply(desktopStateChange({
+    type: "patches",
+    baseRevision: 1,
+    revision: 2,
+    patches: [
+      entityPatch("known", "completed", "status"),
+      {
+        op: "replace",
+        path: ["turnHistory", "history", "entitiesByKey", "known"],
+        value: { turnId: "turn-1", status: "inProgress", error: null },
+      },
+    ],
+  }));
+  assert.equal(state.turn("turn-1")?.status, "completed");
+  assert.deepEqual(diagnostics, ["reordered_patch"]);
+});
+
+test("keeps whole-entity and turn-id associations in their wire order", () => {
+  const state = new DesktopThreadState(threadId);
+  state.apply(desktopStateChange({
+    type: "snapshot",
+    revision: 1,
+    conversationState: {},
+  }));
+  state.apply(desktopStateChange({
+    type: "patches",
+    baseRevision: 1,
+    revision: 2,
+    patches: [
+      {
+        op: "replace",
+        path: ["turnHistory", "history", "entitiesByKey", "known"],
+        value: { turnId: "turn-1", status: "completed", error: null },
+      },
+      entityPatch("known", "turn-2", "turnId"),
+    ],
+  }));
+  state.apply(desktopStateChange({
+    type: "patches",
+    baseRevision: 2,
+    revision: 3,
+    patches: [entityPatch("known", "failed", "status")],
+  }));
+  assert.equal(state.turn("turn-1")?.status, "completed");
+  assert.equal(state.turn("turn-2")?.status, "failed");
+});
+
 test("fresh snapshots clear stale active turns and complete resynchronization", () => {
   const diagnostics: string[] = [];
   const state = new DesktopThreadState(threadId, (event) => {
@@ -217,3 +300,11 @@ test("fresh snapshots clear stale active turns and complete resynchronization", 
     "resynchronized",
   ]);
 });
+
+function entityPatch(key: string, value: string, field: "turnId" | "status") {
+  return {
+    op: "replace",
+    path: ["turnHistory", "history", "entitiesByKey", key, field],
+    value,
+  };
+}

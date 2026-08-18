@@ -10,6 +10,7 @@ import type {
 } from "./contracts.js";
 import { isTransportId } from "./contracts.js";
 import type { TransportId } from "../types.js";
+import type { DaemonProbe } from "../daemon-control.js";
 
 const DISCLOSURE = [
   "No task, turn, delivery, hook, path, message, or secret identifiers are included.",
@@ -28,9 +29,9 @@ export interface CompatibilityReportInput {
     readonly service: boolean;
     readonly nodeCompatible: boolean;
   };
-  readonly daemonState: string;
+  readonly daemonState: DaemonProbe["state"];
   readonly desktopIpcAvailable: boolean;
-  readonly candidates: ReadonlyArray<string>;
+  readonly candidates: ReadonlyArray<unknown>;
   readonly journal: DiagnosticJournalSnapshot;
   readonly failures: ReadonlyArray<DiagnosticFailureSummary>;
 }
@@ -76,10 +77,42 @@ export interface AuthorizedCompatibilityReport {
   };
 }
 
-function daemonState(value: string): CompatibilityReportPayload["daemonState"] {
-  return ["running", "stopped", "unreachable"].includes(value)
-    ? value as CompatibilityReportPayload["daemonState"]
-    : "unknown";
+function daemonState(
+  value: DaemonProbe["state"],
+): CompatibilityReportPayload["daemonState"] {
+  switch (value) {
+    case "running":
+      return "running";
+    case "down":
+      return "stopped";
+    case "occupied":
+      return "unreachable";
+  }
+}
+
+function reportPlatform(
+  value: NodeJS.Platform,
+): CompatibilityReportPayload["runtime"]["platform"] {
+  switch (value) {
+    case "darwin":
+    case "linux":
+    case "win32":
+      return value;
+    default:
+      return "other";
+  }
+}
+
+function reportArchitecture(
+  value: string,
+): CompatibilityReportPayload["runtime"]["architecture"] {
+  switch (value) {
+    case "arm64":
+    case "x64":
+      return value;
+    default:
+      return "other";
+  }
 }
 
 export function buildCompatibilityReport(
@@ -102,15 +135,17 @@ export function buildCompatibilityReport(
     schemaVersion: 1,
     codexhookVersion: input.version,
     runtime: {
-      platform: ["darwin", "linux", "win32"].includes(input.platform)
-        ? input.platform as "darwin" | "linux" | "win32"
-        : "other",
-      architecture: ["arm64", "x64"].includes(input.architecture)
-        ? input.architecture as "arm64" | "x64"
-        : "other",
+      platform: reportPlatform(input.platform),
+      architecture: reportArchitecture(input.architecture),
       nodeMajor: match?.[1] == null ? null : Number(match[1]),
     },
-    installation: input.installation,
+    installation: {
+      manifest: input.installation.manifest === true,
+      runtime: input.installation.runtime === true,
+      skill: input.installation.skill === true,
+      service: input.installation.service === true,
+      nodeCompatible: input.installation.nodeCompatible === true,
+    },
     daemonState: daemonState(input.daemonState),
     codex: {
       desktopIpcAvailable: input.desktopIpcAvailable,

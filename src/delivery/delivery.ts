@@ -9,22 +9,22 @@ import {
 } from "effect";
 import { randomUUID } from "node:crypto";
 import {
+  NO_DIAGNOSTICS,
   recordDiagnostic,
   type DiagnosticObserver,
 } from "../diagnostics/contracts.js";
 import {
   deliveryFailedEvent,
-  deliveryStartedEvent,
   deliverySucceededEvent,
 } from "../diagnostics/events.js";
 import { Logger } from "../logger.js";
 import {
   DeliveryId,
-  turnOutcomeTruth,
   type ThreadId,
   type TurnRequest,
   type WebhookRecord,
 } from "../types.js";
+import { turnOutcomeTruth } from "../diagnostics/truth.js";
 import {
   disposition,
   errorTransport,
@@ -73,7 +73,7 @@ function failureSubmission(error: DeliveryError): string {
 
 export function DeliveryLive(
   logger = new Logger(),
-  diagnostics?: DiagnosticObserver,
+  diagnostics: DiagnosticObserver = NO_DIAGNOSTICS,
 ): Layer.Layer<Delivery, never, CodexTransport> {
   return Layer.scoped(
     Delivery,
@@ -92,7 +92,6 @@ export function DeliveryLive(
           threadId: job.request.threadId,
           mode: job.request.mode,
         });
-        recordDiagnostic(diagnostics, deliveryStartedEvent());
         return transport.deliver(job.request).pipe(
           Effect.match({
             onSuccess: (outcome) => {

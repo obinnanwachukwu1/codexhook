@@ -203,11 +203,10 @@ export async function doctor(arguments_: string[]): Promise<void> {
       runtimes,
     },
     diagnostics: {
-      path: journal.filePath,
       supportedStages: DIAGNOSTIC_STAGES,
       entries: journalSnapshot.records.length,
       invalidEntries: journalSnapshot.invalidLines,
-      boundedBy: journalSnapshot.boundedBy,
+      limits: journalSnapshot.limits,
       failures: diagnosticFailures,
     },
     dataDirectory: directory,
@@ -262,8 +261,11 @@ export async function doctor(arguments_: string[]): Promise<void> {
     } else {
       process.stdout.write("diagnostics (recent classified failures):\n");
       for (const failure of diagnosticFailures) {
+        const delivered = failure.deliveryTruth == null
+          ? ""
+          : `, delivered=${failure.deliveryTruth}`;
         process.stdout.write(
-          `  ${failure.stage}: ${failure.code} (${failure.outcome}, ${failure.count}x${failure.deliveryTruth == null ? "" : `, delivery=${failure.deliveryTruth}`})\n`,
+          `  ${failure.stage}: ${failure.code} (${failure.outcome}, ${failure.count}x${delivered})\n`,
         );
       }
     }

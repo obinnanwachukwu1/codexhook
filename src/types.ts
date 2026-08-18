@@ -17,18 +17,6 @@ export const TRANSPORT_IDS = [
   "cli",
 ] as const;
 export type TransportId = (typeof TRANSPORT_IDS)[number];
-export type DeliveryTruth =
-  | "confirmed_desktop"
-  | "confirmed_app_server"
-  | "ambiguous"
-  | "unavailable"
-  | "rejected";
-
-export function turnOutcomeTruth(outcome: TurnOutcome): DeliveryTruth {
-  return outcome.transport === "desktop"
-    ? "confirmed_desktop"
-    : "confirmed_app_server";
-}
 
 export interface WebhookRecord {
   id: string;

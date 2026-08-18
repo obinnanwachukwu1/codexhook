@@ -1,10 +1,8 @@
 import {
   appendFileSync,
-  chmodSync,
   existsSync,
   readFileSync,
   renameSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -42,7 +40,7 @@ export interface DiagnosticJournalOptions {
 export interface DiagnosticJournalSnapshot {
   readonly records: ReadonlyArray<DiagnosticRecord>;
   readonly invalidLines: number;
-  readonly boundedBy: { readonly bytes: number; readonly entries: number };
+  readonly limits: { readonly bytes: number; readonly entries: number };
 }
 
 function parseRecord(value: unknown): DiagnosticRecord | null {
@@ -73,6 +71,7 @@ function parseRecord(value: unknown): DiagnosticRecord | null {
 }
 
 export class DiagnosticJournal implements DiagnosticObserver {
+  private bytesOnDisk: number | null = null;
   private directoryReady = false;
   private entriesOnDisk: number | null = null;
   private readonly maxBytes: number;
@@ -91,27 +90,34 @@ export class DiagnosticJournal implements DiagnosticObserver {
   record(event: DiagnosticEvent): void {
     try {
       this.ensureDirectory();
-      if (this.entriesOnDisk == null) {
-        this.entriesOnDisk = this.lineCount();
+      if (this.entriesOnDisk == null || this.bytesOnDisk == null) {
+        const usage = this.diskUsage();
+        this.entriesOnDisk = usage.entries;
+        this.bytesOnDisk = usage.bytes;
       }
       const value: DiagnosticRecord = {
         schemaVersion: 1,
         timestamp: this.now().toISOString(),
         stage: event.stage,
         outcome: event.outcome,
-        code: journalCode(event.code),
+        code: event.code,
         ...(event.transport == null ? {} : { transport: event.transport }),
         ...(event.deliveryTruth == null
           ? {}
           : { deliveryTruth: event.deliveryTruth }),
       };
-      appendFileSync(this.filePath, `${JSON.stringify(value)}\n`, {
+      const line = `${JSON.stringify(value)}\n`;
+      appendFileSync(this.filePath, line, {
         encoding: "utf8",
         mode: 0o600,
       });
       this.entriesOnDisk += 1;
+      this.bytesOnDisk += Buffer.byteLength(line);
       this.enforceBounds();
     } catch {
+      this.bytesOnDisk = null;
+      this.directoryReady = false;
+      this.entriesOnDisk = null;
       // Diagnostics are best effort and must never affect delivery.
     }
   }
@@ -158,15 +164,20 @@ export class DiagnosticJournal implements DiagnosticObserver {
   private enforceBounds(): void {
     if (
       (this.entriesOnDisk ?? 0) <= this.maxEntries &&
-      statSync(this.filePath).size <= this.maxBytes
+      (this.bytesOnDisk ?? 0) <= this.maxBytes
     ) return;
     const records = this.readAll().records;
+    const targetEntries = Math.max(1, Math.floor(this.maxEntries * 0.75));
+    const targetBytes = Math.max(1, Math.floor(this.maxBytes * 0.75));
     const kept: string[] = [];
     let bytes = 0;
     for (const record of records.slice().reverse()) {
       const line = `${JSON.stringify(record)}\n`;
       const lineBytes = Buffer.byteLength(line);
-      if (kept.length >= this.maxEntries || bytes + lineBytes > this.maxBytes) {
+      if (
+        kept.length >= targetEntries ||
+        bytes + lineBytes > targetBytes
+      ) {
         break;
       }
       kept.push(line);
@@ -178,16 +189,20 @@ export class DiagnosticJournal implements DiagnosticObserver {
       mode: 0o600,
     });
     renameSync(temporary, this.filePath);
-    if (process.platform !== "win32") chmodSync(this.filePath, 0o600);
+    this.bytesOnDisk = bytes;
     this.entriesOnDisk = kept.length;
   }
 
-  private lineCount(): number {
-    if (!existsSync(this.filePath)) return 0;
-    return readFileSync(this.filePath, "utf8")
+  private diskUsage(): { readonly bytes: number; readonly entries: number } {
+    if (!existsSync(this.filePath)) return { bytes: 0, entries: 0 };
+    const contents = readFileSync(this.filePath, "utf8");
+    return {
+      bytes: Buffer.byteLength(contents),
+      entries: contents
       .split("\n")
       .filter((line) => line.length > 0)
-      .length;
+      .length,
+    };
   }
 
   private readAll(): DiagnosticJournalSnapshot {
@@ -195,7 +210,7 @@ export class DiagnosticJournal implements DiagnosticObserver {
       return {
         records: [],
         invalidLines: 0,
-        boundedBy: { bytes: this.maxBytes, entries: this.maxEntries },
+        limits: { bytes: this.maxBytes, entries: this.maxEntries },
       };
     }
     let invalidLines = 0;
@@ -213,7 +228,7 @@ export class DiagnosticJournal implements DiagnosticObserver {
     return {
       records,
       invalidLines,
-      boundedBy: { bytes: this.maxBytes, entries: this.maxEntries },
+      limits: { bytes: this.maxBytes, entries: this.maxEntries },
     };
   }
 }

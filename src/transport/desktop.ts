@@ -29,9 +29,11 @@ import {
 } from "./rpc.js";
 import type { TransportSpec } from "./spec.js";
 import {
+  NO_DIAGNOSTICS,
   recordDiagnostic,
   type DiagnosticObserver,
 } from "../diagnostics/contracts.js";
+import { desktopStateEvent } from "../diagnostics/events.js";
 
 const IPC_VERSION = {
   start: 1,
@@ -89,7 +91,7 @@ function safeIpcRejection(error: string | undefined): boolean {
 function makePeer(
   spec: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
   client: DesktopIpcClient,
-  diagnostics?: DiagnosticObserver,
+  diagnostics: DiagnosticObserver,
 ): AppServerPeer {
   const states = new Map<string, DesktopThreadState>();
   client.onBroadcast((message) => {
@@ -112,22 +114,7 @@ function makePeer(
     let state = states.get(threadId);
     if (state == null) {
       state = new DesktopThreadState(threadId, (event) => {
-        recordDiagnostic(diagnostics, {
-          stage: "state_synchronization",
-          outcome: event === "revision_gap"
-            ? "failed"
-            : event === "reordered_patch"
-              ? "deferred"
-              : "recovered",
-          code: event === "revision_gap"
-            ? "state.revision_gap"
-            : event === "resynchronized"
-              ? "state.resynchronized"
-              : event === "reordered_patch"
-                ? "state.reordered_patch"
-                : "state.stale_active_turn",
-          transport: "desktop",
-        });
+        recordDiagnostic(diagnostics, desktopStateEvent(event));
       });
       states.set(threadId, state);
       client.broadcast(
@@ -318,7 +305,7 @@ function makePeer(
 
 export function connectDesktop(
   spec: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
-  diagnostics?: DiagnosticObserver,
+  diagnostics: DiagnosticObserver = NO_DIAGNOSTICS,
 ): Effect.Effect<
   AppServerPeer,
   TransportUnavailable | TransportIncompatible,
