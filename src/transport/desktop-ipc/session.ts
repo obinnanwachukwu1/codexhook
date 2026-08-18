@@ -61,6 +61,12 @@ function limits(options: DesktopProtocolSessionOptions): SessionLimits {
   };
 }
 
+function reconnectError(message: string): DesktopProtocolError {
+  return new DesktopProtocolError(
+    "reconnect-failed", "operation", "not-written", message,
+  );
+}
+
 export class DesktopProtocolSession {
   private readonly broadcasts = new Set<DesktopBroadcastListener>();
   private closing = false;
@@ -68,6 +74,7 @@ export class DesktopProtocolSession {
   private readonly followedThreads = new Set<string>();
   private readonly limits: SessionLimits;
   private readonly observations = new Set<DesktopObservationListener>();
+  private openingRaw: RawDesktopConnection | null = null;
   private reconnecting: Promise<NegotiatedConnection> | null = null;
 
   private constructor(
@@ -117,6 +124,7 @@ export class DesktopProtocolSession {
   close(): void {
     this.closing = true;
     this.connection?.raw.close();
+    this.openingRaw?.close();
     this.connection = null;
   }
 
@@ -288,6 +296,11 @@ export class DesktopProtocolSession {
       (message) => this.receiveBroadcast(message),
       (observation) => this.emit(observation),
     );
+    this.openingRaw = raw;
+    if (this.closing) {
+      raw.close();
+      throw this.closedError();
+    }
     try {
       const response = await raw.request(
         "initialize",
@@ -295,6 +308,7 @@ export class DesktopProtocolSession {
         0,
         this.limits.handshakeTimeoutMs,
       );
+      if (this.closing) throw this.closedError();
       if (response.resultType === "error") {
         throw new DesktopProtocolError(
           "handshake-malformed",
@@ -326,10 +340,7 @@ export class DesktopProtocolSession {
           this.followedThreads.size > 0 &&
           !profile.capabilities.threadStream
         ) {
-          throw new DesktopProtocolError(
-            "reconnect-failed",
-            "operation",
-            "not-written",
+          throw reconnectError(
             "Desktop IPC reconnect cannot restore followed tasks",
           );
         }
@@ -342,10 +353,7 @@ export class DesktopProtocolSession {
             );
           }
         } catch {
-          throw new DesktopProtocolError(
-            "reconnect-failed",
-            "operation",
-            "not-written",
+          throw reconnectError(
             "Desktop IPC reconnect could not restore followed tasks",
           );
         }
@@ -353,7 +361,18 @@ export class DesktopProtocolSession {
       return { adapter, profile, raw };
     } catch (cause) {
       raw.close();
+      if (reconnected) {
+        if (this.closing) throw this.closedError();
+        if (
+          !(cause instanceof DesktopProtocolError) ||
+          cause.writeState !== "not-written"
+        ) {
+          throw reconnectError("Desktop IPC reconnect handshake failed");
+        }
+      }
       throw cause;
+    } finally {
+      if (this.openingRaw === raw) this.openingRaw = null;
     }
   }
 

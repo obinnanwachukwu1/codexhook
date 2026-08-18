@@ -68,7 +68,9 @@ test("closing during reconnect cannot resurrect or leak a session", async () => 
   const endpoint = await testEndpoint();
   const initialize = await fixture("initialize-legacy.json");
   const firstRouter = await listen(endpoint.socketPath, initialize);
-  const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+  const session = await DesktopProtocolSession.connect(endpoint.socketPath, {
+    handshakeTimeoutMs: 500,
+  });
   await firstRouter.close();
   await waitFor(() => !session.alive);
 
@@ -79,21 +81,23 @@ test("closing during reconnect cannot resurrect or leak a session", async () => 
   let starts = 0;
   const secondRouter = await listen(
     endpoint.socketPath,
-    initialize,
+    null,
     (message) => {
       if (message.method === "thread-follower-start-turn") starts += 1;
     },
-    { initializeDelayMs: 40, onConnection: connected },
+    { onConnection: connected },
   );
   try {
     const pending = session.startTurn("thread-1", {}, 1_000);
     await connection;
+    const closedAt = Date.now();
     session.close();
     await assert.rejects(
       pending,
       (error: unknown) =>
         error instanceof DesktopProtocolError && error.failure === "closed",
     );
+    assert.equal(Date.now() - closedAt < 250, true);
     await waitFor(() => secondRouter.socketCount() === 0);
     assert.equal(session.alive, false);
     assert.equal(secondRouter.socketCount(), 0);
@@ -200,6 +204,42 @@ test("reports a failed re-follow as not written for the triggering turn", async 
         error.writeState === "not-written",
     );
     assert.equal(follows, 0);
+    assert.equal(starts, 0);
+  } finally {
+    session.close();
+    await secondRouter.close();
+    await endpoint.cleanup();
+  }
+});
+
+test("reports a reconnect handshake timeout as not written", async () => {
+  const endpoint = await testEndpoint();
+  const firstRouter = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-legacy.json"),
+  );
+  const session = await DesktopProtocolSession.connect(endpoint.socketPath, {
+    handshakeTimeoutMs: 30,
+  });
+  await firstRouter.close();
+  await waitFor(() => !session.alive);
+
+  let starts = 0;
+  const secondRouter = await listen(
+    endpoint.socketPath,
+    null,
+    (message) => {
+      if (message.method === "thread-follower-start-turn") starts += 1;
+    },
+  );
+  try {
+    await assert.rejects(
+      session.startTurn("thread-1", {}, 1_000),
+      (error: unknown) =>
+        error instanceof DesktopProtocolError &&
+        error.failure === "reconnect-failed" &&
+        error.writeState === "not-written",
+    );
     assert.equal(starts, 0);
   } finally {
     session.close();
