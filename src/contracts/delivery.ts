@@ -10,9 +10,7 @@ import type { DeliveryStage } from "./stages.js";
 import type {
   DeliveryOperation,
   DeliveryRoute,
-  PreSubmissionFailureReason,
   RouteSubmissionOutcome,
-  SubmissionTruth,
 } from "./submission.js";
 
 export interface DeliveryRequest {
@@ -20,14 +18,14 @@ export interface DeliveryRequest {
   readonly deliveryId: DeliveryId;
   readonly message: string;
   readonly mode: DeliveryMode;
-  readonly idleTimeout: Duration.DurationInput;
-  readonly turnTimeout: Duration.DurationInput;
+  readonly idleTimeout: Duration.Duration;
+  readonly turnTimeout: Duration.Duration;
 }
 
 export interface DeliveryAttempt {
   readonly route: DeliveryRoute;
   readonly stage: DeliveryStage;
-  readonly submission: SubmissionTruth;
+  readonly outcome: RouteSubmissionOutcome["_tag"];
   readonly elapsedMs: number;
   readonly diagnostic?: SanitizedDiagnostic;
 }
@@ -40,6 +38,7 @@ interface ConfirmedDelivery {
   readonly attempts: ReadonlyArray<DeliveryAttempt>;
 }
 
+/** Confirmed tags identify the route that wrote, not the observing plane. */
 export type DeliveryOutcome =
   | (ConfirmedDelivery & {
       readonly _tag: "ConfirmedDesktop";
@@ -71,16 +70,6 @@ export type DeliveryOutcome =
       readonly diagnostic: SanitizedDiagnostic;
     };
 
-export interface DeliveryPolicy {
-  readonly taskScope: "local-only";
-  readonly preferredRoute: "desktop";
-  readonly fallbackRoute: "app-server";
-  readonly fallbackAfter: ReadonlyArray<PreSubmissionFailureReason>;
-  readonly ambiguousSubmission: "stop-and-reconcile";
-  readonly reconciliation: "app-server-observe-only";
-  readonly retry: "none";
-}
-
 export const PHASE_ONE_DELIVERY_POLICY = Object.freeze({
   taskScope: "local-only",
   preferredRoute: "desktop",
@@ -93,7 +82,9 @@ export const PHASE_ONE_DELIVERY_POLICY = Object.freeze({
   ambiguousSubmission: "stop-and-reconcile",
   reconciliation: "app-server-observe-only",
   retry: "none",
-}) satisfies DeliveryPolicy;
+});
+
+export type DeliveryPolicy = typeof PHASE_ONE_DELIVERY_POLICY;
 
 export function mayFallback(
   outcome: RouteSubmissionOutcome,
@@ -105,10 +96,11 @@ export function mayFallback(
 }
 
 export interface DeliveryCoordinator {
-  readonly policy: DeliveryPolicy;
+  readonly policy: typeof PHASE_ONE_DELIVERY_POLICY;
   /**
    * Owns any Desktop scope for one delivery and returns a classified outcome;
-   * no non-fatal adapter failure or defect may escape the effect.
+   * no non-fatal adapter failure or defect may escape the effect. The possible
+   * write region is uninterruptible until its outcome is classified.
    */
   readonly deliver: (
     request: DeliveryRequest,

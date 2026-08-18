@@ -9,7 +9,7 @@ import type {
   ProtocolAvailability,
 } from "./compatibility.js";
 import type { SanitizedDiagnostic } from "./diagnostics.js";
-import type { LocalTaskRef, LocalTurn } from "./local-codex.js";
+import type { LocalTaskRef } from "./local-codex.js";
 import type { RouteSubmissionOutcome } from "./submission.js";
 
 export type DesktopAvailability = ProtocolAvailability;
@@ -29,7 +29,7 @@ export interface DesktopSubmissionRequest {
 
 export interface DesktopTaskObservation {
   readonly task: LocalTaskRef;
-  readonly turns: ReadonlyArray<LocalTurn>;
+  readonly activeTurnId: TurnId | null;
 }
 
 /**
@@ -42,8 +42,8 @@ export interface DesktopSession {
     task: LocalTaskRef,
   ) => Effect.Effect<DesktopTaskObservation, DesktopFailure>;
   /**
-   * Convert every non-fatal failure or defect into an outcome. Any cause at or
-   * after a possible write must become Ambiguous instead of escaping.
+   * The possible-write region is uninterruptible. Convert every non-fatal
+   * failure or defect into an outcome; any uncertain write becomes Ambiguous.
    */
   readonly submit: (
     request: DesktopSubmissionRequest,

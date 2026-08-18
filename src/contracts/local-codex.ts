@@ -1,9 +1,9 @@
 import { Context, type Effect, type Stream } from "effect";
-import {
-  type DeliveryId,
-  type DeliveryMode,
-  type ThreadId,
-  type TurnId,
+import type {
+  DeliveryId,
+  DeliveryMode,
+  ThreadId,
+  TurnId,
 } from "../types.js";
 import type { ProtocolAvailability } from "./compatibility.js";
 import type { SanitizedDiagnostic } from "./diagnostics.js";
@@ -45,18 +45,15 @@ export type LocalTaskEvent =
       readonly type: "snapshot";
       readonly task: LocalTaskRef;
       readonly history: LocalTaskHistory;
-      readonly cursor: string;
     }
   | {
       readonly type: "turn-changed";
       readonly task: LocalTaskRef;
       readonly turn: LocalTurn;
-      readonly cursor: string;
     }
   | {
       readonly type: "task-removed";
       readonly task: LocalTaskRef;
-      readonly cursor: string;
     };
 
 export type LocalCodexAvailability = ProtocolAvailability;
@@ -79,6 +76,7 @@ export interface LocalCodexService {
     ReadonlyArray<LocalTaskSummary>,
     LocalCodexFailure
   >;
+  /** Point-in-time history for display and inspection, not reconciliation. */
   readonly readHistory: (
     task: LocalTaskRef,
   ) => Effect.Effect<LocalTaskHistory, LocalCodexFailure>;
@@ -94,8 +92,8 @@ export interface LocalCodexService {
     task: LocalTaskRef,
   ) => Stream.Stream<LocalTaskEvent, LocalCodexFailure>;
   /**
-   * Convert every non-fatal failure or defect into an outcome. Any cause at or
-   * after a possible write must become Ambiguous instead of escaping.
+   * The possible-write region is uninterruptible. Convert every non-fatal
+   * failure or defect into an outcome; any uncertain write becomes Ambiguous.
    */
   readonly submit: (
     request: LocalSubmissionRequest,

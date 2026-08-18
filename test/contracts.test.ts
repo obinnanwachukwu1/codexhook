@@ -6,7 +6,6 @@ import {
   mayFallback,
   PHASE_ONE_DELIVERY_POLICY,
   sanitizeDiagnostic,
-  submissionTruth,
   type LocalTaskRef,
   type ProtocolOffer,
   type ProtocolRequirement,
@@ -75,7 +74,11 @@ test("protocol compatibility reports each incompatible condition", () => {
     assert.equal(result.status, "incompatible");
     if (result.status === "incompatible") {
       assert.equal(result.reason, item.reason);
-      assert.deepEqual(result.missingFeatures, item.missingFeatures ?? []);
+      if (result.reason === "missing-feature") {
+        assert.deepEqual(result.missingFeatures, item.missingFeatures);
+      } else {
+        assert.equal(item.missingFeatures, undefined);
+      }
     }
   }
 });
@@ -136,50 +139,11 @@ test("fallback requires a confirmed Desktop non-submission", () => {
   );
 });
 
-test("submission truth is derived from each route outcome", () => {
-  const deliveryId = DeliveryId("delivery-1");
-  const diagnostic = sanitizeDiagnostic({ code: "internal" });
-  const outcomes: ReadonlyArray<
-    readonly [RouteSubmissionOutcome, string]
-  > = [
-    [{
-      _tag: "Confirmed",
-      route: "desktop",
-      deliveryId,
-      turnId: TurnId("turn-1"),
-      operation: "start",
-    }, "confirmed"],
-    [{
-      _tag: "NotSubmitted",
-      route: "desktop",
-      deliveryId,
-      reason: "pre-submit-failure",
-      diagnostic,
-    }, "not-submitted"],
-    [{
-      _tag: "Ambiguous",
-      route: "desktop",
-      deliveryId,
-      diagnostic,
-    }, "unknown"],
-    [{
-      _tag: "Rejected",
-      route: "desktop",
-      deliveryId,
-      diagnostic,
-    }, "rejected"],
-  ];
-  for (const [outcome, truth] of outcomes) {
-    assert.equal(submissionTruth(outcome), truth);
-  }
-});
-
 test("sanitized diagnostics retain only allowlisted structured fields", () => {
   const diagnostic = sanitizeDiagnostic({
     code: "write-ambiguous",
     stage: "submit-desktop",
     route: "desktop",
-    attempt: 1,
     protocolRevision: 4,
     summary: "caller supplied",
     token: "secret-token",
@@ -191,7 +155,6 @@ test("sanitized diagnostics retain only allowlisted structured fields", () => {
     code: "write-ambiguous",
     stage: "submit-desktop",
     route: "desktop",
-    attempt: 1,
     protocolRevision: 4,
   });
   assert.equal(
@@ -212,6 +175,20 @@ test("invalid diagnostics degrade to a fixed internal code", () => {
     diagnosticSummary("internal"),
     "An internal delivery error occurred",
   );
+});
+
+test("diagnostic sanitization is safe for production failure shapes", () => {
+  const values = [
+    new Error("connect ENOENT /private/desktop.sock"),
+    "raw token string",
+    null,
+    undefined,
+  ];
+  for (const value of values) {
+    const diagnostic = sanitizeDiagnostic(value);
+    assert.deepEqual(diagnostic, { code: "internal" });
+    assert.equal(Object.isFrozen(diagnostic), true);
+  }
 });
 
 test("root exports retain legacy and contract services", async () => {

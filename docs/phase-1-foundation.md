@@ -16,23 +16,24 @@ stable seams before the runtime cutover.
    events. A Desktop window is not evidence that it owns the complete task
    inventory. CLI-originated tasks must appear through the same app-server
    plane.
-2. Every accepted delivery targets a branded `LocalTaskRef` resolved by
-   `LocalCodexService.resolveTask`. The canonical app-server is the only
-   authority that may mint one, so remote, Desktop-only, and unknown task
-   references fail before any write is attempted.
+2. Every accepted delivery targets a branded `LocalTaskRef` returned by
+   `LocalCodexService.resolveTask` or `listTasks`. The canonical app-server is
+   the only authority that may mint one, so remote, Desktop-only, and unknown
+   task references fail before any write is attempted.
 3. Desktop IPC is the preferred live injection route when it is available,
    compatible, and following the target task. Desktop is a scoped session, not
    a second source of task truth.
 4. App-server is the fallback write route only after Desktop is unavailable,
    incompatible, or positively confirms that no submission occurred.
-5. A confirmed Desktop write yields `ConfirmedDesktop`. A confirmed app-server
-   write, including a write later identified by its delivery ID during
-   observation-only reconciliation, yields `ConfirmedAppServer`.
+5. Confirmed tags name the route that performed the write, not the plane that
+   later observed it. A Desktop write yields `ConfirmedDesktop`; an app-server
+   write yields `ConfirmedAppServer`.
 6. A write whose disposition is unknown yields `Ambiguous`. The coordinator
    may inspect the snapshot-first app-server event stream for the same delivery
    ID in a turn's `deliveryIds`, but it must not issue another write.
    Reconciliation promotes the outcome only on a positive canonical match;
-   otherwise ambiguity remains visible.
+   otherwise ambiguity remains visible. A reconciled Desktop write remains
+   `ConfirmedDesktop`.
 7. An explicit protocol refusal yields `Rejected`. Exhausting routes through
    pre-write failures yields `Unavailable`. Neither is reported as confirmed.
 8. Delivery is best effort, has no retry queue, and remains FIFO per task in
@@ -45,9 +46,9 @@ stable seams before the runtime cutover.
 10. All transports decline approval requests. These contracts do not broaden
     the authority of a webhook-delivered message.
 11. The coordinator owns one scoped Desktop session per delivery. Sessions are
-    not shared across concurrent task lanes, and every failure at or after a
-    possible write is classified as `Ambiguous` rather than escaping the
-    outcome model.
+    not shared across concurrent task lanes. The possible-write region is
+    uninterruptible until every failure, defect, or pending interruption is
+    classified; an uncertain write becomes `Ambiguous`.
 
 ## Contract ownership
 
@@ -57,13 +58,14 @@ stable seams before the runtime cutover.
 | Desktop IPC | `DesktopProtocol`, `DesktopSession` | Desktop owner implements discovery, compatibility negotiation, following, injection, and observation. It must not add task-list authority. |
 | Routing | `DeliveryCoordinator`, `DeliveryPolicy`, `DeliveryOutcome` | Coordinator owner sequences the two planes and preserves the submission-truth rules above. |
 | Wire evolution | `ProtocolRequirement`, `ProtocolOffer`, `ProtocolCompatibility` | Each protocol adapter declares offers; the coordinator supplies requirements. Missing features remain pre-write incompatibility. |
-| Provenance | `LocalTaskRef`, `TaskProvenance`, `LocalCodexService.resolveTask` | App-server resolves and mints branded references before coordination. |
+| Provenance | `LocalTaskRef`, `TaskProvenance`, `LocalCodexService` | App-server resolves and mints branded references before coordination. |
 | Observability | `SanitizedDiagnostic`, `DeliveryAttempt` | Each adapter returns safe codes; logging and health output consume only sanitized values. |
 
 ## Integration sequence
 
 1. Implement the app-server adapter behind `LocalCodexService` without
-   changing public HTTP behavior.
+   changing public HTTP behavior. Centralize the sole `LocalTaskRef` branding
+   assertion in one private constructor used by `resolveTask` and `listTasks`.
 2. Adapt the existing Desktop IPC client behind `DesktopProtocol`; keep the
    socket client and stream-state parser private to that implementation.
 3. Implement `DeliveryCoordinator` with app-server observation-only

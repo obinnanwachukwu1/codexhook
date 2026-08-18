@@ -41,8 +41,12 @@ export type ProtocolCompatibility =
       readonly reason:
         | "wrong-plane"
         | "major-mismatch"
-        | "revision-too-old"
-        | "missing-feature";
+        | "revision-too-old";
+    }
+  | {
+      readonly status: "incompatible";
+      readonly plane: ProtocolPlane;
+      readonly reason: "missing-feature";
       readonly missingFeatures: ReadonlyArray<ProtocolFeature>;
     };
 
@@ -54,7 +58,6 @@ export type CompatibleProtocol = Extract<
 export type ProtocolAvailability =
   | {
       readonly status: "available";
-      readonly offer: ProtocolOffer;
       readonly compatibility: CompatibleProtocol;
     }
   | {
@@ -71,7 +74,6 @@ export function checkProtocolCompatibility(
       status: "incompatible",
       plane: requirement.plane,
       reason: "wrong-plane",
-      missingFeatures: [],
     };
   }
   if (offer.major !== requirement.major) {
@@ -79,7 +81,6 @@ export function checkProtocolCompatibility(
       status: "incompatible",
       plane: requirement.plane,
       reason: "major-mismatch",
-      missingFeatures: [],
     };
   }
   if (offer.revision < requirement.minimumRevision) {
@@ -87,7 +88,6 @@ export function checkProtocolCompatibility(
       status: "incompatible",
       plane: requirement.plane,
       reason: "revision-too-old",
-      missingFeatures: [],
     };
   }
   const offered = new Set(offer.features);

@@ -21,7 +21,6 @@ export interface SanitizedDiagnostic {
   readonly code: DiagnosticCode;
   readonly stage?: DeliveryStage;
   readonly route?: DeliveryRoute;
-  readonly attempt?: number;
   readonly protocolRevision?: number;
 }
 
@@ -78,13 +77,11 @@ export function sanitizeDiagnostic(value: unknown): SanitizedDiagnostic {
     ? source.stage
     : undefined;
   const safeRoute = asRoute(source.route);
-  const attempt = nonNegativeInteger(source.attempt);
   const protocolRevision = nonNegativeInteger(source.protocolRevision);
   return Object.freeze({
     code: safeCode,
     ...(safeStage == null ? {} : { stage: safeStage }),
     ...(safeRoute == null ? {} : { route: safeRoute }),
-    ...(attempt == null ? {} : { attempt }),
     ...(protocolRevision == null ? {} : { protocolRevision }),
   });
 }

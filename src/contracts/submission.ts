@@ -7,11 +7,6 @@ export type PreSubmissionFailureReason =
   | "unavailable"
   | "incompatible"
   | "pre-submit-failure";
-export type SubmissionTruth =
-  | "confirmed"
-  | "not-submitted"
-  | "unknown"
-  | "rejected";
 
 export type RouteSubmissionOutcome<
   Route extends DeliveryRoute = DeliveryRoute,
@@ -42,18 +37,3 @@ export type RouteSubmissionOutcome<
       readonly deliveryId: DeliveryId;
       readonly diagnostic: SanitizedDiagnostic;
     };
-
-export function submissionTruth(
-  outcome: RouteSubmissionOutcome,
-): SubmissionTruth {
-  switch (outcome._tag) {
-    case "Confirmed":
-      return "confirmed";
-    case "NotSubmitted":
-      return "not-submitted";
-    case "Ambiguous":
-      return "unknown";
-    case "Rejected":
-      return "rejected";
-  }
-}
