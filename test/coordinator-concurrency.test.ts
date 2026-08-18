@@ -236,6 +236,51 @@ test("multiple Desktop-active turns wait and never fall back", async () => {
   }
 });
 
+test("multiple-active steer observations never fall back", async () => {
+  let localWrites = 0;
+  const service = coordinatorRuntime({
+    desktopFollow: (localTask) => Effect.succeed({
+      task: localTask,
+      activity: "multiple-active",
+      activeTurnId: null,
+    }),
+    localSubmit: () => Effect.sync(() => {
+      localWrites += 1;
+      throw new Error("conflicted Desktop steer cannot authorize fallback");
+    }),
+  });
+  try {
+    assert.equal((await deliver(service, request()))._tag, "Unavailable");
+    assert.equal(localWrites, 0);
+  } finally {
+    await service.dispose();
+  }
+});
+
+test("inject-time multiple-active steer refusals never fall back", async () => {
+  const input = request();
+  let localWrites = 0;
+  const service = coordinatorRuntime({
+    desktopSubmit: () => Effect.succeed({
+      _tag: "NotSubmitted",
+      route: "desktop",
+      deliveryId: input.deliveryId,
+      reason: "task-busy",
+      diagnostic: diagnostic("desktop-unavailable", "desktop"),
+    }),
+    localSubmit: () => Effect.sync(() => {
+      localWrites += 1;
+      throw new Error("inject-time conflict cannot authorize fallback");
+    }),
+  });
+  try {
+    assert.equal((await deliver(service, input))._tag, "Unavailable");
+    assert.equal(localWrites, 0);
+  } finally {
+    await service.dispose();
+  }
+});
+
 test("interrupting Desktop preparation cannot start an app-server fallback", async () => {
   const entered = await Effect.runPromise(Deferred.make<void>());
   let localWrites = 0;

@@ -74,8 +74,8 @@ export class DesktopAttachment {
       }
       const invalid = this.validationFailure(command, state);
       if (invalid != null) {
-        const taskBusy = command.kind === "start" &&
-          (state.hasMultipleActiveTurns() || state.activeTurn() != null);
+        const taskBusy = state.hasMultipleActiveTurns() ||
+          (command.kind === "start" && state.activeTurn() != null);
         return this.notSubmitted(
           state,
           invalid,
