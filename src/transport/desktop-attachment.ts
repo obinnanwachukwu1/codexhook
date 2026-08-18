@@ -186,6 +186,12 @@ export class DesktopAttachment {
         for (const state of this.states.values()) {
           state.beginFollowing(this.generation);
         }
+      } else if (event === "Reconnected") {
+        for (const state of this.states.values()) {
+          if (state.connection === "connecting") {
+            state.beginFollowing(this.generation);
+          }
+        }
       } else if (event === "Disconnected") {
         this.resyncing.clear();
         for (const state of this.states.values()) state.disconnected();
@@ -211,8 +217,15 @@ export class DesktopAttachment {
     if (state.ready) return;
     const deadline = Date.now() + this.followTimeoutMs;
     const followedBefore = this.followed.has(state.threadId);
-    if (!this.protocol.connected) state.beginConnecting();
-    else state.beginFollowing(this.generation);
+    if (!this.protocol.connected) {
+      if (
+        state.attachment !== "following" ||
+        state.generation !== this.generation
+      ) state.beginConnecting();
+    } else if (
+      state.attachment !== "following" ||
+      state.generation !== this.generation
+    ) state.beginFollowing(this.generation);
     const remaining = Math.max(1, deadline - Date.now());
     if (followedBefore) {
       const accepted = await withDesktopTimeout(

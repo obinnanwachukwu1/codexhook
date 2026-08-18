@@ -116,14 +116,17 @@ function unavailableFrom(cause: unknown): ProtocolAvailability {
 
 function openProtocol(
   spec: DesktopSpec,
-): Effect.Effect<DesktopIpcProtocol, DesktopFailure, Scope.Scope> {
+): Effect.Effect<
+  { readonly attachment: DesktopAttachment; readonly profile: DesktopProtocolProfile },
+  DesktopFailure,
+  Scope.Scope
+> {
   return Effect.suspend(() => {
-    let acquired: DesktopIpcProtocol | null = null;
+    let acquired: DesktopAttachment | null = null;
     const open = Effect.tryPromise({
       try: (signal) => DesktopIpcProtocol.connect(
         spec.socketPath,
         signal,
-        (protocol) => { acquired = protocol; },
       ),
       catch: (cause) => failure(
         cause instanceof DesktopProtocolError && [
@@ -137,7 +140,11 @@ function openProtocol(
       ),
     });
     return Effect.acquireReleaseInterruptible(
-      open,
+      open.pipe(Effect.map((protocol) => {
+        const attachment = new DesktopAttachment(protocol);
+        acquired = attachment;
+        return { attachment, profile: protocol.profile };
+      })),
       () => Effect.sync(() => acquired?.close()),
     );
   });
@@ -182,10 +189,9 @@ function routeOutcome(
 }
 
 function desktopSession(
-  protocol: DesktopIpcProtocol,
+  attachment: DesktopAttachment,
   compatibility: CompatibleProtocol,
 ): DesktopSession {
-  const attachment = new DesktopAttachment(protocol);
   return {
     compatibility,
     follow: (task) => Effect.tryPromise({
@@ -275,11 +281,11 @@ export function desktopProtocolService(
         ),
         onSome: openProtocol,
       })),
-      Effect.flatMap((protocol) => {
-        const value = compatible(protocol.profile);
+      Effect.flatMap(({ attachment, profile }) => {
+        const value = compatible(profile);
         return value == null
           ? Effect.fail(failure("desktop-incompatible", "connect-desktop"))
-          : Effect.succeed(desktopSession(protocol, value));
+          : Effect.succeed(desktopSession(attachment, value));
       }),
     ),
   };

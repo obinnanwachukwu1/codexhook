@@ -295,6 +295,31 @@ test("reconnects, restores subscriptions, and ignores stale events", async () =>
   assert.equal(attachment.state("thread-2").revision, 11);
 });
 
+test("does not demote another followed task during reconnect", async () => {
+  const protocol = new FakeDesktopProtocol();
+  protocol.setSnapshot("thread-1", 1);
+  protocol.setSnapshot("thread-2", 1);
+  const attachment = new DesktopAttachment(protocol);
+  await attachment.resume("thread-1");
+  await attachment.resume("thread-2");
+
+  protocol.disconnect();
+  protocol.setSnapshot("thread-2", 10, {
+    active: { turnId: "turn-2", status: "inProgress", error: null },
+  });
+  protocol.beginReconnect();
+  const resumed = attachment.resume("thread-2");
+  protocol.finishReconnect();
+
+  assert.deepEqual(await resumed, [{
+    id: "turn-2",
+    status: "inProgress",
+    error: null,
+  }]);
+  assert.equal(attachment.state("thread-2").generation, 2);
+  assert.equal(attachment.state("thread-2").attachment, "synchronized");
+});
+
 test("close fences a reconnect while subscriptions are restoring", async () => {
   const protocol = new FakeDesktopProtocol();
   protocol.setSnapshot("thread-1", 1);

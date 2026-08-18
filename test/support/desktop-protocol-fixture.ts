@@ -68,7 +68,15 @@ export class FakeDesktopProtocol implements DesktopTaskProtocol {
   }
 
   reconnect(): void {
+    this.beginReconnect();
+    this.finishReconnect();
+  }
+
+  beginReconnect(): void {
     for (const listener of this.connections) listener("Reconnecting");
+  }
+
+  finishReconnect(): void {
     this.connected = true;
     for (const listener of this.connections) listener("Reconnected");
   }
