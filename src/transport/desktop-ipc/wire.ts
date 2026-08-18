@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { lstat } from "node:fs/promises";
 import net from "node:net";
 import {
   DesktopProtocolError,
@@ -10,12 +9,12 @@ import {
   DesktopFrameDecoder,
   encodeDesktopFrame,
 } from "./framing.js";
+import { desktopEndpointIdentity } from "./endpoint-identity.js";
 import type {
   DesktopProtocolObservation,
   DesktopResponseEnvelope,
   DesktopWireEnvelope,
 } from "./types.js";
-
 export interface DesktopWireLimits {
   readonly maxInboundFrameBytes: number;
   readonly maxOutboundFrameBytes: number;
@@ -42,18 +41,6 @@ interface PendingRequest {
   readonly resolve: (message: DesktopResponseEnvelope) => void;
   readonly timeout: NodeJS.Timeout;
   written: boolean;
-}
-
-export async function desktopEndpointIdentity(
-  socketPath: string,
-): Promise<string | null> {
-  if (process.platform === "win32") return null;
-  try {
-    const info = await lstat(socketPath);
-    return `${info.dev}:${info.ino}`;
-  } catch {
-    return null;
-  }
 }
 
 function disconnectedError(
@@ -98,7 +85,7 @@ export class RawDesktopConnection {
     onObservation: DesktopObservationListener,
     options: DesktopOpenOptions,
   ): Promise<RawDesktopConnection> {
-    const endpointIdentity = await desktopEndpointIdentity(socketPath);
+    const endpointIdentity = desktopEndpointIdentity(socketPath);
     let socket: net.Socket;
     try {
       socket = options.createConnection?.() ?? net.createConnection(socketPath);
@@ -112,10 +99,12 @@ export class RawDesktopConnection {
         safeSocketError(cause),
       );
     }
-    options.onOpeningSocket(socket);
     try {
-      await new Promise<void>((resolve, reject) => {
+      const identity = await new Promise<string | null>((resolve, reject) => {
         let settled = false;
+        let connectedToEndpoint = false;
+        let identityKnown = false;
+        let identity: string | null = null;
         const finish = (effect: () => void) => {
           if (settled) return;
           settled = true;
@@ -125,8 +114,14 @@ export class RawDesktopConnection {
           socket.off("error", rejected);
           effect();
         };
+        const complete = () => {
+          if (connectedToEndpoint && identityKnown) {
+            finish(() => resolve(identity));
+          }
+        };
         const connected = () => {
-          finish(resolve);
+          connectedToEndpoint = true;
+          complete();
         };
         const rejected = (cause: Error) => {
           finish(() => reject(cause));
@@ -148,7 +143,21 @@ export class RawDesktopConnection {
         socket.once("close", closed);
         socket.once("connect", connected);
         socket.once("error", rejected);
+        endpointIdentity.then((value) => {
+          identity = value;
+          identityKnown = true;
+          complete();
+        });
+        options.onOpeningSocket(socket);
+        if (socket.destroyed) closed();
       });
+      return new RawDesktopConnection(
+        socket,
+        identity,
+        limits,
+        onBroadcast,
+        onObservation,
+      );
     } catch (cause) {
       socket.once("error", () => undefined);
       socket.destroy();
@@ -164,13 +173,6 @@ export class RawDesktopConnection {
     } finally {
       options.onOpeningSocket(null);
     }
-    return new RawDesktopConnection(
-      socket,
-      endpointIdentity,
-      limits,
-      onBroadcast,
-      onObservation,
-    );
   }
 
   get alive(): boolean {

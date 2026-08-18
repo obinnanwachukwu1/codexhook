@@ -1,3 +1,5 @@
+import type { Socket } from "node:net";
+
 export type DesktopRequestOperation =
   | "load-history"
   | "start-turn"
@@ -106,6 +108,8 @@ export type DesktopProtocolObservation =
     };
 
 export interface DesktopProtocolSessionOptions {
+  /** Internal test seam; production uses net.createConnection. */
+  readonly createConnection?: () => Socket;
   readonly handshakeTimeoutMs?: number;
   readonly maxInboundFrameBytes?: number;
   readonly maxOutboundFrameBytes?: number;

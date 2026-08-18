@@ -6,7 +6,11 @@ import {
   selectDesktopAdapter,
   type DesktopProtocolAdapter,
 } from "./adapters.js";
-import { DesktopProtocolError } from "./errors.js";
+import {
+  desktopReconnectError,
+  DesktopProtocolError,
+} from "./errors.js";
+import { desktopEndpointIdentity } from "./endpoint-identity.js";
 import { sessionLimits, type SessionLimits } from "./limits.js";
 import type {
   DesktopProtocolCapability,
@@ -21,7 +25,6 @@ import type {
   DesktopWriteReceipt,
 } from "./types.js";
 import {
-  desktopEndpointIdentity,
   RawDesktopConnection,
   type DesktopBroadcastListener,
   type DesktopObservationListener,
@@ -34,12 +37,6 @@ interface NegotiatedConnection {
   readonly raw: RawDesktopConnection;
 }
 
-function reconnectError(message: string): DesktopProtocolError {
-  return new DesktopProtocolError(
-    "reconnect-failed", "operation", "not-written", message,
-  );
-}
-
 export class DesktopProtocolSession {
   private readonly broadcasts = new Set<DesktopBroadcastListener>();
   private closing = false;
@@ -50,20 +47,24 @@ export class DesktopProtocolSession {
   private openingRaw: RawDesktopConnection | null = null;
   private openingSocket: Socket | null = null;
   private reconnecting: Promise<NegotiatedConnection> | null = null;
+  private readonly createConnection: (() => Socket) | undefined;
 
   private constructor(
     private readonly socketPath: string,
     options: DesktopProtocolSessionOptions,
   ) {
     this.limits = sessionLimits(options);
+    this.createConnection = options.createConnection;
   }
 
   static async connect(
     socketPath: string,
     options: DesktopProtocolSessionOptions = {},
     signal?: AbortSignal,
+    onCreate?: (session: DesktopProtocolSession) => void,
   ): Promise<DesktopProtocolSession> {
     const session = new DesktopProtocolSession(socketPath, options);
+    onCreate?.(session);
     const abort = () => session.close();
     if (signal?.aborted) abort();
     signal?.addEventListener("abort", abort, { once: true });
@@ -278,6 +279,7 @@ export class DesktopProtocolSession {
   }
 
   private async open(reconnected: boolean): Promise<NegotiatedConnection> {
+    if (this.closing) throw this.closedError();
     const raw = await RawDesktopConnection.open(
       this.socketPath,
       this.limits,
@@ -285,8 +287,12 @@ export class DesktopProtocolSession {
       (observation) => this.emit(observation),
       {
         connectTimeoutMs: this.limits.handshakeTimeoutMs,
+        ...(this.createConnection == null
+          ? {}
+          : { createConnection: this.createConnection }),
         onOpeningSocket: (socket) => {
           this.openingSocket = socket;
+          if (socket != null && this.closing) socket.destroy();
         },
       },
     );
@@ -334,7 +340,7 @@ export class DesktopProtocolSession {
           this.followedThreads.size > 0 &&
           !profile.capabilities.threadStream
         ) {
-          throw reconnectError(
+          throw desktopReconnectError(
             "Desktop IPC reconnect cannot restore followed tasks",
           );
         }
@@ -347,7 +353,7 @@ export class DesktopProtocolSession {
             );
           }
         } catch {
-          throw reconnectError(
+          throw desktopReconnectError(
             "Desktop IPC reconnect could not restore followed tasks",
           );
         }
@@ -361,7 +367,7 @@ export class DesktopProtocolSession {
           !(cause instanceof DesktopProtocolError) ||
           cause.writeState !== "not-written"
         ) {
-          throw reconnectError("Desktop IPC reconnect handshake failed");
+          throw desktopReconnectError("Desktop IPC reconnect handshake failed");
         }
       }
       throw cause;

@@ -29,6 +29,12 @@ export class DesktopProtocolError extends Error {
   }
 }
 
+export function desktopReconnectError(message: string): DesktopProtocolError {
+  return new DesktopProtocolError(
+    "reconnect-failed", "operation", "not-written", message,
+  );
+}
+
 export function isAbsentDesktopEndpointError(cause: unknown): boolean {
   const code = (cause as NodeJS.ErrnoException | null)?.code;
   return code === "ENOENT" || code === "ECONNREFUSED";

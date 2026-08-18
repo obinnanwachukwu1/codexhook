@@ -277,15 +277,14 @@ export function connectDesktop(
   return Effect.suspend(() => {
     let acquired: DesktopProtocolSession | null = null;
     const open = Effect.tryPromise({
-      try: async (signal) => {
-        const client = await DesktopProtocolSession.connect(
-          spec.socketPath,
-          {},
-          signal,
-        );
-        acquired = client;
-        return client;
-      },
+      try: (signal) => DesktopProtocolSession.connect(
+        spec.socketPath,
+        {},
+        signal,
+        (client) => {
+          acquired = client;
+        },
+      ),
       catch: (cause) => {
         const detail =
           cause instanceof Error ? cause.message : String(cause);

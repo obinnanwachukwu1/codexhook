@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import test from "node:test";
 import { DesktopProtocolError } from "../src/transport/desktop-ipc/errors.js";
+import { DesktopProtocolSession } from "../src/transport/desktop-ipc/session.js";
 import {
   RawDesktopConnection,
   type DesktopWireLimits,
@@ -71,4 +72,49 @@ test("closing an owned Desktop socket aborts an in-flight open", async () => {
   );
   assert.equal(Date.now() - startedAt < 250, true);
   assert.equal(opening, null);
+});
+
+test("an already aborted Desktop session never creates a socket", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let creates = 0;
+  let published: DesktopProtocolSession | null = null;
+  await assert.rejects(
+    DesktopProtocolSession.connect(
+      "/unused/desktop.sock",
+      {
+        createConnection: () => {
+          creates += 1;
+          return new net.Socket();
+        },
+      },
+      controller.signal,
+      (session) => {
+        published = session;
+      },
+    ),
+    (error: unknown) =>
+      error instanceof DesktopProtocolError && error.failure === "closed",
+  );
+  assert.equal(creates, 0);
+  assert.notEqual(published, null);
+});
+
+test("immediate abort destroys a newly published Desktop socket", async () => {
+  const socket = new net.Socket();
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  const pending = DesktopProtocolSession.connect(
+    "/unused/desktop.sock",
+    { createConnection: () => socket, handshakeTimeoutMs: 500 },
+    controller.signal,
+  );
+  controller.abort();
+  await assert.rejects(
+    pending,
+    (error: unknown) =>
+      error instanceof DesktopProtocolError && error.failure === "closed",
+  );
+  assert.equal(Date.now() - startedAt < 250, true);
+  assert.equal(socket.destroyed, true);
 });
