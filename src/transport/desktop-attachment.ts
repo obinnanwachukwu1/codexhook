@@ -29,6 +29,7 @@ interface DesktopAttachmentOptions {
 export class DesktopAttachment {
   private closed = false;
   private generation = 1;
+  private readonly followed = new Set<string>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly resyncing = new Set<string>();
   private readonly states = new Map<string, DesktopThreadState>();
@@ -161,6 +162,7 @@ export class DesktopAttachment {
     this.closed = true;
     this.unbind();
     this.protocol.close();
+    this.followed.clear();
     this.resyncing.clear();
     for (const state of this.states.values()) state.disconnected();
   }
@@ -208,7 +210,7 @@ export class DesktopAttachment {
     if (this.closed) throw new Error("Desktop attachment is closed");
     if (state.ready) return;
     const deadline = Date.now() + this.followTimeoutMs;
-    const followedBefore = state.generation > 0;
+    const followedBefore = this.followed.has(state.threadId);
     if (!this.protocol.connected) state.beginConnecting();
     else state.beginFollowing(this.generation);
     const remaining = Math.max(1, deadline - Date.now());
@@ -225,6 +227,7 @@ export class DesktopAttachment {
         remaining,
         "Desktop follow timed out",
       );
+      this.followed.add(state.threadId);
     }
     if (this.closed) throw new Error("Desktop attachment is closed");
     await state.waitFor(
@@ -258,7 +261,7 @@ export class DesktopAttachment {
       return "Desktop task already has an active turn";
     }
     if (
-      command.kind !== "start" &&
+      command.kind === "steer" &&
       (active == null || active.id !== command.expectedTurnId)
     ) return "Desktop active turn no longer matches the requested turn";
     if (command.kind === "steer" && !command.clientUserMessageId) {

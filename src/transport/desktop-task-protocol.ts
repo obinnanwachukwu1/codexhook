@@ -64,12 +64,6 @@ export type DesktopCommand =
       readonly clientUserMessageId: string;
       readonly input: unknown;
       readonly timeoutMs?: number;
-    }
-  | {
-      readonly kind: "interrupt";
-      readonly threadId: string;
-      readonly expectedTurnId: string;
-      readonly timeoutMs?: number;
     };
 
 export type DesktopCommandReply =
@@ -180,13 +174,6 @@ export class DesktopIpcProtocol implements DesktopTaskProtocol {
   }
 
   async inject(command: DesktopCommand): Promise<DesktopCommandReply> {
-    if (command.kind === "interrupt") {
-      return {
-        _tag: "Rejected",
-        reason: "Desktop interrupt is not negotiated",
-        notWritten: true,
-      };
-    }
     try {
       const reply = command.kind === "start"
         ? await this.session.startTurn(
@@ -237,7 +224,7 @@ export class DesktopIpcProtocol implements DesktopTaskProtocol {
   }
 }
 
-function commandParams(command: Exclude<DesktopCommand, { kind: "interrupt" }>) {
+function commandParams(command: DesktopCommand) {
   if (command.kind === "start") {
     return {
       clientUserMessageId: command.clientUserMessageId,

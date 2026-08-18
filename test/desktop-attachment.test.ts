@@ -79,25 +79,19 @@ test("validates the synchronized active turn before steering", async () => {
   assert.equal(protocol.injections.length, 0);
 });
 
-test("proves steer by delivery identity and interrupt by terminal state", async () => {
+test("proves steer by delivery identity on the expected turn", async () => {
   const protocol = new FakeDesktopProtocol();
   protocol.setSnapshot("thread-1", 4, {
     active: { turnId: "turn-current", status: "inProgress", error: null },
   });
-  protocol.injectBehavior = async (command) => {
+  protocol.injectBehavior = async () => {
     protocol.emit("thread-1", {
       _tag: "Patches",
-      baseRevision: command.kind === "steer" ? 4 : 5,
-      revision: command.kind === "steer" ? 5 : 6,
-      deltas: command.kind === "interrupt" ? [{
-        _tag: "Status",
-        key: "active",
-        status: "interrupted",
-      }] : [],
-      deliveryIds: command.kind === "steer" ? ["delivery-2"] : [],
-      deliveryBindings: command.kind === "steer"
-        ? [{ key: "active", deliveryId: "delivery-2" }]
-        : [],
+      baseRevision: 4,
+      revision: 5,
+      deltas: [],
+      deliveryIds: ["delivery-2"],
+      deliveryBindings: [{ key: "active", deliveryId: "delivery-2" }],
     });
     return { _tag: "Accepted", result: {}, turnId: null };
   };
@@ -110,15 +104,6 @@ test("proves steer by delivery identity and interrupt by terminal state", async 
     input: [],
   });
   assert.equal(steered._tag, "Confirmed");
-  const interrupted = await attachment.inject({
-    kind: "interrupt",
-    threadId: "thread-1",
-    expectedTurnId: "turn-current",
-  });
-  assert.equal(interrupted._tag, "Confirmed");
-  if (interrupted._tag === "Confirmed") {
-    assert.equal(interrupted.turn.status, "interrupted");
-  }
 });
 
 test("does not confirm steer from an unrelated revision", async () => {
@@ -146,34 +131,6 @@ test("does not confirm steer from an unrelated revision", async () => {
     expectedTurnId: "turn-current",
     clientUserMessageId: "delivery-2",
     input: [],
-  });
-  assert.equal(result._tag, "Ambiguous");
-});
-
-test("does not confirm interrupt when the turn completes naturally", async () => {
-  const protocol = new FakeDesktopProtocol();
-  protocol.setSnapshot("thread-1", 4, {
-    active: { turnId: "turn-current", status: "inProgress", error: null },
-  });
-  protocol.injectBehavior = async () => {
-    protocol.emit("thread-1", {
-      _tag: "Patches",
-      baseRevision: 4,
-      revision: 5,
-      deltas: [{ _tag: "Status", key: "active", status: "completed" }],
-      deliveryIds: [],
-    });
-    return { _tag: "Accepted", result: {}, turnId: null };
-  };
-  const attachment = new DesktopAttachment(
-    protocol,
-    { proofTimeoutMs: 5 },
-  );
-
-  const result = await attachment.inject({
-    kind: "interrupt",
-    threadId: "thread-1",
-    expectedTurnId: "turn-current",
   });
   assert.equal(result._tag, "Ambiguous");
 });
@@ -242,8 +199,8 @@ test("drops a failed follow so the next operation can reconnect", async () => {
   const attachment = new DesktopAttachment(protocol);
   await assert.rejects(attachment.resume("thread-1"), /follow failed/);
   assert.deepEqual(await attachment.resume("thread-1"), []);
-  assert.deepEqual(protocol.follows, ["thread-1"]);
-  assert.deepEqual(protocol.historyRequests, ["thread-1"]);
+  assert.deepEqual(protocol.follows, ["thread-1", "thread-1"]);
+  assert.deepEqual(protocol.historyRequests, []);
 });
 
 test("retries history after a transient resync failure", async () => {

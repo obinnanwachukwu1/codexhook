@@ -137,12 +137,6 @@ export class DesktopThreadState {
     this.emit();
   }
 
-  retryFollowing(): void {
-    if (this.connectionValue !== "connected") return;
-    this.attachmentValue = "detached";
-    this.emit();
-  }
-
   apply(change: DesktopTaskChange, generation: number): DesktopChangeResult {
     if (generation !== this.generationValue ||
         this.connectionValue !== "connected") return "ignored";

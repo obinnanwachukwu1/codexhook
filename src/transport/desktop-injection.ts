@@ -25,11 +25,10 @@ export function captureDesktopProof(
   state: DesktopThreadState,
 ): DesktopProofBaseline {
   return {
-    deliveryObserved: command.kind !== "interrupt" &&
-      state.hasDelivery(
-        command.clientUserMessageId,
-        command.kind === "steer" ? command.expectedTurnId : undefined,
-      ),
+    deliveryObserved: state.hasDelivery(
+      command.clientUserMessageId,
+      command.kind === "steer" ? command.expectedTurnId : undefined,
+    ),
     generation: state.generation,
     revision: state.revision,
     turnIds: new Set(state.turnsSnapshot().map((turn) => turn.id)),
@@ -71,8 +70,7 @@ export function provesDesktopInjection(
     return !baseline.deliveryObserved &&
       state.hasDelivery(command.clientUserMessageId, turnId);
   }
-  if (command.kind === "start") return !baseline.turnIds.has(turnId);
-  return turn.status === "interrupted";
+  return !baseline.turnIds.has(turnId);
 }
 
 export type DesktopInjectionOutcome =
