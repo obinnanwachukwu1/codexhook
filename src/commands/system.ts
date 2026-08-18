@@ -8,6 +8,7 @@ import {
   DEFAULT_PORT,
   dataDirectory,
   defaultBaseUrl,
+  diagnosticJournalPath,
 } from "../config.js";
 import { startUnifiedDaemon } from "../daemon.js";
 import { probeDaemon, requireDaemon } from "../daemon-control.js";
@@ -24,6 +25,12 @@ import { chooseInstallationPort, parsePort } from "../port.js";
 import { desktopProbe } from "../transport/desktop-endpoint.js";
 import { discoverStandalone } from "../transport/discovery.js";
 import { VERSION } from "../version.js";
+import { DiagnosticJournal } from "../diagnostics/journal.js";
+import {
+  authorizeCompatibilityReport,
+  buildCompatibilityReport,
+  previewCompatibilityReport,
+} from "../diagnostics/support-report.js";
 
 export async function setup(arguments_: string[]): Promise<void> {
   const { values } = parseArgs({
@@ -185,30 +192,51 @@ function nodeVersion(executable: string): string | null {
   }
 }
 
+function supportedNodeVersion(version: string | null): boolean {
+  const major = version == null ? null : /^v?(\d+)/.exec(version)?.[1];
+  return major != null && Number(major) >= 24;
+}
+
 export async function doctor(arguments_: string[]): Promise<void> {
   const { values } = parseArgs({
     args: arguments_,
     strict: true,
     options: {
       json: { type: "boolean", default: false },
+      "data-directory": { type: "string" },
+      "compatibility-report": { type: "boolean", default: false },
+      consent: { type: "boolean", default: false },
     },
   });
+  if (values.consent && !values["compatibility-report"]) {
+    throw new Error("--consent requires --compatibility-report");
+  }
   const paths = installationPaths();
   const manifest = readInstallManifest(paths);
   const daemon = await probeDaemon(
     defaultBaseUrl(DEFAULT_HOST, manifest?.port ?? DEFAULT_PORT),
   );
-  const desktop = await Effect.runPromise(desktopProbe);
-  const runtimes = [
-    ...Option.toArray(desktop),
-    ...(await discoverStandalone()),
-  ];
+  const offline = daemon.state === "running"
+    ? { desktop: Option.none(), appServers: [] }
+    : {
+        desktop: await Effect.runPromise(desktopProbe),
+        appServers: await discoverStandalone(),
+      };
+  const desktopIpcAvailable = daemon.state === "running"
+    ? daemon.health.desktopIpcAvailable
+    : Option.isSome(offline.desktop);
+  const taskAccessAvailable = daemon.state === "running"
+    ? daemon.health.taskAccessStatus === "available"
+    : offline.appServers.length > 0;
   const recordedNode =
     manifest == null ? null : nodeVersion(manifest.nodePath);
+  const directory = values["data-directory"] ?? dataDirectory();
+  const journal = new DiagnosticJournal(diagnosticJournalPath(directory));
+  const journalSnapshot = journal.read();
   const report = {
     ok:
       manifest != null &&
-      recordedNode != null &&
+      supportedNodeVersion(recordedNode) &&
       existsSync(paths.currentLink) &&
       existsSync(paths.skill) &&
       backgroundServiceExists(installationServicePaths(paths)) &&
@@ -223,12 +251,48 @@ export async function doctor(arguments_: string[]): Promise<void> {
     },
     daemon,
     codex: {
-      available: runtimes.length > 0,
-      desktopIpcAvailable: Option.isSome(desktop),
-      runtimes,
+      available: taskAccessAvailable || desktopIpcAvailable,
+      taskAccessStatus: daemon.state === "running"
+        ? daemon.health.taskAccessStatus
+        : taskAccessAvailable ? "unknown" : "unavailable",
+      desktopIpcAvailable,
     },
-    dataDirectory: dataDirectory(),
+    diagnostics: {
+      journalAvailable: journalSnapshot.available,
+      entries: journalSnapshot.records.length,
+      invalidEntries: journalSnapshot.invalidLines,
+      limits: journalSnapshot.limits,
+    },
+    dataDirectory: directory,
   };
+  const compatibility = buildCompatibilityReport({
+    version: VERSION,
+    platform: process.platform,
+    architecture: process.arch,
+    nodeVersion: process.version,
+    installation: {
+      manifest: manifest != null,
+      runtime: report.installation.runtime,
+      skill: report.installation.skill,
+      service: report.installation.service,
+      nodeCompatible: supportedNodeVersion(recordedNode),
+    },
+    daemon,
+    offlineDesktopIpcAvailable: Option.isSome(offline.desktop),
+    offlineAppServerCandidateFound: offline.appServers.length > 0,
+    journal: journalSnapshot,
+  });
+  if (values["compatibility-report"]) {
+    const preview = previewCompatibilityReport(compatibility);
+    const output = values.consent
+      ? authorizeCompatibilityReport(preview)
+      : preview;
+    process.stdout.write(
+      `${JSON.stringify(output, null, values.json ? undefined : 2)}\n`,
+    );
+    if (!report.ok) process.exitCode = 1;
+    return;
+  }
   if (values.json) {
     process.stdout.write(`${JSON.stringify(report)}\n`);
   } else {
@@ -244,6 +308,23 @@ export async function doctor(arguments_: string[]): Promise<void> {
       : "unavailable";
     process.stdout.write(
       `codex: ${report.codex.available ? "available" : "unavailable"}; Desktop IPC: ${desktopStatus}\n`,
+    );
+    const failures = compatibility.diagnostics.recentFailures;
+    if (failures.length === 0) {
+      process.stdout.write("diagnostics: no recent classified failures\n");
+    } else {
+      process.stdout.write("diagnostics (recent classified failures):\n");
+      for (const failure of failures) {
+        const location = [failure.stage, failure.route]
+          .filter((value) => value != null)
+          .join("/");
+        process.stdout.write(
+          `  ${location.length === 0 ? "delivery" : location}: ${failure.code} (${failure.count}x)\n`,
+        );
+      }
+    }
+    process.stdout.write(
+      "compatibility report: codexhook doctor --compatibility-report (local preview; nothing is sent)\n",
     );
     if (!report.ok) {
       process.stdout.write(

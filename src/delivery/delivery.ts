@@ -22,6 +22,12 @@ import {
 } from "../contracts/delivery.js";
 import { LocalCodex } from "../contracts/local-codex.js";
 import { composeMessage } from "./compose.js";
+import {
+  NO_DIAGNOSTICS,
+  recordDiagnosticSafely,
+  recordOutcomeSafely,
+  type DiagnosticRecorder,
+} from "../diagnostics/journal.js";
 
 const MAX_LANES = 1_000;
 const LANE_CAPACITY = 100;
@@ -62,6 +68,7 @@ export class Delivery extends Context.Tag("codexhook/Delivery")<
 
 export function DeliveryLive(
   logger = new Logger(),
+  diagnostics: DiagnosticRecorder = NO_DIAGNOSTICS,
 ): Layer.Layer<Delivery, never, LocalCodex | LocalDeliveryCoordinator> {
   return Layer.scoped(
     Delivery,
@@ -96,6 +103,7 @@ export function DeliveryLive(
           })),
           Effect.match({
             onSuccess: (outcome: DeliveryOutcome) => {
+              recordOutcomeSafely(diagnostics, outcome);
               logger.info("delivery_finished", {
                 deliveryId: job.request.deliveryId,
                 hookId: job.hookId,
@@ -116,6 +124,7 @@ export function DeliveryLive(
               });
             },
             onFailure: (failure) => {
+              recordDiagnosticSafely(diagnostics, failure.diagnostic);
               logger.error("delivery_failed", {
                 deliveryId: job.request.deliveryId,
                 hookId: job.hookId,

@@ -135,6 +135,17 @@ availability, and Desktop IPC availability. `doctor` additionally checks the
 installed runtime, background service, skill, and Codex connections. Use
 `--json` with either command for structured output.
 
+The daemon keeps a bounded local diagnostic journal containing only
+allowlisted delivery outcomes, stages, routes, and diagnostic codes. It does
+not record task, turn, delivery, hook, path, message, request-body, or error
+text. `doctor` summarizes recent classified failures from that journal.
+
+Use `doctor --compatibility-report` to preview a sanitized local support
+payload. Nothing is transmitted. Adding `--consent` produces a locally
+authorized envelope for a future support integration; codexhook currently has
+no hosted analytics or upload backend. For a daemon using a custom store, pass
+the same path with `doctor --data-directory <path>`.
+
 Run setup again to update or repair codexhook:
 
 ```sh
