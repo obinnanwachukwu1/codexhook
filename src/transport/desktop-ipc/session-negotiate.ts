@@ -86,14 +86,17 @@ export async function restoreFollowedThreads(
   }
   try {
     for (const threadId of followedThreads) {
+      const timeoutMs = deadline == null
+        ? undefined
+        : remainingRestoreTime(deadline);
       const broadcast = raw.broadcast(
         adapter.methods.follow,
         adapter.followParams(threadId),
         adapter.version,
       );
-      await (deadline == null
+      await (timeoutMs == null
         ? broadcast
-        : boundedFollow(broadcast, remainingRestoreTime(deadline)));
+        : boundedFollow(broadcast, timeoutMs));
     }
   } catch {
     throw desktopReconnectError(

@@ -284,6 +284,7 @@ export class DesktopProtocolSession {
       active.raw.close();
     }
     if (this.reconnecting == null) {
+      if (deadline != null) remainingRequestTimeout(this.limits, deadline);
       const reconnectDeadline = deadline ??
         Date.now() + this.limits.handshakeTimeoutMs;
       const reconnecting = this.open(true, reconnectDeadline).then(
@@ -379,7 +380,6 @@ export class DesktopProtocolSession {
     this.threadOwners.observe(message, this.followedThreads);
     for (const listener of this.broadcasts) listener(message);
   }
-
   private closedError(): DesktopProtocolError {
     return new DesktopProtocolError(
       "closed",

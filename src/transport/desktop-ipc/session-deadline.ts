@@ -20,6 +20,9 @@ export async function waitForReconnect(
   reconnecting: Promise<NegotiatedConnection>,
   deadline?: number,
 ): Promise<NegotiatedConnection> {
+  // The shared reconnect may outlive this caller's deadline. Keep a permanent
+  // rejection observer even when the budget check below fails synchronously.
+  void reconnecting.catch(() => undefined);
   if (deadline == null) return reconnecting;
   const timeoutMs = remainingRequestTimeout(limits, deadline);
   let timer: NodeJS.Timeout | undefined;

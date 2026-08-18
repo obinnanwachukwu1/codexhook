@@ -7,6 +7,8 @@ import type { DesktopProtocolProfile } from
   "../src/transport/desktop-ipc/types.js";
 import { restoreFollowedThreads } from
   "../src/transport/desktop-ipc/session-negotiate.js";
+import { waitForReconnect } from
+  "../src/transport/desktop-ipc/session-deadline.js";
 import { refreshDesktopOwner } from
   "../src/transport/desktop-ipc/session-owner-refresh.js";
 import { sessionLimits } from "../src/transport/desktop-ipc/limits.js";
@@ -154,6 +156,21 @@ test("Desktop history uses the negotiated request timeout limit", async () => {
 
 test("Desktop reconnect bounds restoration of followed tasks", async () => {
   const adapter = testAdapter();
+  let writes = 0;
+  await assert.rejects(
+    restoreFollowedThreads(
+      { broadcast: async () => { writes += 1; } },
+      adapter,
+      testProfile(adapter),
+      new Set(["thread-1"]),
+      Date.now() - 1,
+    ),
+    (error: unknown) =>
+      error instanceof Error &&
+      "failure" in error && error.failure === "reconnect-failed",
+  );
+  assert.equal(writes, 0);
+
   const began = Date.now();
   await assert.rejects(
     restoreFollowedThreads(
@@ -171,6 +188,25 @@ test("Desktop reconnect bounds restoration of followed tasks", async () => {
       error.writeState === "not-written",
   );
   assert.equal(Date.now() - began < 250, true);
+});
+
+test("expired reconnect waits retain a rejection observer", async () => {
+  const unhandled: unknown[] = [];
+  const observe = (cause: unknown) => unhandled.push(cause);
+  process.on("unhandledRejection", observe);
+  try {
+    const reconnecting = Promise.reject(new Error("synthetic reconnect"));
+    await assert.rejects(
+      waitForReconnect(sessionLimits({}), reconnecting, Date.now() - 1),
+      (error: unknown) =>
+        error instanceof Error &&
+        "failure" in error && error.failure === "request-timeout",
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", observe);
+  }
 });
 
 test("owner refresh preserves its marker and original failure", async () => {
