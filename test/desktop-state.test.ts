@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DesktopThreadState } from "../src/transport/desktop-state.js";
+import { desktopStateChange } from "./fixtures/adversarial.js";
 
 const threadId = "thread-1";
 
@@ -130,4 +131,65 @@ test("rejects a revision gap and requests a fresh snapshot", () => {
   assert.equal(state.turn("turn-wrong"), undefined);
   assert.equal(state.takeResyncRequest(), true);
   assert.equal(state.takeResyncRequest(), false);
+});
+
+test("applies reordered entity patches without inventing an active turn", () => {
+  const diagnostics: string[] = [];
+  const state = new DesktopThreadState(threadId, (event) => {
+    diagnostics.push(event);
+  });
+  state.apply(desktopStateChange({
+    type: "patches",
+    patches: [
+      {
+        op: "replace",
+        path: ["turnHistory", "history", "entitiesByKey", "late", "status"],
+        value: "completed",
+      },
+      {
+        op: "replace",
+        path: ["turnHistory", "history", "entitiesByKey", "late", "turnId"],
+        value: "turn-reordered",
+      },
+    ],
+  }));
+  assert.equal(state.turn("turn-reordered")?.status, "completed");
+  assert.deepEqual(diagnostics, ["reordered_patch"]);
+});
+
+test("fresh snapshots clear stale active turns and complete resynchronization", () => {
+  const diagnostics: string[] = [];
+  const state = new DesktopThreadState(threadId, (event) => {
+    diagnostics.push(event);
+  });
+  state.apply(desktopStateChange({
+    type: "snapshot",
+    revision: 1,
+    conversationState: {
+      turnHistory: { history: { entitiesByKey: {
+        active: { turnId: "turn-stale", status: "inProgress" },
+      } } },
+    },
+  }));
+  state.apply(desktopStateChange({
+    type: "patches",
+    baseRevision: 8,
+    revision: 9,
+    patches: [],
+  }));
+  assert.equal(state.takeResyncRequest(), true);
+  state.apply(desktopStateChange({
+    type: "snapshot",
+    revision: 10,
+    conversationState: {
+      turnHistory: { history: { entitiesByKey: {} } },
+    },
+  }));
+  assert.equal(state.ready, true);
+  assert.equal(state.turn("turn-stale"), undefined);
+  assert.deepEqual(diagnostics, [
+    "revision_gap",
+    "stale_active_turn",
+    "resynchronized",
+  ]);
 });

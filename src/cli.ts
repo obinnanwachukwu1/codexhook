@@ -18,7 +18,7 @@ Usage:
   codexhook revoke <id>
   codexhook revoke --thread <thread-id>
   codexhook revoke --all
-  codexhook doctor [--json]
+  codexhook doctor [--json] [--compatibility-report [--consent]]
   codexhook uninstall [--purge]
 `;
 

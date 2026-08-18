@@ -131,6 +131,17 @@ codexhook doctor
 `doctor` checks the installation, background service, and available Codex
 connections. Use `doctor --json` for structured output.
 
+The daemon also keeps a bounded local diagnostic journal. It records only
+allowlisted delivery stages and outcomes, not task IDs, hook IDs, paths,
+messages, request bodies, or error text. `doctor` groups recent failures by
+protocol, attachment, state synchronization, submission, canonical
+verification, fallback, and circuit-breaker stage.
+
+Use `doctor --compatibility-report` to preview a sanitized compatibility
+payload. Nothing is transmitted. Adding `--consent` produces a locally
+authorized envelope for a future support/upload integration; codexhook does
+not currently have or contact a hosted analytics backend.
+
 Run setup again to update or repair codexhook:
 
 ```sh

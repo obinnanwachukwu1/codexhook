@@ -294,11 +294,13 @@ function runTurn(
         Effect.mapError((error) =>
           error._tag === "RpcTimeout"
             ? new TurnTimeout({
+                transport: spec.id,
                 threadId: request.threadId,
                 turnId: started.turnId,
                 waitedMillis: millis(request.turnTimeout),
               })
             : new TurnAbandoned({
+                transport: spec.id,
                 threadId: request.threadId,
                 turnId: started.turnId,
                 detail: error.detail,
@@ -307,6 +309,7 @@ function runTurn(
       );
     if (completed.status !== "completed") {
       return yield* new TurnFailed({
+        transport: spec.id,
         threadId: request.threadId,
         turnId: started.turnId,
         status:

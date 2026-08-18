@@ -52,7 +52,7 @@ export function TransportProviderLive(
         }),
         connect: (spec) =>
           spec._tag === "Desktop"
-            ? connectDesktop(spec)
+            ? connectDesktop(spec, logger)
             : spec._tag === "UnixSocket"
               ? connectUnixPeer(spec, logger)
               : spawnChildPeer(spec, logger),

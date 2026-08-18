@@ -1,5 +1,6 @@
 import { Data, Option } from "effect";
 import type {
+  DeliveryTruth,
   DeliveryId,
   ThreadId,
   TransportId,
@@ -59,12 +60,14 @@ export class SubmitAmbiguous extends Data.TaggedError("SubmitAmbiguous")<{
 }> {}
 
 export class TurnAbandoned extends Data.TaggedError("TurnAbandoned")<{
+  readonly transport: TransportId;
   readonly threadId: ThreadId;
   readonly turnId: TurnId;
   readonly detail: string;
 }> {}
 
 export class TurnFailed extends Data.TaggedError("TurnFailed")<{
+  readonly transport: TransportId;
   readonly threadId: ThreadId;
   readonly turnId: TurnId;
   readonly status: "failed" | "interrupted";
@@ -72,6 +75,7 @@ export class TurnFailed extends Data.TaggedError("TurnFailed")<{
 }> {}
 
 export class TurnTimeout extends Data.TaggedError("TurnTimeout")<{
+  readonly transport: TransportId;
   readonly threadId: ThreadId;
   readonly turnId: TurnId;
   readonly waitedMillis: number;
@@ -148,6 +152,25 @@ export const DISPOSITIONS = {
 
 export function disposition(error: TransportError): Disposition {
   return DISPOSITIONS[error._tag];
+}
+
+export function deliveryTruth(error: DeliveryError): DeliveryTruth {
+  switch (error._tag) {
+    case "SubmitAmbiguous":
+    case "TurnAbandoned":
+      return "ambiguous";
+    case "SubmitRejected":
+      return "rejected";
+    case "TurnFailed":
+    case "TurnTimeout":
+      return error.transport === "desktop"
+        ? "confirmed_desktop"
+        : "confirmed_app_server";
+    case "DesktopVisibilityUnconfirmed":
+      return "confirmed_app_server";
+    default:
+      return "unavailable";
+  }
 }
 
 type TryNextTag = {

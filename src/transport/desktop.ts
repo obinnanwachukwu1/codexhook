@@ -28,6 +28,7 @@ import {
   type RpcTicket,
 } from "./rpc.js";
 import type { TransportSpec } from "./spec.js";
+import { Logger } from "../logger.js";
 
 const IPC_VERSION = {
   start: 1,
@@ -85,6 +86,7 @@ function safeIpcRejection(error: string | undefined): boolean {
 function makePeer(
   spec: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
   client: DesktopIpcClient,
+  logger: Logger,
 ): AppServerPeer {
   const states = new Map<string, DesktopThreadState>();
   client.onBroadcast((message) => {
@@ -106,7 +108,16 @@ function makePeer(
   const follow = async (threadId: string): Promise<DesktopThreadState> => {
     let state = states.get(threadId);
     if (state == null) {
-      state = new DesktopThreadState(threadId);
+      state = new DesktopThreadState(threadId, (event) => {
+        const eventName = event === "revision_gap"
+          ? "desktop_state_revision_gap"
+          : event === "resynchronized"
+            ? "desktop_state_resynchronized"
+            : event === "reordered_patch"
+              ? "desktop_state_reordered_patch"
+              : "desktop_state_stale_active_turn";
+        logger.warn(eventName, { transport: "desktop" });
+      });
       states.set(threadId, state);
       client.broadcast(
         "thread-stream-following-changed",
@@ -296,6 +307,7 @@ function makePeer(
 
 export function connectDesktop(
   spec: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
+  logger = new Logger(),
 ): Effect.Effect<
   AppServerPeer,
   TransportUnavailable | TransportIncompatible,
@@ -350,5 +362,5 @@ export function connectDesktop(
       },
     }),
     (client) => Effect.sync(() => client.close()),
-  ).pipe(Effect.map((client) => makePeer(spec, client)));
+  ).pipe(Effect.map((client) => makePeer(spec, client, logger)));
 }

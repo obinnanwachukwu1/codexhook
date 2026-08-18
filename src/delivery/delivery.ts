@@ -16,6 +16,7 @@ import {
   type WebhookRecord,
 } from "../types.js";
 import {
+  deliveryTruth,
   disposition,
   type DeliveryError,
   type TransportError,
@@ -89,6 +90,9 @@ export function DeliveryLive(
                 threadId: job.request.threadId,
                 status: outcome._tag,
                 transport: outcome.transport,
+                deliveryTruth: outcome.transport === "desktop"
+                  ? "confirmed_desktop"
+                  : "confirmed_app_server",
                 durationMs: Date.now() - startedAt,
               });
             },
@@ -99,6 +103,12 @@ export function DeliveryLive(
                 threadId: job.request.threadId,
                 errorTag: error._tag,
                 submission: failureSubmission(error),
+                deliveryTruth: deliveryTruth(error),
+                ...(error._tag === "DesktopVisibilityUnconfirmed"
+                  ? { transport: error.submittedTransport }
+                  : "transport" in error
+                    ? { transport: error.transport }
+                    : {}),
                 error: String(error),
                 durationMs: Date.now() - startedAt,
               });

@@ -11,6 +11,12 @@ export const DeliveryId = Brand.nominal<DeliveryId>();
 
 export type DeliveryMode = "queue" | "steer";
 export type TransportId = "desktop" | "daemon" | "app-bundled" | "cli";
+export type DeliveryTruth =
+  | "confirmed_desktop"
+  | "confirmed_app_server"
+  | "ambiguous"
+  | "unavailable"
+  | "rejected";
 
 export interface WebhookRecord {
   id: string;

@@ -7,15 +7,28 @@ interface Patch {
   readonly value?: unknown;
 }
 
+export type DesktopStateDiagnostic =
+  | "revision_gap"
+  | "resynchronized"
+  | "reordered_patch"
+  | "stale_active_turn";
+
 export class DesktopThreadState {
   private readonly entityTurns = new Map<string, string>();
+  private readonly pendingStatuses = new Map<string, Turn["status"]>();
   private initialized = false;
   private readonly listeners = new Set<() => void>();
   private resync = false;
+  private resyncPending = false;
   private revision: number | null = null;
   private readonly turns = new Map<string, Turn>();
 
-  constructor(readonly threadId: string) {}
+  constructor(
+    readonly threadId: string,
+    private readonly onDiagnostic: (
+      event: DesktopStateDiagnostic,
+    ) => void = () => undefined,
+  ) {}
 
   snapshot(): ReadonlyArray<Turn> {
     return [...this.turns.values()];
@@ -86,13 +99,24 @@ export class DesktopThreadState {
       patches?: ReadonlyArray<Patch>;
     } | undefined;
     if (change?.type === "snapshot") {
+      const staleActiveTurns = [...this.turns.values()]
+        .filter((turn) => turn.status === "inProgress")
+        .map((turn) => turn.id);
       if (typeof change.revision === "number") {
         this.revision = change.revision;
       }
       this.initialized = true;
       this.entityTurns.clear();
+      this.pendingStatuses.clear();
       this.turns.clear();
       this.readSnapshot(change.conversationState);
+      if (staleActiveTurns.some((turnId) => !this.turns.has(turnId))) {
+        this.onDiagnostic("stale_active_turn");
+      }
+      if (this.resyncPending) {
+        this.resyncPending = false;
+        this.onDiagnostic("resynchronized");
+      }
     } else if (change?.type === "patches") {
       if (
         this.revision != null &&
@@ -100,6 +124,8 @@ export class DesktopThreadState {
       ) {
         this.initialized = false;
         this.resync = true;
+        this.resyncPending = true;
+        this.onDiagnostic("revision_gap");
         for (const listener of this.listeners) listener();
         return;
       }
@@ -136,18 +162,29 @@ export class DesktopThreadState {
       typeof patch.value === "string"
     ) {
       this.entityTurns.set(key, patch.value);
-      this.observeTurn(patch.value);
+      const pendingStatus = this.pendingStatuses.get(key);
+      this.turns.set(patch.value, {
+        id: patch.value,
+        status: pendingStatus ?? "inProgress",
+        error: null,
+      });
+      this.pendingStatuses.delete(key);
       return;
     }
     if (path.at(-1) === "status") {
       const turnId =
         typeof key === "string" ? this.entityTurns.get(key) : null;
       const existing = turnId == null ? null : this.turns.get(turnId);
-      if (existing != null && typeof patch.value === "string") {
+      if (typeof patch.value !== "string") return;
+      const status = normalizeStatus(patch.value);
+      if (existing != null) {
         this.turns.set(existing.id, {
           ...existing,
-          status: normalizeStatus(patch.value),
+          status,
         });
+      } else if (typeof key === "string") {
+        this.pendingStatuses.set(key, status);
+        this.onDiagnostic("reordered_patch");
       }
       return;
     }
