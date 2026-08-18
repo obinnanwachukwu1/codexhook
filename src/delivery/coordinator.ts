@@ -53,6 +53,14 @@ export const LocalDeliveryCoordinatorLive = Layer.effect(
     // A process restart is the conservative recovery boundary until Desktop
     // exposes an independently verified attachment-health transition.
     const desktopBreakers = new Map<ThreadId, DeliveryId>();
+    const unfollowable = (
+      request: DeliveryRequest,
+      reason: "pre-submit-failure" | "task-busy",
+    ) => unavailable(request, "desktop", reason, sanitizeDiagnostic({
+      code: "desktop-not-following",
+      stage: "follow-desktop",
+      route: "desktop",
+    })) as RouteSubmissionOutcome<"desktop">;
 
     const submitDesktop = (
       request: DeliveryRequest,
@@ -114,19 +122,14 @@ export const LocalDeliveryCoordinatorLive = Layer.effect(
               "follow-desktop",
             ) as RouteSubmissionOutcome<"desktop">;
           }
-          if (request.mode === "steer" && followed.value.activeTurnId == null) {
-            return unavailable(
-              request,
-              "desktop",
-              "pre-submit-failure",
-              sanitizeDiagnostic({
-                code: "desktop-not-following",
-                stage: "follow-desktop",
-                route: "desktop",
-              }),
-            ) as RouteSubmissionOutcome<"desktop">;
+          if (
+            request.mode === "steer" &&
+            followed.value.activity === "multiple-active"
+          ) return unfollowable(request, "task-busy");
+          if (request.mode === "steer" && followed.value.activity === "idle") {
+            return unfollowable(request, "pre-submit-failure");
           }
-          if (request.mode === "queue" && followed.value.activeTurnId != null) {
+          if (request.mode === "queue" && followed.value.activity !== "idle") {
             return { _tag: "RetryIdle", requireActivity: true } as const;
           }
           if (Date.now() >= deadline) {

@@ -8,6 +8,13 @@ import {
 import type { DesktopProtocolProfile } from "../src/transport/desktop-ipc/index.js";
 import type { TransportProviderService } from "../src/transport/provider.js";
 import { TransportIncompatible } from "../src/transport/errors.js";
+import type { TransportSpec } from "../src/transport/spec.js";
+import {
+  fixture,
+  listen,
+  testEndpoint,
+} from "./support/desktop-ipc-router.js";
+import { task } from "./support/coordinator-fixture.js";
 
 function profile(
   capabilities: DesktopProtocolProfile["capabilities"],
@@ -105,4 +112,76 @@ test("reports provider discovery failures as unavailable, not incompatible", asy
       },
     },
   );
+});
+
+test("follows multiple active turns as conflicted activity", async () => {
+  const endpoint = await testEndpoint();
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message, send) => {
+      if (
+        message.type !== "broadcast" ||
+        message.method !== "thread-stream-following-changed"
+      ) return;
+      send({
+        type: "broadcast",
+        method: "thread-stream-state-changed",
+        version: 11,
+        params: {
+          conversationId: "thread-1",
+          hostId: "local",
+          change: {
+            type: "snapshot",
+            revision: 1,
+            conversationState: {
+              turnHistory: {
+                history: {
+                  entitiesByKey: {
+                    first: {
+                      turnId: "turn-1",
+                      status: "inProgress",
+                      error: null,
+                    },
+                    second: {
+                      turnId: "turn-2",
+                      status: "inProgress",
+                      error: null,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+    },
+  );
+  const spec = {
+    _tag: "Desktop",
+    id: "desktop",
+    socketPath: endpoint.socketPath,
+    approvals: "decline",
+  } as const satisfies TransportSpec;
+  const provider: TransportProviderService = {
+    candidates: Effect.succeed([spec]),
+    appServerCandidates: Effect.succeed([]),
+    desktopCandidate: Effect.succeed(Option.some(spec)),
+    connect: () => Effect.die("not used"),
+  };
+  try {
+    const observation = await Effect.runPromise(Effect.scoped(
+      desktopProtocolService(provider).connect.pipe(
+        Effect.flatMap((session) => session.follow(task())),
+      ),
+    ));
+    assert.deepEqual(observation, {
+      task: task(),
+      activity: "multiple-active",
+      activeTurnId: null,
+    });
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
 });

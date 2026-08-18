@@ -116,12 +116,14 @@ export interface CoordinatorFixtureOptions {
 export function coordinatorRuntime(options: CoordinatorFixtureOptions = {}) {
   const session: DesktopSession = {
     compatibility: desktopCompatibility,
-    follow: options.desktopFollow ?? ((localTask) => Effect.succeed({
-      task: localTask,
-      activeTurnId: options.activeTurnId === undefined
+    follow: options.desktopFollow ?? ((localTask) => {
+      const activeTurnId = options.activeTurnId === undefined
         ? TurnId("active-turn")
-        : options.activeTurnId,
-    })),
+        : options.activeTurnId;
+      return Effect.succeed(activeTurnId == null
+        ? { task: localTask, activity: "idle" as const, activeTurnId: null }
+        : { task: localTask, activity: "active" as const, activeTurnId });
+    }),
     submit: options.desktopSubmit ?? ((input) => Effect.succeed({
       ...confirmed("desktop", input),
       route: "desktop" as const,

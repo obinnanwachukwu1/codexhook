@@ -214,6 +214,28 @@ test("Desktop busy waits for a canonical activity cycle without fallback or poll
   }
 });
 
+test("multiple Desktop-active turns wait and never fall back", async () => {
+  const input = request(task(), "multiple-active", "queue", "10 millis");
+  let localWrites = 0;
+  const service = coordinatorRuntime({
+    desktopFollow: (localTask) => Effect.succeed({
+      task: localTask,
+      activity: "multiple-active",
+      activeTurnId: null,
+    }),
+    localSubmit: () => Effect.sync(() => {
+      localWrites += 1;
+      throw new Error("multiple Desktop turns cannot authorize fallback");
+    }),
+  });
+  try {
+    assert.equal((await deliver(service, input))._tag, "Unavailable");
+    assert.equal(localWrites, 0);
+  } finally {
+    await service.dispose();
+  }
+});
+
 test("interrupting Desktop preparation cannot start an app-server fallback", async () => {
   const entered = await Effect.runPromise(Deferred.make<void>());
   let localWrites = 0;
