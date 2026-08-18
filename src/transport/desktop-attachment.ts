@@ -8,7 +8,11 @@ import {
   DesktopThreadState,
   type DesktopTaskSnapshot,
 } from "./desktop-state.js";
-import type { DesktopInjectionOutcome } from "./desktop-injection.js";
+import {
+  captureDesktopProof,
+  type DesktopInjectionOutcome,
+  provesDesktopInjection,
+} from "./desktop-injection.js";
 import {
   desktopErrorMessage,
   DesktopTimeoutError,
@@ -69,8 +73,7 @@ export class DesktopAttachment {
       }
       const invalid = this.validationFailure(command, state);
       if (invalid != null) return this.notSubmitted(state, invalid);
-      const baseline = state.revision;
-      const generation = state.generation;
+      const baseline = captureDesktopProof(command, state);
       const protocol = this.protocol;
       if (protocol == null) {
         return this.notSubmitted(state, "Desktop is not connected");
@@ -99,14 +102,14 @@ export class DesktopAttachment {
       }
       try {
         await state.waitFor(
-          () => this.proves(command, state, turnId, baseline, generation) ||
+          () => provesDesktopInjection(command, state, turnId, baseline) ||
             state.connection === "disconnected",
           this.proofTimeoutMs,
         );
       } catch (cause) {
         return this.ambiguous(state, desktopErrorMessage(cause));
       }
-      if (!this.proves(command, state, turnId, baseline, generation)) {
+      if (!provesDesktopInjection(command, state, turnId, baseline)) {
         return this.ambiguous(
           state,
           "Desktop disconnected before state confirmed the command",
@@ -141,7 +144,7 @@ export class DesktopAttachment {
       },
       timeoutMs,
     );
-    const turn = state.ready ? state.turn(turnId) : undefined;
+    const turn = state.turn(turnId);
     if (turn == null || turn.status === "inProgress") {
       throw new Error("Desktop disconnected while observing the turn");
     }
@@ -332,24 +335,6 @@ export class DesktopAttachment {
       return "Desktop steer requires a delivery identity";
     }
     return null;
-  }
-
-  private proves(
-    command: DesktopCommand,
-    state: DesktopThreadState,
-    turnId: string,
-    baseline: number | null,
-    generation: number,
-  ): boolean {
-    if (!state.ready || state.generation !== generation || baseline == null ||
-        state.revision == null ||
-        state.revision <= baseline) return false;
-    const turn = state.turn(turnId);
-    if (turn == null) return false;
-    if (command.kind === "steer") {
-      return state.hasDelivery(command.clientUserMessageId);
-    }
-    return command.kind !== "interrupt" || turn.status === "interrupted";
   }
 
   private notSubmitted(

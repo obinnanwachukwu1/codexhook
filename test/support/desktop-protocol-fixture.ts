@@ -33,6 +33,7 @@ export class FakeDesktopProtocol implements DesktopTaskProtocol {
       status: "inProgress" | "completed" | "interrupted" | "failed";
       error: null;
     }> = {},
+    deliveryIds: ReadonlyArray<string> = [],
   ): void {
     this.snapshots.set(threadId, {
       _tag: "Snapshot",
@@ -41,7 +42,7 @@ export class FakeDesktopProtocol implements DesktopTaskProtocol {
         key,
         turn: { id: turn.turnId, status: turn.status, error: turn.error },
       })),
-      deliveryIds: [],
+      deliveryIds,
     });
   }
 
