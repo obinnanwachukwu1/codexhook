@@ -78,6 +78,22 @@ test("a reachable Desktop that lacks the fallback turn is canonically absent", a
   }]);
 });
 
+test("a reachable Desktop with an inconclusive refresh is canonically unknown", async () => {
+  const fixture = fakeProvider(
+    { desktop: "follow-fail", daemon: "ok" },
+    [desktop, daemon],
+  );
+  await runDelivery(fixture);
+  assert.deepEqual(terminalEvents(fixture.recorder.diagnostics), [{
+    stage: "canonical_verification",
+    code: "canonical.unknown",
+    truth: "confirmed_app_server",
+  }]);
+  assert.deepEqual(fixture.recorder.writes, [
+    { transport: "daemon", method: "turn/start" },
+  ]);
+});
+
 test("a rejected submission has one rejected log and journal truth", async () => {
   const fixture = fakeProvider({ "app-bundled": "rejected" });
   await runDelivery(fixture);

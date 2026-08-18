@@ -108,7 +108,14 @@ export function fakeTransportPeer(
           new RpcNotWritten({ detail: "Desktop thread state timed out" }),
         );
       }
-      const turns = spec.id === "desktop" && recorder.completedTurnId != null
+      const omitsFallbackTurn =
+        behavior === "follow-fail-then-absent" &&
+        spec.id === "desktop" &&
+        connectionOrdinal === 2;
+      const turns =
+        spec.id === "desktop" &&
+          recorder.completedTurnId != null &&
+          !omitsFallbackTurn
         ? [{ id: recorder.completedTurnId, status: "completed" as const }]
         : behavior === "active-ok" || behavior === "busy"
           ? [{ id: "turn-active", status: "inProgress" as const }]
@@ -134,11 +141,7 @@ export function fakeTransportPeer(
         spec.id === "desktop" &&
         connectionOrdinal === 2
       ) {
-        return Effect.succeed({
-          id: turnId,
-          status: "failed" as const,
-          error: { message: "not exposed" },
-        });
+        return Effect.fail(new RpcTimeout({ millis: 1_000 }));
       }
       return Effect.sync(() => {
         if (turnId === "turn-active") {

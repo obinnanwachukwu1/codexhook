@@ -6,6 +6,7 @@ import {
 } from "./errors.js";
 import type { TransportProviderService } from "./provider.js";
 import { ThreadResumeResult } from "./protocol.js";
+import { RpcTimeout } from "./rpc.js";
 
 const REFRESH_TIMEOUT = Duration.seconds(30);
 
@@ -37,15 +38,34 @@ export function confirmDesktopVisibility(
             "Desktop cannot verify fallback input steered into an existing turn",
         });
       }
-      return yield* peer.request(
-        "thread/resume",
-        { threadId: outcome.threadId },
-        ThreadResumeResult,
-        REFRESH_TIMEOUT,
-      ).pipe(
-        Effect.zipRight(
-          peer.awaitTurn(outcome.turnId, REFRESH_TIMEOUT),
-        ),
+      return yield* Effect.gen(function* () {
+        const resumed = yield* peer.request(
+          "thread/resume",
+          { threadId: outcome.threadId },
+          ThreadResumeResult,
+          REFRESH_TIMEOUT,
+        );
+        const visibleTurn = resumed.thread.turns.find(
+          (turn) => turn.id === outcome.turnId,
+        );
+        if (visibleTurn?.status === "completed") return visibleTurn;
+        return yield* peer.awaitTurn(outcome.turnId, REFRESH_TIMEOUT).pipe(
+          Effect.catchIf(
+            (error) => visibleTurn == null && error instanceof RpcTimeout,
+            () =>
+              Effect.fail(
+                new DesktopVisibilityUnconfirmed({
+                  threadId: outcome.threadId,
+                  turnId: outcome.turnId,
+                  submittedTransport,
+                  reason: "turn-not-exposed",
+                  detail:
+                    "Desktop did not expose the completed fallback turn",
+                }),
+              ),
+          ),
+        );
+      }).pipe(
         Effect.catchAll((error) =>
           peer.isAlive.pipe(
             Effect.flatMap((alive) =>
@@ -66,9 +86,9 @@ export function confirmDesktopVisibility(
                 threadId: outcome.threadId,
                 turnId: outcome.turnId,
                 submittedTransport,
-                reason: "turn-not-exposed",
+                reason: "refresh-failed",
                 detail:
-                  "Desktop did not expose the completed fallback turn",
+                  "Desktop exposed the fallback turn without confirming completion",
               }),
             ),
     ),
