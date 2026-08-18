@@ -78,10 +78,24 @@ test("Desktop steer preserves expected-turn and delivery identity fields", async
       threadId: "thread-1",
       expectedTurnId: "turn-active",
       clientUserMessageId: "delivery-1",
-      input: [],
+      input: [{ type: "text", text: "steered message" }],
     });
     assert.equal(observed?.expectedTurnId, "turn-active");
     assert.equal(observed?.clientUserMessageId, "delivery-1");
+    assert.deepEqual(observed?.restoreMessage, {
+      id: "delivery-1",
+      text: "steered message",
+      context: {
+        prompt: "steered message",
+        addedFiles: [],
+        fileAttachments: [],
+        ideContext: null,
+        imageAttachments: [],
+        workspaceRoots: [],
+      },
+      cwd: null,
+      createdAt: (observed?.restoreMessage as { createdAt: number }).createdAt,
+    });
     assert.equal("turnId" in (observed ?? {}), false);
     protocol.close();
   } finally {
@@ -301,4 +315,42 @@ test("Desktop rejection truth distinguishes safe and unknown writes", async () =
     notWritten: false,
     confirmedNoSubmission: false,
   });
+});
+
+test("Desktop injection bounds a delivery budget to the protocol request limit", async () => {
+  const endpoint = await testEndpoint();
+  let starts = 0;
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message, send) => {
+      if (message.method !== "thread-follower-start-turn") return;
+      starts += 1;
+      send({
+        type: "response",
+        requestId: message.requestId,
+        resultType: "success",
+        result: { result: { turnId: "turn-started" } },
+      });
+    },
+  );
+  try {
+    const protocol = await DesktopIpcProtocol.connect(endpoint.socketPath);
+    try {
+      const reply = await protocol.inject({
+        kind: "start",
+        threadId: "thread-1",
+        clientUserMessageId: "delivery-1",
+        input: [],
+        timeoutMs: 30 * 60 * 1_000,
+      });
+      assert.equal(reply._tag, "Accepted");
+      assert.equal(starts, 1);
+    } finally {
+      protocol.close();
+    }
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
 });

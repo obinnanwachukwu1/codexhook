@@ -54,12 +54,11 @@ function makeRuntime(
     Layer.provide(TransportProviderLive(logger)),
   );
   const coordinator = LocalDeliveryCoordinatorLive.pipe(
-    Layer.provide(planes),
+    Layer.provideMerge(planes),
   );
-  const delivery = DeliveryLive(logger, diagnostics).pipe(
-    Layer.provide(Layer.merge(planes, coordinator)),
+  const services = DeliveryLive(logger, diagnostics).pipe(
+    Layer.provideMerge(coordinator),
   );
-  const services = Layer.mergeAll(planes, coordinator, delivery);
   return ManagedRuntime.make(services);
 }
 

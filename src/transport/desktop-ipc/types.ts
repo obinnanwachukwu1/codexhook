@@ -40,11 +40,14 @@ export interface DesktopProtocolProfile {
 
 export interface DesktopWireEnvelope {
   readonly error?: unknown;
+  readonly handledByClientId?: string;
   readonly method?: string;
   readonly params?: unknown;
   readonly requestId?: string;
   readonly result?: unknown;
   readonly resultType?: string;
+  readonly sourceClientId?: string;
+  readonly targetClientId?: string;
   readonly type: string;
   readonly version?: number;
 }

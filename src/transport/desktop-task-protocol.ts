@@ -175,16 +175,19 @@ export class DesktopIpcProtocol implements DesktopTaskProtocol {
 
   async inject(command: DesktopCommand): Promise<DesktopCommandReply> {
     try {
+      const timeoutMs = this.session.requestTimeout(
+        command.timeoutMs ?? 30_000,
+      );
       const reply = command.kind === "start"
         ? await this.session.startTurn(
             command.threadId,
             commandParams(command),
-            command.timeoutMs ?? 30_000,
+            timeoutMs,
           )
         : await this.session.steerTurn(
             command.threadId,
             commandParams(command),
-            command.timeoutMs ?? 30_000,
+            timeoutMs,
           );
       if (reply.outcome._tag === "Rejected") {
         return rejection(reply.outcome.rejection);
@@ -231,11 +234,37 @@ function commandParams(command: DesktopCommand) {
       input: command.input,
     };
   }
+  const prompt = inputText(command.input);
   return {
     expectedTurnId: command.expectedTurnId,
     clientUserMessageId: command.clientUserMessageId,
     input: command.input,
+    restoreMessage: {
+      id: command.clientUserMessageId,
+      text: prompt,
+      context: {
+        prompt,
+        addedFiles: [],
+        fileAttachments: [],
+        ideContext: null,
+        imageAttachments: [],
+        workspaceRoots: [],
+      },
+      cwd: null,
+      createdAt: Date.now(),
+    },
   };
+}
+
+function inputText(input: unknown): string {
+  if (!Array.isArray(input)) return "";
+  const item = input.find((value) =>
+    value != null &&
+    typeof value === "object" &&
+    (value as { readonly type?: unknown }).type === "text" &&
+    typeof (value as { readonly text?: unknown }).text === "string"
+  ) as { readonly text: string } | undefined;
+  return item?.text ?? "";
 }
 
 function rejection(reason: DesktopKnownRejection): DesktopCommandReply {

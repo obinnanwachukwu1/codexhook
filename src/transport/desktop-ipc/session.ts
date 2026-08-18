@@ -2,7 +2,6 @@ import {
   decodeDesktopHandshake,
   DESKTOP_INITIALIZE_PARAMS,
   fingerprintDesktopProtocol,
-  normalizeDesktopRejection,
   selectDesktopAdapter,
   type DesktopProtocolAdapter,
 } from "./adapters.js";
@@ -18,7 +17,6 @@ import type {
   DesktopProtocolProfile,
   DesktopProtocolSessionOptions,
   DesktopRequestReceipt,
-  DesktopResponseEnvelope,
   DesktopStartResult,
   DesktopSteerResult,
   DesktopWireEnvelope,
@@ -29,6 +27,8 @@ import {
   type DesktopBroadcastListener,
   type DesktopObservationListener,
 } from "./wire.js";
+import { desktopRequestReceipt } from "./session-receipt.js";
+import { DesktopThreadOwners } from "./thread-owners.js";
 import type { Socket } from "node:net";
 
 interface NegotiatedConnection {
@@ -44,6 +44,7 @@ export class DesktopProtocolSession {
   private readonly followedThreads = new Set<string>();
   private readonly limits: SessionLimits;
   private readonly observations = new Set<DesktopObservationListener>();
+  private readonly threadOwners = new DesktopThreadOwners();
   private openingRaw: RawDesktopConnection | null = null;
   private openingSocket: Socket | null = null;
   private reconnecting: Promise<NegotiatedConnection> | null = null;
@@ -109,6 +110,10 @@ export class DesktopProtocolSession {
     return this.connection.profile;
   }
 
+  requestTimeout(timeoutMs: number): number {
+    return Math.min(timeoutMs, this.limits.maxRequestTimeoutMs);
+  }
+
   close(): void {
     this.closing = true;
     this.connection?.raw.close();
@@ -152,8 +157,9 @@ export class DesktopProtocolSession {
       connection.adapter.historyParams(threadId),
       connection.adapter.version,
       timeoutMs,
+      this.threadOwners.target(threadId),
     );
-    return this.receipt(
+    return desktopRequestReceipt(
       connection,
       "load-history",
       response,
@@ -172,8 +178,9 @@ export class DesktopProtocolSession {
       connection.adapter.startParams(threadId, params),
       connection.adapter.version,
       timeoutMs,
+      this.threadOwners.target(threadId),
     );
-    return this.receipt(
+    return desktopRequestReceipt(
       connection,
       "start-turn",
       response,
@@ -192,44 +199,14 @@ export class DesktopProtocolSession {
       connection.adapter.steerParams(threadId, params),
       connection.adapter.version,
       timeoutMs,
+      this.threadOwners.target(threadId),
     );
-    return this.receipt(
+    return desktopRequestReceipt(
       connection,
       "steer-turn",
       response,
       (value) => connection.adapter.decodeSteer(value),
     );
-  }
-
-  private receipt<A>(
-    connection: NegotiatedConnection,
-    operation: DesktopRequestReceipt<A>["operation"],
-    response: DesktopResponseEnvelope,
-    decode: (value: unknown) => A,
-  ): DesktopRequestReceipt<A> {
-    if (
-      response.resultType != null &&
-      response.resultType !== "success" &&
-      response.resultType !== "error"
-    ) {
-      throw new DesktopProtocolError(
-        "response-malformed",
-        "operation",
-        "written",
-        "Desktop IPC response has an unknown result type",
-      );
-    }
-    return {
-      fingerprint: connection.profile.fingerprint,
-      operation,
-      requestId: response.requestId,
-      outcome: response.resultType === "error"
-        ? {
-            _tag: "Rejected",
-            rejection: normalizeDesktopRejection(response.error),
-          }
-        : { _tag: "Accepted", value: decode(response.result) },
-    };
   }
 
   private async ready(
@@ -382,6 +359,7 @@ export class DesktopProtocolSession {
       this.emit({ _tag: "MalformedBroadcast" });
       return;
     }
+    this.threadOwners.observe(message);
     for (const listener of this.broadcasts) listener(message);
   }
 
@@ -395,6 +373,12 @@ export class DesktopProtocolSession {
   }
 
   private emit(observation: DesktopProtocolObservation): void {
+    if (
+      observation._tag === "Disconnected" ||
+      observation._tag === "Reconnecting"
+    ) {
+      this.threadOwners.clear();
+    }
     for (const listener of this.observations) listener(observation);
   }
 }
