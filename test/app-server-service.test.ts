@@ -142,3 +142,41 @@ test("does not misclassify provider defects as unavailable candidates", async ()
     assert.equal(Cause.pretty(exit.cause).includes("provider defect"), true);
   }
 });
+
+test("rejects remote specs before provider connection", async () => {
+  let connections = 0;
+  const remotePipe: TransportSpec = {
+    _tag: "UnixSocket",
+    id: "daemon",
+    socketPath: "\\\\remote-host\\pipe\\codex",
+    approvals: "decline",
+  };
+  const remoteCodeMode: TransportSpec = {
+    _tag: "ChildProcess",
+    id: "cli",
+    executable: "/fake/codex",
+    args: ["app-server", "--code-mode-host=wss://remote.invalid"],
+    approvals: "decline",
+  };
+  const provider: TransportProviderService = {
+    candidates: Effect.succeed([remotePipe, remoteCodeMode]),
+    desktopCandidate: Effect.succeed(Option.none()),
+    connect: () => Effect.sync(() => {
+      connections += 1;
+      return fakeAppServerPeer(() => ({})).peer;
+    }),
+  };
+  const layer = CanonicalAppServerLive.pipe(
+    Layer.provide(Layer.succeed(TransportProvider, provider)),
+  );
+  const service = await Effect.runPromise(
+    CanonicalAppServer.pipe(Effect.provide(layer)),
+  );
+  assert.equal(connections, 0);
+  assert.deepEqual(await Effect.runPromise(service.availability), {
+    status: "unavailable",
+    reason: "no-local-app-server",
+    cause: "candidates-rejected",
+    rejectedCandidates: ["daemon", "cli"],
+  });
+});

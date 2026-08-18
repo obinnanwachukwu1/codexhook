@@ -75,6 +75,34 @@ test("rejects repeated pagination cursors", async () => {
   assert.equal(failure.code, "pagination");
 });
 
+test("accepts schema-valid omitted cursors and full-item defaults", async () => {
+  const fixture = fakePeer((method, raw) => {
+    if (method === "thread/list") {
+      return {
+        data: (raw as { archived: boolean }).archived
+          ? []
+          : [thread("task-1", "cli")],
+      };
+    }
+    if (method === "thread/read") {
+      return { thread: thread("task-1", "cli") };
+    }
+    return {
+      data: [{
+        id: "turn-1",
+        items: [],
+        status: "completed",
+        error: null,
+      }],
+    };
+  });
+  const client = new CanonicalAppServerClient(fixture.peer);
+  const tasks = await Effect.runPromise(client.listTasks());
+  const history = await Effect.runPromise(client.readTaskHistory("task-1"));
+  assert.deepEqual(tasks.map((task) => task.thread.id), ["task-1"]);
+  assert.equal(history.thread.turns[0]?.itemsView, "full");
+});
+
 test("bounds pagination even when every cursor is unique", async () => {
   let page = 0;
   const fixture = fakePeer(() => ({

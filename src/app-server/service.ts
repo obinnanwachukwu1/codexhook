@@ -203,6 +203,22 @@ function localCandidates(
   );
 }
 
+function localSpec(
+  candidate: Exclude<TransportSpec, { readonly _tag: "Desktop" }>,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (
+    candidate._tag === "ChildProcess" &&
+    candidate.args.some((argument) =>
+      argument === "--code-mode-host" ||
+      argument.startsWith("--code-mode-host="))
+  ) {
+    return false;
+  }
+  return candidate._tag !== "UnixSocket" ||
+    localSocketPath(candidate.socketPath, platform);
+}
+
 function connectFirstLocal(
   provider: Context.Tag.Service<TransportProvider>,
   candidates: ReadonlyArray<
@@ -223,6 +239,9 @@ function connectFirstLocal(
         rejectedCandidates: failures,
       }),
     );
+  }
+  if (!localSpec(candidate)) {
+    return connectFirstLocal(provider, rest, [...failures, candidate.id]);
   }
   return Effect.gen(function* () {
     const parent = yield* Scope.Scope;

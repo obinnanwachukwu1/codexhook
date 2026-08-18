@@ -32,7 +32,10 @@ export const USER_MESSAGE_CLIENT_ID_FIELD = "clientId" as const;
 export const CanonicalTurn = Schema.Struct({
   id: Schema.String,
   items: Schema.Array(Schema.Unknown),
-  itemsView: Schema.String,
+  itemsView: Schema.optionalWith(
+    Schema.Literal("notLoaded", "summary", "full"),
+    { default: () => "full" as const },
+  ),
   status: Schema.String,
   error: Schema.optional(Schema.NullOr(
     Schema.Struct({ message: Schema.optional(Schema.String) }),
@@ -63,7 +66,9 @@ export type CanonicalThread = typeof CanonicalThread.Type;
 
 export const ThreadListResponse = Schema.Struct({
   data: Schema.Array(CanonicalThread),
-  nextCursor: Schema.NullOr(Schema.String),
+  nextCursor: Schema.optionalWith(Schema.NullOr(Schema.String), {
+    default: () => null,
+  }),
   backwardsCursor: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
@@ -73,7 +78,9 @@ export const ThreadReadResponse = Schema.Struct({
 
 export const ThreadTurnsListResponse = Schema.Struct({
   data: Schema.Array(CanonicalTurn),
-  nextCursor: Schema.NullOr(Schema.String),
+  nextCursor: Schema.optionalWith(Schema.NullOr(Schema.String), {
+    default: () => null,
+  }),
   backwardsCursor: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
