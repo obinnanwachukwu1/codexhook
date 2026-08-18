@@ -1,4 +1,12 @@
 import { Effect } from "effect";
+import {
+  recordDiagnostic,
+  type DiagnosticObserver,
+} from "../diagnostics/contracts.js";
+import {
+  attemptFailedEvent,
+  attemptStartedEvent,
+} from "../diagnostics/events.js";
 import { Logger } from "../logger.js";
 import type {
   TransportId,
@@ -88,6 +96,7 @@ export function deliverWithFallback(
   candidates: ReadonlyArray<TransportSpec>,
   runner: TransportAttemptRunner,
   logger: Logger,
+  diagnostics?: DiagnosticObserver,
 ): Effect.Effect<TurnOutcome, DeliveryError> {
   const attempt = (
     remaining: ReadonlyArray<TransportSpec>,
@@ -106,6 +115,7 @@ export function deliverWithFallback(
       transport: candidate.id,
       stage,
     });
+    recordDiagnostic(diagnostics, attemptStartedEvent(candidate.id));
 
     return runner.run(candidate, (next) => {
       stage = next;
@@ -132,6 +142,18 @@ export function deliverWithFallback(
             detail: failure.detail,
             tryNext,
           });
+          recordDiagnostic(
+            diagnostics,
+            attemptFailedEvent(candidate.id, stage, error),
+          );
+          if (tryNext) {
+            recordDiagnostic(diagnostics, {
+              stage: "fallback",
+              outcome: "started",
+              code: "fallback.attempted",
+              transport: candidate.id,
+            });
+          }
           if (!tryNext) return Effect.fail(error);
           return attempt(
             remaining.slice(1),
@@ -150,6 +172,20 @@ export function deliverWithFallback(
             status: outcome._tag,
           });
           if (candidate._tag === "Desktop") {
+            recordDiagnostic(diagnostics, {
+              stage: "attachment",
+              outcome: "succeeded",
+              code: "attachment.desktop_connected",
+              transport: "desktop",
+            });
+            if (failures.length > 0) {
+              recordDiagnostic(diagnostics, {
+                stage: "fallback",
+                outcome: "succeeded",
+                code: "fallback.selected",
+                transport: outcome.transport,
+              });
+            }
             logger.info("transport_selected", {
               deliveryId: request.deliveryId,
               threadId: request.threadId,
@@ -187,6 +223,12 @@ export function deliverWithFallback(
                     detail: errorDetail(error),
                     submittedTransport: outcome.transport,
                   });
+                  recordDiagnostic(diagnostics, {
+                    stage: "canonical_verification",
+                    outcome: "failed",
+                    code: "canonical.unknown",
+                    transport: "desktop",
+                  });
                 }),
               ),
               Effect.tap((visibility) =>
@@ -210,6 +252,24 @@ export function deliverWithFallback(
                           : undefined,
                     },
                   );
+                  recordDiagnostic(diagnostics, {
+                    stage: "canonical_verification",
+                    outcome: visibility === "confirmed"
+                      ? "succeeded"
+                      : "deferred",
+                    code: visibility === "confirmed"
+                      ? "canonical.found"
+                      : "canonical.unknown",
+                    transport: "desktop",
+                  });
+                  if (failures.length > 0) {
+                    recordDiagnostic(diagnostics, {
+                      stage: "fallback",
+                      outcome: "succeeded",
+                      code: "fallback.selected",
+                      transport: outcome.transport,
+                    });
+                  }
                   logger.info("transport_selected", {
                     deliveryId: request.deliveryId,
                     threadId: request.threadId,

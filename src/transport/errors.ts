@@ -34,11 +34,13 @@ export class TransportIncompatible extends Data.TaggedError(
 }> {}
 
 export class ThreadUnavailable extends Data.TaggedError("ThreadUnavailable")<{
+  readonly transport: TransportId;
   readonly threadId: ThreadId;
   readonly detail: string;
 }> {}
 
 export class ThreadBusy extends Data.TaggedError("ThreadBusy")<{
+  readonly transport: TransportId;
   readonly threadId: ThreadId;
   readonly heldTurnId: Option.Option<TurnId>;
   readonly waitedMillis: number;
@@ -155,22 +157,25 @@ export function disposition(error: TransportError): Disposition {
 }
 
 export function deliveryTruth(error: DeliveryError): DeliveryTruth {
-  switch (error._tag) {
-    case "SubmitAmbiguous":
-    case "TurnAbandoned":
+  if (error._tag === "NoTransportAvailable") return "unavailable";
+  switch (disposition(error).submission) {
+    case "not-submitted":
+      return error._tag === "SubmitRejected" ? "rejected" : "unavailable";
+    case "unknown":
       return "ambiguous";
-    case "SubmitRejected":
-      return "rejected";
-    case "TurnFailed":
-    case "TurnTimeout":
-      return error.transport === "desktop"
+    case "submitted":
+      return errorTransport(error) === "desktop"
         ? "confirmed_desktop"
         : "confirmed_app_server";
-    case "DesktopVisibilityUnconfirmed":
-      return "confirmed_app_server";
-    default:
-      return "unavailable";
   }
+}
+
+export function errorTransport(error: DeliveryError): TransportId | undefined {
+  if (error._tag === "NoTransportAvailable") return undefined;
+  if (error._tag === "DesktopVisibilityUnconfirmed") {
+    return error.submittedTransport;
+  }
+  return "transport" in error ? error.transport : undefined;
 }
 
 type TryNextTag = {

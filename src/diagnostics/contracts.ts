@@ -1,4 +1,8 @@
-import type { DeliveryTruth, TransportId } from "../types.js";
+import {
+  TRANSPORT_IDS,
+  type DeliveryTruth,
+  type TransportId,
+} from "../types.js";
 export type { DeliveryTruth } from "../types.js";
 
 export const DIAGNOSTIC_STAGES = [
@@ -34,7 +38,7 @@ export const DELIVERY_TRUTHS = [
   "rejected",
 ] as const;
 
-export const DIAGNOSTIC_CODES = [
+export const JOURNAL_CODES = [
   "protocol.attempt_started",
   "protocol.incompatible",
   "protocol.malformed_response",
@@ -56,6 +60,8 @@ export const DIAGNOSTIC_CODES = [
   "canonical.found",
   "canonical.absent",
   "canonical.unknown",
+  "canonical.turn_failed",
+  "canonical.turn_timeout",
   "fallback.attempted",
   "fallback.selected",
   "fallback.exhausted",
@@ -65,12 +71,12 @@ export const DIAGNOSTIC_CODES = [
   "other",
 ] as const;
 
-export type DiagnosticCode = (typeof DIAGNOSTIC_CODES)[number];
+export type JournalCode = (typeof JOURNAL_CODES)[number];
 
 export interface DiagnosticEvent {
   readonly stage: DiagnosticStage;
   readonly outcome: DiagnosticOutcome;
-  readonly code: DiagnosticCode;
+  readonly code: JournalCode;
   readonly transport?: TransportId;
   readonly deliveryTruth?: DeliveryTruth;
 }
@@ -86,7 +92,7 @@ export interface DiagnosticObserver {
 
 export interface DiagnosticFailureSummary {
   readonly stage: DiagnosticStage;
-  readonly code: DiagnosticCode;
+  readonly code: JournalCode;
   readonly outcome: DiagnosticOutcome;
   readonly count: number;
   readonly lastSeenAt: string;
@@ -107,8 +113,23 @@ export function isDeliveryTruth(value: unknown): value is DeliveryTruth {
   );
 }
 
-export function diagnosticCode(value: unknown): DiagnosticCode {
-  return DIAGNOSTIC_CODES.includes(value as DiagnosticCode)
-    ? value as DiagnosticCode
+export function journalCode(value: unknown): JournalCode {
+  return JOURNAL_CODES.includes(value as JournalCode)
+    ? value as JournalCode
     : "other";
+}
+
+export function isTransportId(value: unknown): value is TransportId {
+  return TRANSPORT_IDS.includes(value as TransportId);
+}
+
+export function recordDiagnostic(
+  observer: DiagnosticObserver | undefined,
+  event: DiagnosticEvent,
+): void {
+  try {
+    observer?.record(event);
+  } catch {
+    // Diagnostics are best effort and never participate in delivery control.
+  }
 }

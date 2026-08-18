@@ -8,16 +8,26 @@ import {
   SynchronizedRef,
 } from "effect";
 import { randomUUID } from "node:crypto";
+import {
+  recordDiagnostic,
+  type DiagnosticObserver,
+} from "../diagnostics/contracts.js";
+import {
+  deliveryFailedEvent,
+  deliveryStartedEvent,
+  deliverySucceededEvent,
+} from "../diagnostics/events.js";
 import { Logger } from "../logger.js";
 import {
   DeliveryId,
+  turnOutcomeTruth,
   type ThreadId,
   type TurnRequest,
   type WebhookRecord,
 } from "../types.js";
 import {
-  deliveryTruth,
   disposition,
+  errorTransport,
   type DeliveryError,
   type TransportError,
 } from "../transport/errors.js";
@@ -63,6 +73,7 @@ function failureSubmission(error: DeliveryError): string {
 
 export function DeliveryLive(
   logger = new Logger(),
+  diagnostics?: DiagnosticObserver,
 ): Layer.Layer<Delivery, never, CodexTransport> {
   return Layer.scoped(
     Delivery,
@@ -81,37 +92,39 @@ export function DeliveryLive(
           threadId: job.request.threadId,
           mode: job.request.mode,
         });
+        recordDiagnostic(diagnostics, deliveryStartedEvent());
         return transport.deliver(job.request).pipe(
           Effect.match({
             onSuccess: (outcome) => {
+              const truth = turnOutcomeTruth(outcome);
               logger.info("delivery_finished", {
                 deliveryId: job.request.deliveryId,
                 hookId: job.hookId,
                 threadId: job.request.threadId,
                 status: outcome._tag,
                 transport: outcome.transport,
-                deliveryTruth: outcome.transport === "desktop"
-                  ? "confirmed_desktop"
-                  : "confirmed_app_server",
+                deliveryTruth: truth,
                 durationMs: Date.now() - startedAt,
               });
+              recordDiagnostic(diagnostics, deliverySucceededEvent(outcome));
             },
             onFailure: (error) => {
+              const failed = deliveryFailedEvent(error);
+              const failedTransport = errorTransport(error);
               logger.error("delivery_failed", {
                 deliveryId: job.request.deliveryId,
                 hookId: job.hookId,
                 threadId: job.request.threadId,
                 errorTag: error._tag,
                 submission: failureSubmission(error),
-                deliveryTruth: deliveryTruth(error),
-                ...(error._tag === "DesktopVisibilityUnconfirmed"
-                  ? { transport: error.submittedTransport }
-                  : "transport" in error
-                    ? { transport: error.transport }
-                    : {}),
+                deliveryTruth: failed.deliveryTruth,
+                ...(failedTransport == null
+                  ? {}
+                  : { transport: failedTransport }),
                 error: String(error),
                 durationMs: Date.now() - startedAt,
               });
+              recordDiagnostic(diagnostics, failed);
             },
           }),
         );

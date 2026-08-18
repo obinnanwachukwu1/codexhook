@@ -1,5 +1,6 @@
 import { Context, Effect, Layer, Option, Scope } from "effect";
 import { Logger } from "../logger.js";
+import type { DiagnosticObserver } from "../diagnostics/contracts.js";
 import { discoverStandalone } from "./discovery.js";
 import { connectDesktop } from "./desktop.js";
 import {
@@ -33,6 +34,7 @@ export class TransportProvider extends Context.Tag(
 
 export function TransportProviderLive(
   logger = new Logger(),
+  diagnostics?: DiagnosticObserver,
 ): Layer.Layer<TransportProvider> {
   return Layer.effect(
     TransportProvider,
@@ -52,7 +54,7 @@ export function TransportProviderLive(
         }),
         connect: (spec) =>
           spec._tag === "Desktop"
-            ? connectDesktop(spec, logger)
+            ? connectDesktop(spec, diagnostics)
             : spec._tag === "UnixSocket"
               ? connectUnixPeer(spec, logger)
               : spawnChildPeer(spec, logger),

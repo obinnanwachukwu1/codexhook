@@ -12,6 +12,7 @@ import {
   DeliveryLive,
 } from "../src/delivery/delivery.js";
 import { Logger } from "../src/logger.js";
+import type { DiagnosticEvent } from "../src/diagnostics/contracts.js";
 import {
   ThreadId,
   TurnId,
@@ -54,6 +55,7 @@ async function waitFor(
 
 test("does not log delivery_finished when Desktop visibility is unconfirmed", async () => {
   const { entries, logger } = memoryLogger();
+  const diagnostics: DiagnosticEvent[] = [];
   const threadId = ThreadId("thread-1");
   const turnId = TurnId("turn-1");
   const transport = CodexTransport.of({
@@ -72,7 +74,11 @@ test("does not log delivery_finished when Desktop visibility is unconfirmed", as
     }),
   } satisfies CodexTransportService);
   const runtime = ManagedRuntime.make(
-    DeliveryLive(logger).pipe(
+    DeliveryLive(logger, {
+      record(event) {
+        diagnostics.push(event);
+      },
+    }).pipe(
       Layer.provide(Layer.succeed(CodexTransport, transport)),
     ),
   );
@@ -106,6 +112,85 @@ test("does not log delivery_finished when Desktop visibility is unconfirmed", as
       entries.some((entry) => entry.event === "delivery_finished"),
       false,
     );
+    assert.equal(
+      diagnostics.some((event) =>
+        event.code === "canonical.unknown" &&
+        event.deliveryTruth === "confirmed_app_server"
+      ),
+      true,
+    );
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+test("serializes each task while allowing different tasks to run concurrently", async () => {
+  const { entries, logger } = memoryLogger();
+  const liveByThread = new Map<string, number>();
+  const maxByThread = new Map<string, number>();
+  let live = 0;
+  let maxLive = 0;
+  const transport = CodexTransport.of({
+    deliver: (request) => Effect.acquireUseRelease(
+      Effect.sync(() => {
+        live += 1;
+        maxLive = Math.max(maxLive, live);
+        const threadLive = (liveByThread.get(request.threadId) ?? 0) + 1;
+        liveByThread.set(request.threadId, threadLive);
+        maxByThread.set(
+          request.threadId,
+          Math.max(maxByThread.get(request.threadId) ?? 0, threadLive),
+        );
+      }),
+      () => Effect.sleep("30 millis"),
+      () => Effect.sync(() => {
+        live -= 1;
+        liveByThread.set(
+          request.threadId,
+          (liveByThread.get(request.threadId) ?? 1) - 1,
+        );
+      }),
+    ).pipe(Effect.as({
+      _tag: "Completed" as const,
+      threadId: request.threadId,
+      turnId: TurnId(`turn-${request.deliveryId}`),
+      transport: "cli" as const,
+    })),
+    status: Effect.succeed({
+      candidates: ["cli"],
+      desktopIpcAvailable: false,
+    }),
+  } satisfies CodexTransportService);
+  const runtime = ManagedRuntime.make(
+    DeliveryLive(logger).pipe(
+      Layer.provide(Layer.succeed(CodexTransport, transport)),
+    ),
+  );
+  const hook = (id: string, thread: string): WebhookRecord => ({
+    id,
+    threadId: ThreadId(thread),
+    mode: "queue",
+    prependBody: "",
+    expiresAt: null,
+    remainingDeliveries: null,
+    createdAt: Date.now(),
+  });
+
+  try {
+    await Promise.all([
+      runtime.runPromise(Effect.flatMap(Delivery, (delivery) =>
+        delivery.submit(hook("one-a", "thread-1"), "a"))),
+      runtime.runPromise(Effect.flatMap(Delivery, (delivery) =>
+        delivery.submit(hook("one-b", "thread-1"), "b"))),
+      runtime.runPromise(Effect.flatMap(Delivery, (delivery) =>
+        delivery.submit(hook("two", "thread-2"), "c"))),
+    ]);
+    await waitFor(() =>
+      entries.filter((entry) => entry.event === "delivery_finished").length === 3,
+    );
+    assert.equal(maxLive, 2);
+    assert.equal(maxByThread.get("thread-1"), 1);
+    assert.equal(maxByThread.get("thread-2"), 1);
   } finally {
     await runtime.dispose();
   }

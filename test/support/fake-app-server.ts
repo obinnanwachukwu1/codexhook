@@ -13,22 +13,20 @@ export type CanonicalItemState = "found" | "absent" | "unknown";
 export interface FakeAppServerOptions {
   readonly behavior?: FakeAppServerBehavior;
   readonly canonicalItem?: CanonicalItemState;
+  readonly canonicalItems?: Readonly<Record<string, CanonicalItemState>>;
 }
 
 export interface FakeAppServerHarness {
   readonly connection: WireConnection;
   readonly requests: ReadonlyArray<WireMessage>;
-  readonly generation: number;
   disconnect: () => void;
 }
 
 export function fakeAppServer(
   options: FakeAppServerOptions = {},
-  generation = 1,
 ): FakeAppServerHarness {
   const input = new PassThrough();
   const requests: WireMessage[] = [];
-  const errorListeners = new Set<(error: Error) => void>();
   const exitListeners = new Set<(
     code: number | null,
     signal: string | null,
@@ -58,11 +56,17 @@ export function fakeAppServer(
     }
     if (message.method === "initialized") return;
     if (message.method === "thread/resume") {
-      if (options.canonicalItem === "unknown") {
+      const threadId = String(
+        (message.params as { readonly threadId?: unknown } | undefined)
+          ?.threadId ?? "",
+      );
+      const canonicalItem = options.canonicalItems?.[threadId] ??
+        options.canonicalItem;
+      if (canonicalItem === "unknown") {
         send({ id, result: { incompatible: true } });
         return;
       }
-      const turns = options.canonicalItem === "found"
+      const turns = canonicalItem === "found"
         ? [{ id: "turn-canonical", status: "completed", error: null }]
         : [];
       send({
@@ -110,21 +114,12 @@ export function fakeAppServer(
       handle(message);
     },
     onError(listener) {
-      errorListeners.add(listener);
+      void listener;
     },
     onExit(listener) {
       exitListeners.add(listener);
     },
   };
 
-  return { connection, requests, generation, disconnect: exit };
-}
-
-export class FakeAppServerLifecycle {
-  private currentGeneration = 0;
-
-  start(options: FakeAppServerOptions = {}): FakeAppServerHarness {
-    this.currentGeneration += 1;
-    return fakeAppServer(options, this.currentGeneration);
-  }
+  return { connection, requests, disconnect: exit };
 }

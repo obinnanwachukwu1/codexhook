@@ -13,13 +13,16 @@ export type DesktopStateDiagnostic =
   | "reordered_patch"
   | "stale_active_turn";
 
+type StatePhase =
+  | "empty"
+  | "ready"
+  | "resync-requested"
+  | "resync-in-flight";
+
 export class DesktopThreadState {
   private readonly entityTurns = new Map<string, string>();
-  private readonly pendingStatuses = new Map<string, Turn["status"]>();
-  private initialized = false;
   private readonly listeners = new Set<() => void>();
-  private resync = false;
-  private resyncPending = false;
+  private phase: StatePhase = "empty";
   private revision: number | null = null;
   private readonly turns = new Map<string, Turn>();
 
@@ -35,12 +38,12 @@ export class DesktopThreadState {
   }
 
   get ready(): boolean {
-    return this.initialized;
+    return this.phase === "ready";
   }
 
   takeResyncRequest(): boolean {
-    if (!this.resync) return false;
-    this.resync = false;
+    if (this.phase !== "resync-requested") return false;
+    this.phase = "resync-in-flight";
     return true;
   }
 
@@ -99,37 +102,40 @@ export class DesktopThreadState {
       patches?: ReadonlyArray<Patch>;
     } | undefined;
     if (change?.type === "snapshot") {
+      const resynchronized = this.phase === "resync-requested" ||
+        this.phase === "resync-in-flight";
       const staleActiveTurns = [...this.turns.values()]
         .filter((turn) => turn.status === "inProgress")
         .map((turn) => turn.id);
       if (typeof change.revision === "number") {
         this.revision = change.revision;
       }
-      this.initialized = true;
+      this.phase = "ready";
       this.entityTurns.clear();
-      this.pendingStatuses.clear();
       this.turns.clear();
       this.readSnapshot(change.conversationState);
       if (staleActiveTurns.some((turnId) => !this.turns.has(turnId))) {
         this.onDiagnostic("stale_active_turn");
       }
-      if (this.resyncPending) {
-        this.resyncPending = false;
-        this.onDiagnostic("resynchronized");
-      }
+      if (resynchronized) this.onDiagnostic("resynchronized");
     } else if (change?.type === "patches") {
       if (
         this.revision != null &&
         change.baseRevision !== this.revision
       ) {
-        this.initialized = false;
-        this.resync = true;
-        this.resyncPending = true;
+        this.phase = "resync-requested";
         this.onDiagnostic("revision_gap");
         for (const listener of this.listeners) listener();
         return;
       }
-      for (const patch of change.patches ?? []) this.readPatch(patch);
+      const patches = change.patches ?? [];
+      if (this.hasReorderedEntityPatch(patches)) {
+        this.onDiagnostic("reordered_patch");
+      }
+      for (const patch of patches.filter(isTurnIdPatch)) this.readPatch(patch);
+      for (const patch of patches.filter((patch) => !isTurnIdPatch(patch))) {
+        this.readPatch(patch);
+      }
       if (typeof change.revision === "number") {
         this.revision = change.revision;
       }
@@ -162,13 +168,7 @@ export class DesktopThreadState {
       typeof patch.value === "string"
     ) {
       this.entityTurns.set(key, patch.value);
-      const pendingStatus = this.pendingStatuses.get(key);
-      this.turns.set(patch.value, {
-        id: patch.value,
-        status: pendingStatus ?? "inProgress",
-        error: null,
-      });
-      this.pendingStatuses.delete(key);
+      this.observeTurn(patch.value);
       return;
     }
     if (path.at(-1) === "status") {
@@ -182,9 +182,6 @@ export class DesktopThreadState {
           ...existing,
           status,
         });
-      } else if (typeof key === "string") {
-        this.pendingStatuses.set(key, status);
-        this.onDiagnostic("reordered_patch");
       }
       return;
     }
@@ -206,6 +203,36 @@ export class DesktopThreadState {
       error: entity.error,
     });
   }
+
+  private hasReorderedEntityPatch(patches: ReadonlyArray<Patch>): boolean {
+    const turnIdIndex = new Map<string, number>();
+    patches.forEach((patch, index) => {
+      const key = entityKey(patch);
+      if (key != null && isTurnIdPatch(patch)) turnIdIndex.set(key, index);
+    });
+    return patches.some((patch, index) => {
+      const key = entityKey(patch);
+      const association = key == null ? undefined : turnIdIndex.get(key);
+      return key != null &&
+        patch.path?.at(-1) === "status" &&
+        this.entityTurns.get(key) == null &&
+        association != null &&
+        index < association;
+    });
+  }
+}
+
+function entityKey(patch: Patch): string | null {
+  const path = patch.path ?? [];
+  const index = path.indexOf("entitiesByKey");
+  const key = index < 0 ? undefined : path[index + 1];
+  return typeof key === "string" ? key : null;
+}
+
+function isTurnIdPatch(patch: Patch): boolean {
+  return entityKey(patch) != null &&
+    patch.path?.at(-1) === "turnId" &&
+    typeof patch.value === "string";
 }
 
 function normalizeStatus(value: unknown): Turn["status"] {

@@ -8,6 +8,7 @@ import {
   Schema,
 } from "effect";
 import { Logger } from "../../src/logger.js";
+import type { DiagnosticEvent } from "../../src/diagnostics/contracts.js";
 import {
   DeliveryId,
   ThreadId,
@@ -42,6 +43,7 @@ export type WriteBehavior =
   | "follow-fail-then-disconnect-refresh";
 
 export interface Recorder {
+  readonly diagnostics: DiagnosticEvent[];
   readonly logs: Array<Record<string, unknown>>;
   readonly opens: string[];
   readonly writes: Array<{ transport: string; method: string }>;
@@ -199,6 +201,7 @@ export function fakeProvider(
   candidates: ReadonlyArray<TransportSpec> = [bundled, cli],
 ): TransportFixture {
   const recorder: Recorder = {
+    diagnostics: [],
     logs: [],
     opens: [],
     writes: [],
@@ -297,7 +300,11 @@ function delivery(fixture: TransportFixture, mode: "queue" | "steer") {
     Effect.flatMap(CodexTransport, (transport) =>
       transport.deliver(request(mode)),
     ).pipe(
-      Effect.provide(makeCodexTransportLive(fixture.logger)),
+      Effect.provide(makeCodexTransportLive(fixture.logger, {
+        record(event) {
+          fixture.recorder.diagnostics.push(event);
+        },
+      })),
       Effect.provide(fixture.layer),
     ),
   );

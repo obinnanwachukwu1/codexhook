@@ -22,6 +22,12 @@ export interface FakeDesktopIpcHarness {
   close: () => Promise<void>;
 }
 
+interface HarnessOwner {
+  readonly directory: string;
+  closed: boolean;
+  stopCurrent: (() => Promise<void>) | null;
+}
+
 function frame(value: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(value));
   const framed = Buffer.allocUnsafe(body.length + 4);
@@ -31,8 +37,8 @@ function frame(value: unknown): Buffer {
 }
 
 async function listen(
+  owner: HarnessOwner,
   socketPath: string,
-  directory: string,
   behavior: FakeDesktopBehavior,
   generation: number,
 ): Promise<FakeDesktopIpcHarness> {
@@ -90,16 +96,22 @@ async function listen(
     server.listen(socketPath, resolve);
   });
 
-  let closed = false;
+  let serverClosed = false;
   const disconnectClients = () => {
     for (const socket of sockets) socket.destroy();
   };
-  const closeServer = async (removeDirectory: boolean) => {
-    if (closed) return;
-    closed = true;
+  const stopServer = async () => {
+    if (serverClosed) return;
+    serverClosed = true;
     disconnectClients();
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (removeDirectory) await rm(directory, { recursive: true, force: true });
+  };
+  owner.stopCurrent = stopServer;
+  const closeOwner = async () => {
+    if (owner.closed) return;
+    owner.closed = true;
+    await owner.stopCurrent?.();
+    await rm(owner.directory, { recursive: true, force: true });
   };
   return {
     socketPath,
@@ -110,13 +122,16 @@ async function listen(
     },
     disconnectClients,
     async replace(nextBehavior = "normal") {
-      await closeServer(false);
+      await stopServer();
       if (process.platform !== "win32") {
         await unlink(socketPath).catch(() => undefined);
       }
-      return listen(socketPath, directory, nextBehavior, generation + 1);
+      const nextPath = process.platform === "win32"
+        ? `\\\\.\\pipe\\codexhook-fake-${randomUUID()}`
+        : socketPath;
+      return listen(owner, nextPath, nextBehavior, generation + 1);
     },
-    close: () => closeServer(true),
+    close: closeOwner,
   };
 }
 
@@ -124,8 +139,13 @@ export async function fakeDesktopIpc(
   behavior: FakeDesktopBehavior = "normal",
 ): Promise<FakeDesktopIpcHarness> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codexhook-fake-ipc-"));
+  const owner: HarnessOwner = {
+    directory,
+    closed: false,
+    stopCurrent: null,
+  };
   const socketPath = process.platform === "win32"
     ? `\\\\.\\pipe\\codexhook-fake-${randomUUID()}`
     : path.join(directory, "ipc.sock");
-  return listen(socketPath, directory, behavior, 1);
+  return listen(owner, socketPath, behavior, 1);
 }

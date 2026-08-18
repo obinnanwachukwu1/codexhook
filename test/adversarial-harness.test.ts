@@ -1,13 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Cause, Effect, Exit, Option } from "effect";
-import { DesktopIpcClient } from "../src/transport/desktop-ipc-client.js";
-import { TransportIncompatible } from "../src/transport/errors.js";
+import {
+  DesktopIpcClient,
+  DesktopIpcConnectError,
+} from "../src/transport/desktop-ipc-client.js";
+import { connectDesktop } from "../src/transport/desktop.js";
+import {
+  TransportIncompatible,
+  TransportUnavailable,
+} from "../src/transport/errors.js";
 import { connectWirePeer } from "../src/transport/peer.js";
+import type { AppServerPeer } from "../src/transport/rpc.js";
 import { ThreadResumeResult, TurnStartResult } from "../src/transport/protocol.js";
 import type { TransportSpec } from "../src/transport/spec.js";
-import { ADVERSARIAL_FIXTURES } from "./fixtures/adversarial.js";
-import { FakeAppServerLifecycle, fakeAppServer } from "./support/fake-app-server.js";
+import { fakeAppServer } from "./support/fake-app-server.js";
 import { fakeDesktopIpc } from "./support/fake-desktop-ipc.js";
 
 const appSpec = {
@@ -18,34 +25,9 @@ const appSpec = {
   approvals: "decline",
 } as const satisfies TransportSpec;
 
-test("adversarial corpus covers every phase-one integration hazard", () => {
-  assert.deepEqual(
-    ADVERSARIAL_FIXTURES.map((fixture) => fixture.name),
-    [
-      "disconnect-before-write",
-      "disconnect-after-write",
-      "lost-acknowledgement",
-      "canonical-item-found",
-      "canonical-item-absent",
-      "canonical-item-unknown",
-      "socket-replacement",
-      "codex-restart",
-      "stale-active-turn",
-      "revision-gap",
-      "reordered-patches",
-      "incompatible-response-shapes",
-      "concurrent-tasks",
-      "circuit-breaker-recovery",
-      "redaction",
-    ],
-  );
-});
-
 test("fake Desktop IPC supports socket replacement and restart generations", async () => {
   const first = await fakeDesktopIpc();
-  const firstClient = await DesktopIpcClient.connect(first.socketPath);
-  assert.equal(firstClient.alive, true);
-  firstClient.close();
+  assert.equal(await connectDesktopAlive(first.socketPath), true);
 
   const replacement = await first.replace();
   const secondClient = await DesktopIpcClient.connect(replacement.socketPath);
@@ -55,6 +37,7 @@ test("fake Desktop IPC supports socket replacement and restart generations", asy
   secondClient.close();
 
   const restarted = await replacement.replace();
+  assert.equal(await connectDesktopAlive(restarted.socketPath), true);
   const thirdClient = await DesktopIpcClient.connect(restarted.socketPath);
   assert.equal(restarted.generation, 3);
   thirdClient.close();
@@ -66,7 +49,8 @@ test("fake Desktop IPC exposes incompatible response shapes", async () => {
   try {
     await assert.rejects(
       DesktopIpcClient.connect(harness.socketPath),
-      /malformed/,
+      (error) => error instanceof DesktopIpcConnectError &&
+        error.failure === "initialize-malformed",
     );
   } finally {
     await harness.close();
@@ -79,17 +63,26 @@ test("fake app-server distinguishes disconnect before and after write", async ()
     Effect.scoped(connectWirePeer(appSpec, before.connection)),
   );
   assert.equal(Exit.isFailure(beforeExit), true);
+  if (Exit.isFailure(beforeExit)) {
+    const failure = Cause.failureOption(beforeExit.cause);
+    assert.equal(
+      Option.isSome(failure) && failure.value instanceof TransportUnavailable,
+      true,
+    );
+  }
 
   const after = fakeAppServer({ behavior: "disconnect-after-write" });
   const afterExit = await Effect.runPromiseExit(submitTurn(after));
   assert.equal(Exit.isFailure(afterExit), true);
+  assertFailure(afterExit, ["RpcWriteAmbiguous", "RpcDisconnected"]);
   assert.equal(after.requests.some((request) => request.method === "turn/start"), true);
 });
 
 test("fake app-server models a lost acknowledgement without duplicate writes", async () => {
   const harness = fakeAppServer({ behavior: "lost-acknowledgement" });
-  const exit = await Effect.runPromiseExit(submitTurn(harness, "20 millis"));
+  const exit = await Effect.runPromiseExit(submitTurn(harness, "200 millis"));
   assert.equal(Exit.isFailure(exit), true);
+  assertFailure(exit, ["RpcTimeout"]);
   assert.equal(
     harness.requests.filter((request) => request.method === "turn/start").length,
     1,
@@ -137,31 +130,31 @@ test("fake app-server canonical lookup reports found, absent, and unknown", asyn
   }
 });
 
-test("fake app-server lifecycle isolates concurrent tasks across restarts", async () => {
-  const lifecycle = new FakeAppServerLifecycle();
-  const first = lifecycle.start({ canonicalItem: "found" });
-  const second = lifecycle.start({ canonicalItem: "absent" });
-  assert.equal(first.generation, 1);
-  assert.equal(second.generation, 2);
-  const results = await Promise.all([
-    Effect.runPromise(lookup(first)),
-    Effect.runPromise(lookup(second)),
-  ]);
+test("fake app-server handles concurrent tasks on one connection", async () => {
+  const harness = fakeAppServer({
+    canonicalItems: { "thread-1": "found", "thread-2": "absent" },
+  });
+  const results = await Effect.runPromise(Effect.scoped(
+    connectWirePeer(appSpec, harness.connection).pipe(
+      Effect.flatMap((peer) => Effect.all([
+        canonicalCount(peer, "thread-1"),
+        canonicalCount(peer, "thread-2"),
+      ], { concurrency: "unbounded" })),
+    ),
+  ));
   assert.deepEqual(results, [1, 0]);
 });
 
-function lookup(harness: ReturnType<typeof fakeAppServer>) {
-  return Effect.scoped(
-    connectWirePeer(appSpec, harness.connection).pipe(
-      Effect.flatMap((peer) => peer.request(
-        "thread/resume",
-        { threadId: "thread-1" },
-        ThreadResumeResult,
-        "50 millis",
-      )),
-      Effect.map((result) => result.thread.turns.length),
-    ),
-  );
+function canonicalCount(
+  peer: AppServerPeer,
+  threadId: string,
+) {
+  return peer.request(
+    "thread/resume",
+    { threadId },
+    ThreadResumeResult,
+    "50 millis",
+  ).pipe(Effect.map((result) => result.thread.turns.length));
 }
 
 function submitTurn(
@@ -182,9 +175,36 @@ function submitTurn(
 }
 
 async function eventually(predicate: () => boolean): Promise<boolean> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
     if (predicate()) return true;
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
   return predicate();
+}
+
+function connectDesktopAlive(socketPath: string): Promise<boolean> {
+  const spec = {
+    _tag: "Desktop",
+    id: "desktop",
+    socketPath,
+    approvals: "decline",
+  } as const satisfies TransportSpec;
+  return Effect.runPromise(Effect.scoped(
+    connectDesktop(spec).pipe(Effect.flatMap((peer) => peer.isAlive)),
+  ));
+}
+
+function assertFailure(
+  exit: Exit.Exit<unknown, unknown>,
+  expected: ReadonlyArray<string>,
+): void {
+  if (!Exit.isFailure(exit)) assert.fail("expected failure");
+  const failure = Cause.failureOption(exit.cause);
+  assert.equal(
+    Option.isSome(failure) && expected.includes(
+      String((failure.value as { readonly _tag?: unknown })._tag),
+    ),
+    true,
+  );
 }

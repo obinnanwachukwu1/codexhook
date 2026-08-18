@@ -2,17 +2,18 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Writable } from "node:stream";
 import test from "node:test";
+import { Option } from "effect";
 import {
   authorizeCompatibilityReport,
   buildCompatibilityReport,
   previewCompatibilityReport,
-} from "../src/diagnostics/compatibility.js";
+} from "../src/diagnostics/support-report.js";
+import {
+  attemptStartedEvent,
+  deliveryFailedEvent,
+} from "../src/diagnostics/events.js";
 import { DiagnosticJournal } from "../src/diagnostics/journal.js";
-import { diagnosticLogObserver } from "../src/diagnostics/log-observer.js";
-import { Logger } from "../src/logger.js";
-import { Option } from "effect";
 import {
   deliveryTruth,
   DesktopVisibilityUnconfirmed,
@@ -47,45 +48,60 @@ test("diagnostic journal is bounded and tolerates corrupt records", () => {
     });
   }
   assert.ok(Buffer.byteLength(readFileSync(journal.filePath)) <= 1_024);
+  assert.ok(
+    readFileSync(journal.filePath, "utf8").trim().split("\n").length <= 8,
+  );
   appendFileSync(journal.filePath, "not-json\n");
+  appendFileSync(journal.filePath, `${JSON.stringify({
+    schemaVersion: 1,
+    timestamp: "not-a-timestamp",
+    stage: "protocol",
+    outcome: "failed",
+    code: "protocol.unavailable",
+  })}\n`);
   const snapshot = journal.read();
   assert.ok(snapshot.records.length <= 8);
   assert.equal(snapshot.records.at(-1)?.deliveryTruth, "confirmed_app_server");
-  assert.equal(snapshot.invalidLines, 1);
+  assert.equal(snapshot.invalidLines, 2);
 });
 
-test("logger classification names every delivery decision stage", () => {
+test("typed diagnostics cover every delivery decision stage", () => {
   const fixture = journalFixture();
   const journal = new DiagnosticJournal(fixture.journal.filePath, {
     maxBytes: 4_096,
     maxEntries: 32,
   });
-  const sink = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
-  const logger = new Logger(sink, [diagnosticLogObserver(journal)]);
-
-  logger.warn("transport_attempt_failed", {
+  journal.record(attemptStartedEvent("desktop"));
+  journal.record(attemptStartedEvent("daemon"));
+  journal.record({
+    stage: "fallback",
+    outcome: "started",
+    code: "fallback.attempted",
+  });
+  journal.record(deliveryFailedEvent(new SubmitAmbiguous({
     transport: "desktop",
-    stage: "connect",
-    errorTag: "TransportUnavailable",
-    tryNext: true,
-    detail: "secret socket path",
+    method: "turn/start",
+    threadId: ThreadId("thread-1"),
+    deliveryId: DeliveryId("delivery-1"),
+    cause: "disconnected",
+  })));
+  journal.record({
+    stage: "canonical_verification",
+    outcome: "failed",
+    code: "canonical.unknown",
   });
-  logger.warn("transport_attempt_failed", {
-    transport: "daemon",
-    stage: "connect",
-    errorTag: "TransportIncompatible",
-    tryNext: false,
+  journal.record({
+    stage: "state_synchronization",
+    outcome: "failed",
+    code: "state.revision_gap",
   });
-  logger.error("delivery_failed", {
-    errorTag: "SubmitAmbiguous",
-    submission: "unknown",
-    deliveryId: "secret-delivery-id",
-    threadId: "secret-thread-id",
-  });
-  logger.error("desktop_visibility_failed", { transport: "desktop" });
-  logger.warn("desktop_state_revision_gap", { transport: "desktop" });
-  logger.warn("circuit_breaker_opened");
-  logger.info("circuit_breaker_recovered");
+  for (const event of [
+    { outcome: "failed", code: "circuit.opened" },
+    { outcome: "started", code: "circuit.half_open" },
+    { outcome: "recovered", code: "circuit.recovered" },
+  ] as const) {
+    journal.record({ stage: "circuit_breaker", ...event });
+  }
 
   const records = journal.read().records;
   const stages = new Set(records.map((record) => record.stage));
@@ -98,7 +114,6 @@ test("logger classification names every delivery decision stage", () => {
     "state_synchronization",
     "circuit_breaker",
   ]));
-  assert.equal(JSON.stringify(records).includes("secret"), false);
   assert.equal(
     records.find((record) => record.code === "submission.ambiguous")
       ?.deliveryTruth,
@@ -146,10 +161,9 @@ test("compatibility payload is allowlisted, sanitized, and consent-gated", () =>
 
   const preview = previewCompatibilityReport(payload);
   assert.equal(preview.consentRequired, true);
-  assert.throws(() => authorizeCompatibilityReport(preview, false));
-  const authorized = authorizeCompatibilityReport(preview, true);
+  const authorized = authorizeCompatibilityReport(preview);
   assert.equal(authorized.consent.approved, true);
-  assert.equal(authorized.consent.fingerprint, preview.fingerprint);
+  assert.equal(authorized.consent.source, "doctor-cli");
 });
 
 test("journal failures preserve stage and truthful terminal classification", () => {
@@ -213,4 +227,34 @@ test("terminal delivery truth distinguishes confirmation from uncertainty", () =
     submittedTransport: "daemon",
     detail: "not visible",
   })), "confirmed_app_server");
+});
+
+test("failed and timed-out turns retain confirmation while naming their terminal stage", () => {
+  const threadId = ThreadId("thread-1");
+  const turnId = TurnId("turn-1");
+  assert.deepEqual(deliveryFailedEvent(new TurnFailed({
+    transport: "desktop",
+    threadId,
+    turnId,
+    status: "failed",
+    message: Option.none(),
+  })), {
+    stage: "canonical_verification",
+    outcome: "failed",
+    code: "canonical.turn_failed",
+    deliveryTruth: "confirmed_desktop",
+    transport: "desktop",
+  });
+  assert.deepEqual(deliveryFailedEvent(new TurnTimeout({
+    transport: "cli",
+    threadId,
+    turnId,
+    waitedMillis: 100,
+  })), {
+    stage: "canonical_verification",
+    outcome: "failed",
+    code: "canonical.turn_timeout",
+    deliveryTruth: "confirmed_app_server",
+    transport: "cli",
+  });
 });

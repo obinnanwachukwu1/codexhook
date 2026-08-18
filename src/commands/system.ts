@@ -26,9 +26,8 @@ import {
   authorizeCompatibilityReport,
   buildCompatibilityReport,
   previewCompatibilityReport,
-} from "../diagnostics/compatibility.js";
+} from "../diagnostics/support-report.js";
 import { DiagnosticJournal } from "../diagnostics/journal.js";
-import { diagnosticLogObserver } from "../diagnostics/log-observer.js";
 import { DIAGNOSTIC_STAGES } from "../diagnostics/contracts.js";
 import { chooseInstallationPort, parsePort } from "../port.js";
 import { WebhookRegistry } from "../registry.js";
@@ -113,11 +112,11 @@ export async function serve(arguments_: string[]): Promise<void> {
   const port = parsePort(values.port ?? String(DEFAULT_PORT));
   const directory = values["data-directory"] ?? dataDirectory();
   const journal = new DiagnosticJournal(diagnosticJournalPath(directory));
-  const logger = new Logger(process.stderr, [diagnosticLogObserver(journal)]);
+  const logger = new Logger();
   const store = new WebhookRegistry(databasePath(directory));
-  const appLayer = DeliveryLive(logger).pipe(
-    Layer.provideMerge(makeCodexTransportLive(logger)),
-    Layer.provide(TransportProviderLive(logger)),
+  const appLayer = DeliveryLive(logger, journal).pipe(
+    Layer.provideMerge(makeCodexTransportLive(logger, journal)),
+    Layer.provide(TransportProviderLive(logger, journal)),
   );
   const runtime = ManagedRuntime.make(appLayer);
   const server = await listen({
@@ -159,6 +158,7 @@ export async function doctor(arguments_: string[]): Promise<void> {
       json: { type: "boolean", default: false },
       "compatibility-report": { type: "boolean", default: false },
       consent: { type: "boolean", default: false },
+      "data-directory": { type: "string" },
     },
   });
   if (values.consent && !values["compatibility-report"]) {
@@ -176,9 +176,10 @@ export async function doctor(arguments_: string[]): Promise<void> {
   ];
   const recordedNode =
     manifest == null ? null : nodeVersion(manifest.nodePath);
-  const journal = new DiagnosticJournal(diagnosticJournalPath());
+  const directory = values["data-directory"] ?? dataDirectory();
+  const journal = new DiagnosticJournal(diagnosticJournalPath(directory));
   const journalSnapshot = journal.read();
-  const diagnosticFailures = journal.failures();
+  const diagnosticFailures = journal.failures(journalSnapshot);
   const report = {
     ok:
       manifest != null &&
@@ -209,32 +210,34 @@ export async function doctor(arguments_: string[]): Promise<void> {
       boundedBy: journalSnapshot.boundedBy,
       failures: diagnosticFailures,
     },
-    dataDirectory: dataDirectory(),
+    dataDirectory: directory,
   };
-  const compatibilityPayload = buildCompatibilityReport({
-    version: VERSION,
-    platform: process.platform,
-    architecture: process.arch,
-    nodeVersion: process.version,
-    installation: {
-      manifest: manifest != null,
-      runtime: report.installation.runtime,
-      skill: report.installation.skill,
-      service: report.installation.service,
-      nodeCompatible: recordedNode != null,
-    },
-    daemonState: daemon.state,
-    desktopIpcAvailable: report.codex.desktopIpcAvailable,
-    candidates: runtimes.map((runtime) => runtime.id),
-    journal: journalSnapshot,
-    failures: diagnosticFailures,
-  });
   if (values["compatibility-report"]) {
+    const compatibilityPayload = buildCompatibilityReport({
+      version: VERSION,
+      platform: process.platform,
+      architecture: process.arch,
+      nodeVersion: process.version,
+      installation: {
+        manifest: manifest != null,
+        runtime: report.installation.runtime,
+        skill: report.installation.skill,
+        service: report.installation.service,
+        nodeCompatible: recordedNode != null,
+      },
+      daemonState: daemon.state,
+      desktopIpcAvailable: report.codex.desktopIpcAvailable,
+      candidates: runtimes.map((runtime) => runtime.id),
+      journal: journalSnapshot,
+      failures: diagnosticFailures,
+    });
     const preview = previewCompatibilityReport(compatibilityPayload);
     const output = values.consent
-      ? authorizeCompatibilityReport(preview, true)
+      ? authorizeCompatibilityReport(preview)
       : preview;
-    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+    process.stdout.write(
+      `${JSON.stringify(output, null, values.json ? undefined : 2)}\n`,
+    );
     if (!report.ok) process.exitCode = 1;
     return;
   }
@@ -264,9 +267,6 @@ export async function doctor(arguments_: string[]): Promise<void> {
         );
       }
     }
-    process.stdout.write(
-      `diagnostic stages: ${DIAGNOSTIC_STAGES.join(", ")}\n`,
-    );
     process.stdout.write(
       "compatibility report: codexhook doctor --compatibility-report (local preview; nothing is sent)\n",
     );

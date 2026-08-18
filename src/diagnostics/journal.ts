@@ -3,24 +3,35 @@ import {
   chmodSync,
   existsSync,
   readFileSync,
+  renameSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
 import { ensureDataDirectory } from "../config.js";
 import {
-  diagnosticCode,
-  type DiagnosticEvent,
-  type DiagnosticFailureSummary,
-  type DiagnosticObserver,
-  type DiagnosticRecord,
   isDeliveryTruth,
   isDiagnosticOutcome,
   isDiagnosticStage,
+  isTransportId,
+  journalCode,
+  type DiagnosticEvent,
+  type DiagnosticFailureSummary,
+  type DiagnosticObserver,
+  type DiagnosticOutcome,
+  type DiagnosticRecord,
 } from "./contracts.js";
 
 const DEFAULT_MAX_BYTES = 256 * 1024;
 const DEFAULT_MAX_ENTRIES = 512;
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/;
+const FAILURE_OUTCOMES = new Set<DiagnosticOutcome>([
+  "failed",
+  "ambiguous",
+  "unavailable",
+  "rejected",
+]);
+export const JOURNAL_FAILURE_LIMIT = 12;
 
 export interface DiagnosticJournalOptions {
   readonly maxBytes?: number;
@@ -40,12 +51,13 @@ function parseRecord(value: unknown): DiagnosticRecord | null {
   if (
     record.schemaVersion !== 1 ||
     typeof record.timestamp !== "string" ||
+    !ISO_TIMESTAMP.test(record.timestamp) ||
     !isDiagnosticStage(record.stage) ||
     !isDiagnosticOutcome(record.outcome)
   ) return null;
-  const transport = ["desktop", "daemon", "app-bundled", "cli"].includes(
-    String(record.transport),
-  ) ? record.transport as DiagnosticRecord["transport"] : undefined;
+  const transport = isTransportId(record.transport)
+    ? record.transport
+    : undefined;
   const deliveryTruth = isDeliveryTruth(record.deliveryTruth)
     ? record.deliveryTruth
     : undefined;
@@ -54,13 +66,15 @@ function parseRecord(value: unknown): DiagnosticRecord | null {
     timestamp: record.timestamp,
     stage: record.stage,
     outcome: record.outcome,
-    code: diagnosticCode(record.code),
+    code: journalCode(record.code),
     ...(transport == null ? {} : { transport }),
     ...(deliveryTruth == null ? {} : { deliveryTruth }),
   };
 }
 
 export class DiagnosticJournal implements DiagnosticObserver {
+  private directoryReady = false;
+  private entriesOnDisk: number | null = null;
   private readonly maxBytes: number;
   private readonly maxEntries: number;
   private readonly now: () => Date;
@@ -76,13 +90,16 @@ export class DiagnosticJournal implements DiagnosticObserver {
 
   record(event: DiagnosticEvent): void {
     try {
-      ensureDataDirectory(path.dirname(this.filePath));
+      this.ensureDirectory();
+      if (this.entriesOnDisk == null) {
+        this.entriesOnDisk = this.lineCount();
+      }
       const value: DiagnosticRecord = {
         schemaVersion: 1,
         timestamp: this.now().toISOString(),
         stage: event.stage,
         outcome: event.outcome,
-        code: diagnosticCode(event.code),
+        code: journalCode(event.code),
         ...(event.transport == null ? {} : { transport: event.transport }),
         ...(event.deliveryTruth == null
           ? {}
@@ -92,6 +109,7 @@ export class DiagnosticJournal implements DiagnosticObserver {
         encoding: "utf8",
         mode: 0o600,
       });
+      this.entriesOnDisk += 1;
       this.enforceBounds();
     } catch {
       // Diagnostics are best effort and must never affect delivery.
@@ -99,6 +117,80 @@ export class DiagnosticJournal implements DiagnosticObserver {
   }
 
   read(): DiagnosticJournalSnapshot {
+    const snapshot = this.readAll();
+    return {
+      ...snapshot,
+      records: snapshot.records.slice(-this.maxEntries),
+    };
+  }
+
+  failures(
+    snapshot = this.read(),
+    limit = JOURNAL_FAILURE_LIMIT,
+  ): ReadonlyArray<DiagnosticFailureSummary> {
+    const summaries = new Map<string, DiagnosticFailureSummary>();
+    for (const record of snapshot.records) {
+      if (!FAILURE_OUTCOMES.has(record.outcome)) continue;
+      const key = `${record.stage}:${record.code}:${record.outcome}:${record.deliveryTruth ?? ""}`;
+      const previous = summaries.get(key);
+      summaries.set(key, {
+        stage: record.stage,
+        code: record.code,
+        outcome: record.outcome,
+        count: (previous?.count ?? 0) + 1,
+        lastSeenAt: record.timestamp,
+        ...(record.deliveryTruth == null
+          ? {}
+          : { deliveryTruth: record.deliveryTruth }),
+      });
+    }
+    return [...summaries.values()]
+      .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
+      .slice(0, Math.max(0, limit));
+  }
+
+  private ensureDirectory(): void {
+    if (this.directoryReady) return;
+    ensureDataDirectory(path.dirname(this.filePath));
+    this.directoryReady = true;
+  }
+
+  private enforceBounds(): void {
+    if (
+      (this.entriesOnDisk ?? 0) <= this.maxEntries &&
+      statSync(this.filePath).size <= this.maxBytes
+    ) return;
+    const records = this.readAll().records;
+    const kept: string[] = [];
+    let bytes = 0;
+    for (const record of records.slice().reverse()) {
+      const line = `${JSON.stringify(record)}\n`;
+      const lineBytes = Buffer.byteLength(line);
+      if (kept.length >= this.maxEntries || bytes + lineBytes > this.maxBytes) {
+        break;
+      }
+      kept.push(line);
+      bytes += lineBytes;
+    }
+    const temporary = `${this.filePath}.${process.pid}.tmp`;
+    writeFileSync(temporary, kept.reverse().join(""), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    renameSync(temporary, this.filePath);
+    if (process.platform !== "win32") chmodSync(this.filePath, 0o600);
+    this.entriesOnDisk = kept.length;
+  }
+
+  private lineCount(): number {
+    if (!existsSync(this.filePath)) return 0;
+    return readFileSync(this.filePath, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .length;
+  }
+
+  private readAll(): DiagnosticJournalSnapshot {
     if (!existsSync(this.filePath)) {
       return {
         records: [],
@@ -119,57 +211,9 @@ export class DiagnosticJournal implements DiagnosticObserver {
       }
     }
     return {
-      records: records.slice(-this.maxEntries),
+      records,
       invalidLines,
       boundedBy: { bytes: this.maxBytes, entries: this.maxEntries },
     };
-  }
-
-  failures(limit = 12): ReadonlyArray<DiagnosticFailureSummary> {
-    const summaries = new Map<string, DiagnosticFailureSummary>();
-    for (const record of this.read().records) {
-      if (!["failed", "ambiguous", "unavailable", "rejected"].includes(
-        record.outcome,
-      )) continue;
-      const key = `${record.stage}:${record.code}:${record.outcome}:${record.deliveryTruth ?? ""}`;
-      const previous = summaries.get(key);
-      summaries.set(key, {
-        stage: record.stage,
-        code: record.code,
-        outcome: record.outcome,
-        count: (previous?.count ?? 0) + 1,
-        lastSeenAt: record.timestamp,
-        ...(record.deliveryTruth == null
-          ? {}
-          : { deliveryTruth: record.deliveryTruth }),
-      });
-    }
-    return [...summaries.values()]
-      .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
-      .slice(0, Math.max(0, limit));
-  }
-
-  private enforceBounds(): void {
-    if (
-      statSync(this.filePath).size <= this.maxBytes &&
-      this.read().records.length <= this.maxEntries
-    ) return;
-    const records = this.read().records;
-    const kept: string[] = [];
-    let bytes = 0;
-    for (const record of records.slice().reverse()) {
-      const line = `${JSON.stringify(record)}\n`;
-      const lineBytes = Buffer.byteLength(line);
-      if (kept.length >= this.maxEntries || bytes + lineBytes > this.maxBytes) {
-        break;
-      }
-      kept.push(line);
-      bytes += lineBytes;
-    }
-    writeFileSync(this.filePath, kept.reverse().join(""), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-    if (process.platform !== "win32") chmodSync(this.filePath, 0o600);
   }
 }

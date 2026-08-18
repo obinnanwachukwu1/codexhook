@@ -28,7 +28,10 @@ import {
   type RpcTicket,
 } from "./rpc.js";
 import type { TransportSpec } from "./spec.js";
-import { Logger } from "../logger.js";
+import {
+  recordDiagnostic,
+  type DiagnosticObserver,
+} from "../diagnostics/contracts.js";
 
 const IPC_VERSION = {
   start: 1,
@@ -86,7 +89,7 @@ function safeIpcRejection(error: string | undefined): boolean {
 function makePeer(
   spec: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
   client: DesktopIpcClient,
-  logger: Logger,
+  diagnostics?: DiagnosticObserver,
 ): AppServerPeer {
   const states = new Map<string, DesktopThreadState>();
   client.onBroadcast((message) => {
@@ -109,14 +112,22 @@ function makePeer(
     let state = states.get(threadId);
     if (state == null) {
       state = new DesktopThreadState(threadId, (event) => {
-        const eventName = event === "revision_gap"
-          ? "desktop_state_revision_gap"
-          : event === "resynchronized"
-            ? "desktop_state_resynchronized"
+        recordDiagnostic(diagnostics, {
+          stage: "state_synchronization",
+          outcome: event === "revision_gap"
+            ? "failed"
             : event === "reordered_patch"
-              ? "desktop_state_reordered_patch"
-              : "desktop_state_stale_active_turn";
-        logger.warn(eventName, { transport: "desktop" });
+              ? "deferred"
+              : "recovered",
+          code: event === "revision_gap"
+            ? "state.revision_gap"
+            : event === "resynchronized"
+              ? "state.resynchronized"
+              : event === "reordered_patch"
+                ? "state.reordered_patch"
+                : "state.stale_active_turn",
+          transport: "desktop",
+        });
       });
       states.set(threadId, state);
       client.broadcast(
@@ -307,7 +318,7 @@ function makePeer(
 
 export function connectDesktop(
   spec: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
-  logger = new Logger(),
+  diagnostics?: DiagnosticObserver,
 ): Effect.Effect<
   AppServerPeer,
   TransportUnavailable | TransportIncompatible,
@@ -362,5 +373,5 @@ export function connectDesktop(
       },
     }),
     (client) => Effect.sync(() => client.close()),
-  ).pipe(Effect.map((client) => makePeer(spec, client, logger)));
+  ).pipe(Effect.map((client) => makePeer(spec, client, diagnostics)));
 }

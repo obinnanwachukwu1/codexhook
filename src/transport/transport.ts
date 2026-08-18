@@ -7,6 +7,7 @@ import {
   Schema,
 } from "effect";
 import { Logger } from "../logger.js";
+import type { DiagnosticObserver } from "../diagnostics/contracts.js";
 import type {
   DeliveryId,
   ThreadId,
@@ -182,6 +183,7 @@ function resume(
       Effect.mapError((error) => {
         if (error._tag === "RpcErrorReply") {
           return new ThreadUnavailable({
+            transport: spec.id,
             threadId,
             detail: error.message,
           });
@@ -260,6 +262,7 @@ function runTurn(
         Effect.mapError((error) =>
           error._tag === "RpcTimeout"
             ? new ThreadBusy({
+                transport: spec.id,
                 threadId: request.threadId,
                 heldTurnId: Option.some(heldTurnId),
                 waitedMillis: millis(request.idleTimeout),
@@ -328,6 +331,7 @@ function runTurn(
 
 export function makeCodexTransportLive(
   logger = new Logger(),
+  diagnostics?: DiagnosticObserver,
 ): Layer.Layer<
   CodexTransport,
   never,
@@ -368,6 +372,7 @@ export function makeCodexTransportLive(
                 },
               },
               logger,
+              diagnostics,
             ),
           ),
         );

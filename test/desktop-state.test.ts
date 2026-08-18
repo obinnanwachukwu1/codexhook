@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DesktopThreadState } from "../src/transport/desktop-state.js";
-import { desktopStateChange } from "./fixtures/adversarial.js";
+import { desktopStateChange } from "./fixtures/desktop-state.js";
 
 const threadId = "thread-1";
 
@@ -155,6 +155,30 @@ test("applies reordered entity patches without inventing an active turn", () => 
   }));
   assert.equal(state.turn("turn-reordered")?.status, "completed");
   assert.deepEqual(diagnostics, ["reordered_patch"]);
+});
+
+test("a repeated turn association preserves a completed turn", () => {
+  const state = new DesktopThreadState(threadId);
+  state.apply(desktopStateChange({
+    type: "snapshot",
+    revision: 1,
+    conversationState: {
+      turnHistory: { history: { entitiesByKey: {
+        known: { turnId: "turn-complete", status: "completed" },
+      } } },
+    },
+  }));
+  state.apply(desktopStateChange({
+    type: "patches",
+    baseRevision: 1,
+    revision: 2,
+    patches: [{
+      op: "replace",
+      path: ["turnHistory", "history", "entitiesByKey", "known", "turnId"],
+      value: "turn-complete",
+    }],
+  }));
+  assert.equal(state.turn("turn-complete")?.status, "completed");
 });
 
 test("fresh snapshots clear stale active turns and complete resynchronization", () => {

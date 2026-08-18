@@ -1,11 +1,20 @@
-import { createHash } from "node:crypto";
-import type { DiagnosticJournalSnapshot } from "./journal.js";
+import {
+  JOURNAL_FAILURE_LIMIT,
+  type DiagnosticJournalSnapshot,
+} from "./journal.js";
 import type {
   DeliveryTruth,
-  DiagnosticCode,
   DiagnosticFailureSummary,
   DiagnosticStage,
+  JournalCode,
 } from "./contracts.js";
+import { isTransportId } from "./contracts.js";
+import type { TransportId } from "../types.js";
+
+const DISCLOSURE = [
+  "No task, turn, delivery, hook, path, message, or secret identifiers are included.",
+  "Nothing is transmitted; this command only previews a local payload.",
+] as const;
 
 export interface CompatibilityReportInput {
   readonly version: string;
@@ -38,7 +47,7 @@ export interface CompatibilityReportPayload {
   readonly daemonState: "running" | "stopped" | "unreachable" | "unknown";
   readonly codex: {
     readonly desktopIpcAvailable: boolean;
-    readonly candidates: ReadonlyArray<"desktop" | "daemon" | "app-bundled" | "cli">;
+    readonly candidates: ReadonlyArray<TransportId>;
   };
   readonly diagnostics: {
     readonly entries: number;
@@ -47,7 +56,7 @@ export interface CompatibilityReportPayload {
     readonly truthCounts: Partial<Record<DeliveryTruth, number>>;
     readonly recentFailures: ReadonlyArray<{
       readonly stage: DiagnosticStage;
-      readonly code: DiagnosticCode;
+      readonly code: JournalCode;
       readonly count: number;
     }>;
   };
@@ -55,12 +64,8 @@ export interface CompatibilityReportPayload {
 
 export interface CompatibilityReportPreview {
   readonly payload: CompatibilityReportPayload;
-  readonly fingerprint: string;
   readonly consentRequired: true;
-  readonly disclosure: readonly [
-    "No task, turn, delivery, hook, path, message, or secret identifiers are included.",
-    "Nothing is transmitted; this command only previews a local payload.",
-  ];
+  readonly disclosure: typeof DISCLOSURE;
 }
 
 export interface AuthorizedCompatibilityReport {
@@ -68,7 +73,6 @@ export interface AuthorizedCompatibilityReport {
   readonly consent: {
     readonly approved: true;
     readonly source: "doctor-cli";
-    readonly fingerprint: string;
   };
 }
 
@@ -91,8 +95,7 @@ export function buildCompatibilityReport(
     }
   }
   const candidates = input.candidates.filter(
-    (candidate): candidate is "desktop" | "daemon" | "app-bundled" | "cli" =>
-      ["desktop", "daemon", "app-bundled", "cli"].includes(candidate),
+    (candidate): candidate is TransportId => isTransportId(candidate),
   );
   const match = /^v?(\d+)/.exec(input.nodeVersion);
   return {
@@ -118,11 +121,13 @@ export function buildCompatibilityReport(
       invalidEntries: input.journal.invalidLines,
       stageCounts,
       truthCounts,
-      recentFailures: input.failures.slice(0, 12).map((failure) => ({
-        stage: failure.stage,
-        code: failure.code,
-        count: failure.count,
-      })),
+      recentFailures: input.failures
+        .slice(0, JOURNAL_FAILURE_LIMIT)
+        .map((failure) => ({
+          stage: failure.stage,
+          code: failure.code,
+          count: failure.count,
+        })),
     },
   };
 }
@@ -130,31 +135,21 @@ export function buildCompatibilityReport(
 export function previewCompatibilityReport(
   payload: CompatibilityReportPayload,
 ): CompatibilityReportPreview {
-  const fingerprint = createHash("sha256")
-    .update(JSON.stringify(payload))
-    .digest("hex");
   return {
     payload,
-    fingerprint,
     consentRequired: true,
-    disclosure: [
-      "No task, turn, delivery, hook, path, message, or secret identifiers are included.",
-      "Nothing is transmitted; this command only previews a local payload.",
-    ],
+    disclosure: DISCLOSURE,
   };
 }
 
 export function authorizeCompatibilityReport(
   preview: CompatibilityReportPreview,
-  approved: boolean,
 ): AuthorizedCompatibilityReport {
-  if (!approved) throw new Error("compatibility report consent is required");
   return {
     payload: preview.payload,
     consent: {
       approved: true,
       source: "doctor-cli",
-      fingerprint: preview.fingerprint,
     },
   };
 }

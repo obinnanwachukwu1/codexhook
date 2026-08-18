@@ -10,13 +10,25 @@ export type DeliveryId = string & Brand.Brand<"DeliveryId">;
 export const DeliveryId = Brand.nominal<DeliveryId>();
 
 export type DeliveryMode = "queue" | "steer";
-export type TransportId = "desktop" | "daemon" | "app-bundled" | "cli";
+export const TRANSPORT_IDS = [
+  "desktop",
+  "daemon",
+  "app-bundled",
+  "cli",
+] as const;
+export type TransportId = (typeof TRANSPORT_IDS)[number];
 export type DeliveryTruth =
   | "confirmed_desktop"
   | "confirmed_app_server"
   | "ambiguous"
   | "unavailable"
   | "rejected";
+
+export function turnOutcomeTruth(outcome: TurnOutcome): DeliveryTruth {
+  return outcome.transport === "desktop"
+    ? "confirmed_desktop"
+    : "confirmed_app_server";
+}
 
 export interface WebhookRecord {
   id: string;

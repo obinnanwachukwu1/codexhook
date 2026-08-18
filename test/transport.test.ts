@@ -28,6 +28,12 @@ test("falls back only when turn bytes were provably not written", async () => {
   assert.equal((outcome as { transport: string }).transport, "cli");
   assert.equal(recorder.maxLive, 1);
   assert.equal(JSON.stringify(recorder.logs).includes("hello"), false);
+  assert.equal(
+    recorder.diagnostics.some((event) =>
+      event.code === "fallback.attempted" && event.outcome === "started"
+    ),
+    true,
+  );
 });
 
 test("does not fall back after an ambiguous write", async () => {
@@ -50,6 +56,16 @@ test("does not fall back after an ambiguous write", async () => {
     { transport: "app-bundled", method: "turn/start" },
   ]);
   assert.equal(recorder.maxLive, 1);
+  assert.equal(
+    recorder.diagnostics.some((event) =>
+      event.code === "submission.ambiguous" && event.outcome === "ambiguous"
+    ),
+    true,
+  );
+  assert.equal(
+    recorder.diagnostics.some((event) => event.stage === "fallback"),
+    false,
+  );
 });
 
 test("reconciles a daemon fallback through Desktop", async () => {
