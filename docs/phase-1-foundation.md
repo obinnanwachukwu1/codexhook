@@ -62,7 +62,7 @@ stable seams before the runtime cutover.
 | Desktop IPC | `DesktopProtocol`, `DesktopSession` | Desktop owner implements discovery, compatibility negotiation, following, injection, and observation. It must not add task-list authority. |
 | Routing | `DeliveryCoordinator`, `DeliveryPolicy`, `DeliveryOutcome` | Coordinator owner sequences the two planes and preserves the submission-truth rules above. |
 | Wire evolution | `ProtocolRequirement`, `ProtocolOffer`, `ProtocolCompatibility` | Each protocol adapter declares offers; the coordinator supplies requirements. Missing features remain pre-write incompatibility. |
-| Provenance | `LocalTaskRef`, `TaskProvenance`, `LocalCodexService` | App-server resolves and mints branded references before coordination. |
+| Provenance | `LocalTaskRef`, `LocalCodexService` | App-server resolves and mints branded references with their local origin before coordination. |
 | Observability | `SanitizedDiagnostic`, `DeliveryAttempt` | Each adapter returns safe codes; logging and health output consume only sanitized values. |
 
 ## Integration sequence

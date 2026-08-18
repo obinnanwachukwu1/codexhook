@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   checkProtocolCompatibility,
-  diagnosticSummary,
   mayFallback,
   PHASE_ONE_DELIVERY_POLICY,
   sanitizeDiagnostic,
@@ -10,6 +9,7 @@ import {
   type ProtocolOffer,
   type ProtocolRequirement,
   type RouteSubmissionOutcome,
+  type SanitizedDiagnostic,
 } from "../src/contracts/index.js";
 import {
   DeliveryId,
@@ -45,7 +45,6 @@ test("protocol compatibility reports each incompatible condition", () => {
   const cases: ReadonlyArray<{
     readonly offer: ProtocolOffer;
     readonly reason: string;
-    readonly missingFeatures?: ReadonlyArray<string>;
   }> = [
     {
       offer: { ...compatibleOffer, plane: "app-server" },
@@ -65,7 +64,6 @@ test("protocol compatibility reports each incompatible condition", () => {
         features: ["task-follow", "turn-start"],
       },
       reason: "missing-feature",
-      missingFeatures: ["delivery-id"],
     },
   ];
 
@@ -74,11 +72,6 @@ test("protocol compatibility reports each incompatible condition", () => {
     assert.equal(result.status, "incompatible");
     if (result.status === "incompatible") {
       assert.equal(result.reason, item.reason);
-      if (result.reason === "missing-feature") {
-        assert.deepEqual(result.missingFeatures, item.missingFeatures);
-      } else {
-        assert.equal(item.missingFeatures, undefined);
-      }
     }
   }
 });
@@ -86,7 +79,7 @@ test("protocol compatibility reports each incompatible condition", () => {
 test("only the canonical service can mint a local task reference", () => {
   const untrusted = {
     threadId: ThreadId("thread-1"),
-    provenance: { scope: "local", origin: "cli" },
+    origin: "cli",
   } as const;
   // @ts-expect-error LocalTaskRef carries a private canonical-service brand.
   const local: LocalTaskRef = untrusted;
@@ -161,10 +154,16 @@ test("sanitized diagnostics retain only allowlisted structured fields", () => {
     route: "desktop",
     protocolRevision: 4,
   });
-  assert.equal(
-    diagnosticSummary(diagnostic.code),
-    "Submission may have been written",
-  );
+});
+
+test("only the sanitizer can mint a sanitized diagnostic", () => {
+  const leaky = {
+    code: "internal",
+    token: "secret-token",
+  } as const;
+  // @ts-expect-error SanitizedDiagnostic carries a private sanitizer brand.
+  const diagnostic: SanitizedDiagnostic = leaky;
+  assert.equal(diagnostic.code, "internal");
 });
 
 test("invalid diagnostics degrade to a fixed internal code", () => {
@@ -175,10 +174,21 @@ test("invalid diagnostics degrade to a fixed internal code", () => {
     attempt: -1,
     protocolRevision: 1.5,
   }), { code: "internal" });
-  assert.equal(
-    diagnosticSummary("internal"),
-    "An internal delivery error occurred",
-  );
+  assert.deepEqual(sanitizeDiagnostic({
+    code: "not-allowlisted",
+    stage: "submit-desktop",
+    route: "desktop",
+    protocolRevision: 3,
+  }), {
+    code: "internal",
+    stage: "submit-desktop",
+    route: "desktop",
+    protocolRevision: 3,
+  });
+  assert.deepEqual(sanitizeDiagnostic({
+    code: "timeout",
+    stage: "not-a-stage",
+  }), { code: "timeout" });
 });
 
 test("diagnostic sanitization is safe for production failure shapes", () => {
@@ -204,13 +214,6 @@ test("diagnostic sanitization contains hostile property access", () => {
   const diagnostic = sanitizeDiagnostic(hostile);
   assert.deepEqual(diagnostic, { code: "internal" });
   assert.equal(Object.isFrozen(diagnostic), true);
-});
-
-test("desktop follow failures have a fixed safe summary", () => {
-  assert.equal(
-    diagnosticSummary("desktop-not-following"),
-    "Desktop is not following the target task",
-  );
 });
 
 test("root exports retain legacy and contract services", async () => {

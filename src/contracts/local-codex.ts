@@ -13,15 +13,10 @@ export type TaskOrigin = "desktop" | "cli" | "unknown";
 
 declare const localTaskRefBrand: unique symbol;
 
-export interface TaskProvenance {
-  readonly scope: "local";
-  readonly origin: TaskOrigin;
-}
-
 export interface LocalTaskRef {
   readonly [localTaskRefBrand]: true;
   readonly threadId: ThreadId;
-  readonly provenance: TaskProvenance;
+  readonly origin: TaskOrigin;
 }
 
 export interface LocalTaskSummary extends LocalTaskRef {

@@ -46,8 +46,8 @@ interface ConfirmedDelivery {
 
 /**
  * Confirmed tags identify the route that wrote, not the observing plane.
- * Terminal route and diagnostic fields mirror the final attempt for callers
- * that only need the classified result; `attempts` remains the audit trail.
+ * Ambiguous and Rejected repeat the implicated route; Unavailable omits it
+ * because routes were exhausted. `attempts` remains the audit trail.
  */
 export type DeliveryOutcome =
   | (ConfirmedDelivery & {

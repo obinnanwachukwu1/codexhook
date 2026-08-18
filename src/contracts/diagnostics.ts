@@ -18,7 +18,10 @@ export const DIAGNOSTIC_CODES = [
 
 export type DiagnosticCode = (typeof DIAGNOSTIC_CODES)[number];
 
+declare const sanitizedDiagnosticBrand: unique symbol;
+
 export interface SanitizedDiagnostic {
+  readonly [sanitizedDiagnosticBrand]: true;
   readonly code: DiagnosticCode;
   readonly stage?: DeliveryStage;
   readonly route?: DeliveryRoute;
@@ -26,20 +29,6 @@ export interface SanitizedDiagnostic {
 }
 
 const CODES = new Set<string>(DIAGNOSTIC_CODES);
-const SUMMARIES = {
-  "desktop-unavailable": "Desktop delivery is unavailable",
-  "desktop-incompatible": "Desktop protocol is incompatible",
-  "desktop-not-following": "Desktop is not following the target task",
-  "app-server-unavailable": "Local app-server is unavailable",
-  "app-server-incompatible": "App-server protocol is incompatible",
-  "task-not-local": "Task is outside the local Codex store",
-  "task-not-found": "Task was not found in the local Codex store",
-  "write-ambiguous": "Submission may have been written",
-  "request-rejected": "Submission was explicitly rejected",
-  timeout: "The delivery stage timed out",
-  disconnected: "The local connection closed",
-  internal: "An internal delivery error occurred",
-} as const satisfies Record<DiagnosticCode, string>;
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value != null && typeof value === "object"
@@ -90,12 +79,8 @@ export function sanitizeDiagnostic(value: unknown): SanitizedDiagnostic {
       ...(safeStage == null ? {} : { stage: safeStage }),
       ...(safeRoute == null ? {} : { route: safeRoute }),
       ...(protocolRevision == null ? {} : { protocolRevision }),
-    });
+    }) as SanitizedDiagnostic;
   } catch {
-    return Object.freeze({ code: "internal" });
+    return Object.freeze({ code: "internal" }) as SanitizedDiagnostic;
   }
-}
-
-export function diagnosticSummary(code: DiagnosticCode): string {
-  return SUMMARIES[code];
 }

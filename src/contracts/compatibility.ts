@@ -41,13 +41,8 @@ export type ProtocolCompatibility =
       readonly reason:
         | "wrong-plane"
         | "major-mismatch"
-        | "revision-too-old";
-    }
-  | {
-      readonly status: "incompatible";
-      readonly plane: ProtocolPlane;
-      readonly reason: "missing-feature";
-      readonly missingFeatures: ReadonlyArray<ProtocolFeature>;
+        | "revision-too-old"
+        | "missing-feature";
     };
 
 export type CompatibleProtocol = Extract<
@@ -99,7 +94,6 @@ export function checkProtocolCompatibility(
       status: "incompatible",
       plane: requirement.plane,
       reason: "missing-feature",
-      missingFeatures,
     };
   }
   return {
