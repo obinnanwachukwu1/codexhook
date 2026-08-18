@@ -4,12 +4,14 @@ import {
   Duration,
   Effect,
   FiberId,
+  Option,
   Schema,
   Scope,
 } from "effect";
 import { Logger } from "../logger.js";
 import { TurnId } from "../types.js";
 import {
+  AppServerInfo,
   InitializeResult,
   INITIALIZE_PARAMS,
   type Turn,
@@ -31,6 +33,7 @@ import {
   type WireConnection,
   type WireMessage,
 } from "./rpc.js";
+import { NotificationFanout } from "./notifications.js";
 
 const HANDSHAKE_TIMEOUT = Duration.seconds(15);
 const MAX_TURN_SLOTS = 1_000;
@@ -38,7 +41,6 @@ const MAX_TURN_SLOTS = 1_000;
 function durationMillis(input: Duration.DurationInput): number {
   return Duration.toMillis(Duration.decode(input));
 }
-
 
 export function connectWirePeer(
   spec: TransportSpec,
@@ -56,12 +58,13 @@ export function connectWirePeer(
       string,
       Deferred.Deferred<unknown, RpcErrorReply | RpcDisconnected>
     >();
+    const notifications = new NotificationFanout(logger);
+    let serverInfo: typeof AppServerInfo.Type | null = null;
     const turns = new Map<
       string,
       Deferred.Deferred<Turn, RpcDisconnected>
     >();
     const disconnected = yield* Deferred.make<never, RpcDisconnected>();
-
     const turnSlot = (
       id: string,
     ): Deferred.Deferred<Turn, RpcDisconnected> => {
@@ -76,11 +79,11 @@ export function connectWirePeer(
       }
       return created;
     };
-
     const down = (detail: string): Effect.Effect<void> =>
       Effect.suspend(() => {
         if (!alive) return Effect.void;
         alive = false;
+        notifications.close();
         const failure = new RpcDisconnected({ detail });
         const pendingWaiters = [...pending.values()];
         const turnWaiters = [...turns.values()];
@@ -103,7 +106,6 @@ export function connectWirePeer(
           ),
         );
       });
-
     const writeSerialized = (
       serialized: string,
     ): Effect.Effect<void, RpcNotWritten | RpcWriteAmbiguous> =>
@@ -150,7 +152,6 @@ export function connectWirePeer(
         );
       },
       );
-
     const writeWire = (
       message: WireMessage,
     ): Effect.Effect<void, RpcNotWritten | RpcWriteAmbiguous> =>
@@ -158,7 +159,6 @@ export function connectWirePeer(
         try: () => `${JSON.stringify(message)}\n`,
         catch: (cause) => new RpcNotWritten({ detail: String(cause) }),
       }).pipe(Effect.flatMap(writeSerialized));
-
     const prepare: AppServerPeer["prepare"] = (method, params) =>
       Effect.suspend(() => {
         if (!alive || !connection.isAlive()) {
@@ -180,7 +180,6 @@ export function connectWirePeer(
           return Effect.fail(new RpcNotWritten({ detail: String(cause) }));
         }
       });
-
     const submit: AppServerPeer["submit"] = (ticket) =>
       writeSerialized(ticket.serialized).pipe(
         Effect.tapError(() =>
@@ -189,7 +188,6 @@ export function connectWirePeer(
           }),
         ),
       );
-
     const reply: AppServerPeer["reply"] = (ticket, schema, timeout) =>
       Deferred.await(ticket.reply).pipe(
         Effect.timeoutFail({
@@ -210,7 +208,6 @@ export function connectWirePeer(
           ),
         ),
       );
-
     const request: AppServerPeer["request"] = (
       method,
       params,
@@ -224,7 +221,6 @@ export function connectWirePeer(
 
     const notify: AppServerPeer["notify"] = (method, params) =>
       writeWire({ method, params });
-
     const respondToServerRequest = (
       id: string | number,
       method: string,
@@ -278,6 +274,12 @@ export function connectWirePeer(
             Effect.catchAll(() => Effect.void),
           );
         }
+        if (message.method != null) {
+          notifications.publish({
+            method: message.method,
+            params: message.params,
+          });
+        }
         if (message.method === "turn/completed") {
           const params = message.params as { turn?: Turn } | undefined;
           if (params?.turn != null) {
@@ -289,7 +291,6 @@ export function connectWirePeer(
         }
         return Effect.void;
       });
-
     const readline = createInterface({ input: connection.input });
     readline.on("line", (line) => {
       Effect.runFork(handleLine(line));
@@ -312,16 +313,19 @@ export function connectWirePeer(
         down(`exited code=${String(code)} signal=${String(signal)}`),
       );
     });
-    yield* Effect.addFinalizer(() =>
-      Effect.sync(() => {
-        alive = false;
-        readline.close();
-      }),
-    );
-
+    yield* Effect.addFinalizer(() => Effect.sync(() => {
+      alive = false;
+      notifications.close();
+      readline.close();
+    }));
     const peer: AppServerPeer = {
       spec,
+      get serverInfo() {
+        return serverInfo;
+      },
       isAlive: Effect.sync(() => alive && connection.isAlive()),
+      onNotification: (listener, onClose = () => undefined) =>
+        notifications.subscribe(listener, onClose),
       notify,
       prepare,
       submit,
@@ -342,7 +346,7 @@ export function connectWirePeer(
         ),
     };
 
-    yield* peer
+    const initialized = yield* peer
       .request(
         "initialize",
         INITIALIZE_PARAMS,
@@ -378,6 +382,9 @@ export function connectWirePeer(
           });
         }),
       );
+    serverInfo = Option.getOrNull(
+      Schema.decodeUnknownOption(AppServerInfo)(initialized),
+    );
     yield* peer.notify("initialized", {}).pipe(
       Effect.mapError(
         (error) =>
