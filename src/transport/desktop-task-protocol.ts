@@ -56,7 +56,11 @@ export interface DesktopCommand {
 }
 
 export type DesktopCommandReply =
-  | { readonly _tag: "Accepted"; readonly result: unknown }
+  | {
+      readonly _tag: "Accepted";
+      readonly result: unknown;
+      readonly turnId: string | null;
+    }
   | {
       readonly _tag: "Rejected";
       readonly reason: string;
@@ -121,7 +125,7 @@ function readChange(
         _tag: "Snapshot",
         revision: readRevision(change.revision),
         entities: snapshotEntities(change.conversationState),
-        deliveryIds: deliveryIds(change.conversationState),
+        deliveryIds: deliveryIds(snapshotEntityValues(change.conversationState)),
       },
     };
   }
@@ -134,9 +138,7 @@ function readChange(
       baseRevision: readRevision(change.baseRevision),
       revision: readRevision(change.revision),
       deltas: patches.flatMap(readDelta),
-      deliveryIds: patches.flatMap((patch) =>
-        deliveryIds(record(patch)?.value)
-      ),
+      deliveryIds: patches.flatMap(patchDeliveryIds),
     },
   };
 }
@@ -212,7 +214,11 @@ export class DesktopIpcProtocol implements DesktopTaskProtocol {
     const outer = reply.result as
       | { readonly result?: unknown }
       | undefined;
-    return { _tag: "Accepted", result: outer?.result };
+    return {
+      _tag: "Accepted",
+      result: outer?.result,
+      turnId: nestedTurnId(outer?.result),
+    };
   }
 
   onChange(
@@ -253,12 +259,16 @@ function commandParams(command: DesktopCommand): unknown {
 }
 
 function snapshotEntities(value: unknown): ReadonlyArray<DesktopTurnEntity> {
-  const history = record(record(record(value)?.turnHistory)?.history);
-  const entities = record(history?.entitiesByKey) ?? {};
+  const entities = snapshotEntityValues(value);
   return Object.entries(entities).flatMap(([key, entity]) => {
     const turn = readTurn(entity);
     return turn == null ? [] : [{ key, turn }];
   });
+}
+
+function snapshotEntityValues(value: unknown): Record<string, unknown> {
+  const history = record(record(record(value)?.turnHistory)?.history);
+  return record(history?.entitiesByKey) ?? {};
 }
 
 function readDelta(value: unknown): ReadonlyArray<DesktopTurnDelta> {
@@ -298,7 +308,7 @@ function readTurn(value: unknown): Turn | null {
 function deliveryIds(value: unknown): ReadonlyArray<string> {
   const found = new Set<string>();
   const pending: unknown[] = [value];
-  for (let visited = 0; pending.length > 0 && visited < 10_000; visited += 1) {
+  while (pending.length > 0) {
     const next = pending.pop();
     if (next == null || typeof next !== "object") continue;
     if (Array.isArray(next)) {
@@ -314,6 +324,30 @@ function deliveryIds(value: unknown): ReadonlyArray<string> {
     }
   }
   return [...found];
+}
+
+function patchDeliveryIds(value: unknown): ReadonlyArray<string> {
+  const patch = record(value);
+  if (patch == null) return [];
+  const path = Array.isArray(patch.path) ? patch.path : [];
+  const direct = path.at(-1) === "clientUserMessageId" &&
+      typeof patch.value === "string"
+    ? [patch.value]
+    : [];
+  return [...direct, ...deliveryIds(patch.value)];
+}
+
+function nestedTurnId(value: unknown, depth = 0): string | null {
+  if (depth > 32 || value == null || typeof value !== "object") return null;
+  const source = value as Record<string, unknown>;
+  if (typeof source.turnId === "string") return source.turnId;
+  const turn = record(source.turn);
+  if (typeof turn?.id === "string") return turn.id;
+  for (const child of Object.values(source)) {
+    const found = nestedTurnId(child, depth + 1);
+    if (found != null) return found;
+  }
+  return null;
 }
 
 function record(value: unknown): Record<string, unknown> | null {

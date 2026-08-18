@@ -179,7 +179,7 @@ function fakePeer(
           : {}) as A,
       );
     },
-    awaitTurn: (turnId) =>
+    awaitTurn: (_threadId, turnId) =>
       Effect.sync(() => {
         if (turnId === "turn-active") {
           recorder.writes.push({

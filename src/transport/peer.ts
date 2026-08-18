@@ -327,7 +327,7 @@ export function connectWirePeer(
       submit,
       reply,
       request,
-      awaitTurn: (turnId, timeout) =>
+      awaitTurn: (_threadId, turnId, timeout) =>
         Deferred.await(turnSlot(turnId)).pipe(
           Effect.timeoutFail({
             duration: timeout,

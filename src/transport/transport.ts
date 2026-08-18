@@ -256,7 +256,11 @@ function runTurn(
     if (Option.isSome(active)) {
       const heldTurnId = makeTurnId(active.value.id);
       setStage("await");
-      yield* peer.awaitTurn(heldTurnId, request.idleTimeout).pipe(
+      yield* peer.awaitTurn(
+        request.threadId,
+        heldTurnId,
+        request.idleTimeout,
+      ).pipe(
         Effect.mapError((error) =>
           error._tag === "RpcTimeout"
             ? new ThreadBusy({
@@ -289,7 +293,7 @@ function runTurn(
     );
     setStage("await");
     const completed = yield* peer
-      .awaitTurn(started.turnId, request.turnTimeout)
+      .awaitTurn(request.threadId, started.turnId, request.turnTimeout)
       .pipe(
         Effect.mapError((error) =>
           error._tag === "RpcTimeout"

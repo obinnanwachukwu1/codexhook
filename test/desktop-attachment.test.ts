@@ -6,7 +6,7 @@ import type {
   DesktopCommand,
   DesktopCommandReply,
   DesktopTaskProtocol,
-} from "../src/transport/desktop-protocol.js";
+} from "../src/transport/desktop-task-protocol.js";
 
 type ChangeListener = (threadId: string, change: DesktopTaskChange) => void;
 
@@ -125,7 +125,11 @@ test("confirms a start only after fenced Desktop state observes it", async () =>
   protocol.setSnapshot("thread-1", 1);
   protocol.injectBehavior = async () => {
     protocol.emit("thread-1", startPatch(1, "turn-1"));
-    return { _tag: "Accepted", result: { turn: { id: "turn-1" } } };
+    return {
+      _tag: "Accepted",
+      result: { turn: { id: "turn-1" } },
+      turnId: "turn-1",
+    };
   };
   const attachment = new DesktopAttachment(
     async () => protocol,
@@ -152,7 +156,11 @@ test("serializes commands per task and rejects a racing second start", async () 
     enter();
     await gate;
     protocol.emit("thread-1", startPatch(1, "turn-1"));
-    return { _tag: "Accepted", result: { turnId: "turn-1" } };
+    return {
+      _tag: "Accepted",
+      result: { turnId: "turn-1" },
+      turnId: "turn-1",
+    };
   };
   const attachment = new DesktopAttachment(async () => protocol, protocol);
 
@@ -201,7 +209,7 @@ test("proves steer by delivery identity and interrupt by terminal state", async 
       }] : [],
       deliveryIds: command.kind === "steer" ? ["delivery-2"] : [],
     });
-    return { _tag: "Accepted", result: {} };
+    return { _tag: "Accepted", result: {}, turnId: null };
   };
   const attachment = new DesktopAttachment(async () => protocol, protocol);
   const steered = await attachment.inject({
@@ -236,7 +244,7 @@ test("does not confirm steer from an unrelated revision", async () => {
       deltas: [],
       deliveryIds: [],
     });
-    return { _tag: "Accepted", result: {} };
+    return { _tag: "Accepted", result: {}, turnId: null };
   };
   const attachment = new DesktopAttachment(
     async () => protocol,
@@ -306,6 +314,29 @@ test("retries history after a transient resync failure", async () => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(protocol.historyRequests.length, 2);
   assert.equal(attachment.state("thread-1").revision, 8);
+});
+
+test("re-follows after history completes without a replacement snapshot", async () => {
+  const protocol = new FakeDesktopProtocol();
+  protocol.setSnapshot("thread-1", 2);
+  const attachment = new DesktopAttachment(
+    async () => protocol,
+    protocol,
+    { followTimeoutMs: 5 },
+  );
+  await attachment.resume("thread-1");
+  protocol.emit("thread-1", {
+    _tag: "Patches",
+    baseRevision: 6,
+    revision: 7,
+    deltas: [],
+    deliveryIds: [],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  await assert.rejects(attachment.resume("thread-1"), /timed out/);
+  assert.deepEqual(await attachment.resume("thread-1"), []);
+  assert.deepEqual(protocol.follows, ["thread-1", "thread-1"]);
 });
 
 test("reconnects, restores subscriptions, and ignores stale events", async () => {

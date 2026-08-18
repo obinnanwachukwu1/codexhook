@@ -13,7 +13,7 @@ import {
 import {
   DesktopIpcConnectError,
 } from "./desktop-ipc-client.js";
-import { DesktopIpcProtocol } from "./desktop-protocol.js";
+import { DesktopIpcProtocol } from "./desktop-task-protocol.js";
 import {
   TransportIncompatible,
   TransportUnavailable,
@@ -156,8 +156,9 @@ function makePeer(
     submit,
     reply,
     request,
-    awaitTurn: (turnId, timeout) => Effect.tryPromise({
+    awaitTurn: (threadId, turnId, timeout) => Effect.tryPromise({
         try: () => attachment.awaitTurn(
+          threadId,
           turnId,
           durationMillis(timeout),
         ),

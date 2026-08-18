@@ -142,8 +142,15 @@ test("ignores stale revisions and events from a prior connection", () => {
     deltas: [],
     deliveryIds: [],
   }, 7), "ignored");
+  assert.equal(state.apply(snapshot(9, {
+    stale: { turnId: "stale", status: "completed", error: null },
+  }), 7), "ignored");
   assert.equal(state.apply(snapshot(11, {
-    stale: { turnId: "stale", status: "completed" },
+    priorGeneration: {
+      turnId: "prior-generation",
+      status: "completed",
+      error: null,
+    },
   }), 6), "ignored");
   assert.equal(state.revision, 10);
   assert.equal(state.turn("stale"), undefined);

@@ -1,5 +1,5 @@
 import { Data, Deferred, Duration, Effect, Schema } from "effect";
-import type { TurnId } from "../types.js";
+import type { ThreadId, TurnId } from "../types.js";
 import type { Turn } from "./protocol.js";
 import type { TransportSpec } from "./spec.js";
 
@@ -79,6 +79,7 @@ export interface AppServerPeer {
     | RpcMalformed
   >;
   readonly awaitTurn: (
+    threadId: ThreadId,
     turnId: TurnId,
     timeout: Duration.DurationInput,
   ) => Effect.Effect<Turn, RpcDisconnected | RpcTimeout>;

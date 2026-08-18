@@ -2,7 +2,7 @@ import type { Turn } from "./protocol.js";
 import type {
   DesktopTaskChange,
   DesktopTurnDelta,
-} from "./desktop-protocol.js";
+} from "./desktop-task-protocol.js";
 
 type ConnectionState = "disconnected" | "connecting" | "connected";
 type AttachmentState = "detached" | "following" | "synchronized";
@@ -128,8 +128,22 @@ export class DesktopThreadState {
     this.emit();
   }
 
-  finishInjection(result: "confirmed" | "uncertain" | "rejected"): void {
+  resetInjection(): void {
+    this.injection = "idle";
+    this.emit();
+  }
+
+  finishInjection(
+    result: "idle" | "confirmed" | "uncertain" | "rejected",
+  ): void {
     this.injection = result;
+    this.emit();
+  }
+
+  retryFollowing(): void {
+    if (this.connectionValue !== "connected") return;
+    this.attachmentValue = "detached";
+    this.initialized = false;
     this.emit();
   }
 
@@ -164,6 +178,11 @@ export class DesktopThreadState {
     change: Extract<DesktopTaskChange, { readonly _tag: "Snapshot" }>,
   ): DesktopChangeResult {
     if (!validRevision(change.revision)) return this.requestResync();
+    if (this.revisionValue != null &&
+        (change.revision < this.revisionValue ||
+          (this.initialized && change.revision === this.revisionValue))) {
+      return "ignored";
+    }
     this.revisionValue = change.revision;
     this.clearObservedState();
     for (const entity of change.entities) {

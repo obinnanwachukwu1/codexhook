@@ -3,7 +3,7 @@ import {
   type DesktopCommand,
   type DesktopTaskProtocol,
   type DesktopProtocolConnector,
-} from "./desktop-protocol.js";
+} from "./desktop-task-protocol.js";
 import {
   DesktopThreadState,
   type DesktopTaskSnapshot,
@@ -47,7 +47,7 @@ export class DesktopAttachment {
   private readonly states = new Map<string, DesktopThreadState>();
   private readonly followTimeoutMs: number;
   private readonly proofTimeoutMs: number;
-
+  private unbindProtocol: () => void = () => undefined;
   constructor(
     private readonly connector: DesktopProtocolConnector,
     initialProtocol?: DesktopTaskProtocol,
@@ -78,6 +78,7 @@ export class DesktopAttachment {
   async inject(command: DesktopCommand): Promise<DesktopInjectionOutcome> {
     return this.serialize(command.threadId, async () => {
       const state = this.getState(command.threadId);
+      state.resetInjection();
       try {
         await this.synchronize(state);
       } catch (cause) {
@@ -98,13 +99,15 @@ export class DesktopAttachment {
         return this.ambiguous(state, errorMessage(cause));
       }
       if (reply._tag === "Rejected") {
+        if (reply.notWritten) {
+          state.finishInjection("idle");
+          return this.notSubmitted(state, reply.reason);
+        }
         state.finishInjection("rejected");
-        return reply.notWritten
-          ? this.notSubmitted(state, reply.reason)
-          : { _tag: "Rejected", reason: reply.reason, state: state.evidence() };
+        return { _tag: "Rejected", reason: reply.reason, state: state.evidence() };
       }
       const turnId = command.kind === "start"
-        ? nestedTurnId(reply.result)
+        ? reply.turnId
         : command.expectedTurnId;
       if (turnId == null || turnId.length === 0) {
         return this.ambiguous(
@@ -141,8 +144,12 @@ export class DesktopAttachment {
     });
   }
 
-  async awaitTurn(turnId: string, timeoutMs: number): Promise<Turn> {
-    const state = this.resolveState(turnId);
+  async awaitTurn(
+    threadId: string,
+    turnId: string,
+    timeoutMs: number,
+  ): Promise<Turn> {
+    const state = this.states.get(threadId) ?? null;
     if (state == null) throw new Error("Desktop task was not followed");
     await state.waitFor(
       () => {
@@ -161,6 +168,8 @@ export class DesktopAttachment {
 
   close(): void {
     this.closed = true;
+    this.unbindProtocol();
+    this.unbindProtocol = () => undefined;
     this.protocol?.close();
     this.protocol = null;
     this.connectPromise = null;
@@ -174,12 +183,6 @@ export class DesktopAttachment {
       this.states.set(threadId, state);
     }
     return state;
-  }
-
-  private resolveState(turnId: string): DesktopThreadState | null {
-    const followed = [...this.states.values()];
-    return followed.find((state) => state.turn(turnId) != null) ??
-      (followed.length === 1 ? followed[0] ?? null : null);
   }
 
   private async synchronize(state: DesktopThreadState): Promise<void> {
@@ -207,10 +210,16 @@ export class DesktopAttachment {
       }
       const wait = deadline - Date.now();
       if (wait <= 0) throw new Error("Desktop follow timed out");
-      await state.waitFor(
-        () => state.ready || state.connection === "disconnected",
-        wait,
-      );
+      try {
+        await state.waitFor(
+          () => state.ready || state.connection === "disconnected",
+          wait,
+        );
+      } catch (cause) {
+        this.resyncing.delete(state.threadId);
+        state.retryFollowing();
+        throw cause;
+      }
     }
   }
 
@@ -255,8 +264,9 @@ export class DesktopAttachment {
   }
 
   private bind(protocol: DesktopTaskProtocol): void {
+    this.unbindProtocol();
     const generation = ++this.generation;
-    protocol.onChange((threadId, change) => {
+    const removeChange = protocol.onChange((threadId, change) => {
       if (this.protocol !== protocol) return;
       const state = this.states.get(threadId);
       if (state == null) return;
@@ -267,12 +277,18 @@ export class DesktopAttachment {
         this.requestResync(protocol, state);
       }
     });
-    protocol.onDisconnect(() => {
+    const removeDisconnect = protocol.onDisconnect(() => {
       if (this.protocol !== protocol) return;
+      this.unbindProtocol();
+      this.unbindProtocol = () => undefined;
       this.protocol = null;
       this.resyncing.clear();
       for (const state of this.states.values()) state.disconnected();
     });
+    this.unbindProtocol = () => {
+      removeChange();
+      removeDisconnect();
+    };
   }
 
   private requestResync(
@@ -288,6 +304,8 @@ export class DesktopAttachment {
 
   private dropProtocol(protocol: DesktopTaskProtocol): void {
     if (this.protocol !== protocol) return;
+    this.unbindProtocol();
+    this.unbindProtocol = () => undefined;
     this.protocol = null;
     protocol.close();
     this.resyncing.clear();
@@ -355,22 +373,6 @@ export class DesktopAttachment {
       if (this.queues.get(threadId) === current) this.queues.delete(threadId);
     });
   }
-}
-
-function nestedTurnId(value: unknown, depth = 0): string | null {
-  if (depth > 32 || value == null || typeof value !== "object") return null;
-  const record = value as Record<string, unknown>;
-  if (typeof record.turnId === "string") return record.turnId;
-  const turn = record.turn;
-  if (turn != null && typeof turn === "object") {
-    const id = (turn as { readonly id?: unknown }).id;
-    if (typeof id === "string") return id;
-  }
-  for (const child of Object.values(record)) {
-    const found = nestedTurnId(child, depth + 1);
-    if (found != null) return found;
-  }
-  return null;
 }
 
 function withTimeout<T>(

@@ -16,7 +16,7 @@ import {
 } from "../src/transport/rpc.js";
 import type { TransportSpec } from "../src/transport/spec.js";
 import { TurnStartResult } from "../src/transport/protocol.js";
-import { TurnId } from "../src/types.js";
+import { ThreadId, TurnId } from "../src/types.js";
 
 type StartBehavior =
   | "success"
@@ -29,7 +29,6 @@ interface Router {
   readonly close: () => Promise<void>;
   readonly socketPath: string;
 }
-
 function frame(value: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(value));
   const output = Buffer.allocUnsafe(body.length + 4);
@@ -265,7 +264,9 @@ function submitStart(socketPath: string) {
                 peer.reply(ticket, TurnStartResult, "1 second"),
               ),
               Effect.flatMap((result) =>
-                peer.awaitTurn(TurnId(result.turn.id), "1 second"),
+                peer.awaitTurn(
+                  ThreadId("thread-1"), TurnId(result.turn.id), "1 second",
+                ),
               ),
             ),
           ),
@@ -286,7 +287,9 @@ function awaitExistingTurn(socketPath: string) {
           "1 second",
         ).pipe(
           Effect.zipRight(
-            peer.awaitTurn(TurnId("turn-delayed"), "1 second"),
+            peer.awaitTurn(
+              ThreadId("thread-1"), TurnId("turn-delayed"), "1 second",
+            ),
           ),
         ),
       ),
