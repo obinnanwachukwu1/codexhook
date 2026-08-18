@@ -18,6 +18,5 @@ export * from "./transport/peer.js";
 export * from "./transport/child-peer.js";
 export * from "./transport/unix-peer.js";
 export * from "./transport/provider.js";
-export * from "./transport/transport.js";
 export { LocalCodexLive } from "./app-server/local-codex.js";
 export { DesktopProtocolLive } from "./transport/desktop-contract.js";

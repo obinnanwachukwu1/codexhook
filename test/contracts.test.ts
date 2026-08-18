@@ -226,10 +226,10 @@ test("diagnostic sanitization contains hostile property access", () => {
   assert.equal(Object.isFrozen(diagnostic), true);
 });
 
-test("root exports retain legacy and contract services", async () => {
+test("root exports expose canonical services without legacy routing", async () => {
   const publicApi = await import("../src/index.js");
   assert.equal(typeof publicApi.Delivery, "function");
-  assert.equal(typeof publicApi.CodexTransport, "function");
+  assert.equal("CodexTransport" in publicApi, false);
   assert.equal(typeof publicApi.LocalCodex, "function");
   assert.equal(typeof publicApi.LocalCodexLive, "object");
   assert.equal("CanonicalAppServerClient" in publicApi, false);

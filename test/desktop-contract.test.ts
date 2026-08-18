@@ -68,7 +68,6 @@ test("maps negotiated adapter compatibility and capabilities once", () => {
 test("reports an absent Desktop without opening a connection", async () => {
   let connects = 0;
   const provider: TransportProviderService = {
-    candidates: Effect.succeed([]),
     appServerCandidates: Effect.succeed([]),
     desktopCandidate: Effect.succeed(Option.none()),
     connect: () => {
@@ -92,7 +91,6 @@ test("reports an absent Desktop without opening a connection", async () => {
 
 test("reports provider discovery failures as unavailable, not incompatible", async () => {
   const provider: TransportProviderService = {
-    candidates: Effect.succeed([]),
     appServerCandidates: Effect.succeed([]),
     desktopCandidate: Effect.fail(new TransportIncompatible({
       transport: "desktop",
@@ -164,7 +162,6 @@ test("follows multiple active turns as conflicted activity", async () => {
     approvals: "decline",
   } as const satisfies TransportSpec;
   const provider: TransportProviderService = {
-    candidates: Effect.succeed([spec]),
     appServerCandidates: Effect.succeed([]),
     desktopCandidate: Effect.succeed(Option.some(spec)),
     connect: () => Effect.die("not used"),

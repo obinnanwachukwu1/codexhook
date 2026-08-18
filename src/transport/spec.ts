@@ -21,3 +21,8 @@ export type TransportSpec =
       readonly socketPath: string;
       readonly approvals: "decline";
     };
+
+export type AppServerTransportSpec = Exclude<
+  TransportSpec,
+  { readonly _tag: "Desktop" }
+>;

@@ -8,19 +8,19 @@ import {
 } from "../src/app-server/service.js";
 import {
   TransportProvider,
+  type AppServerTransportSpec,
   type TransportProviderService,
 } from "../src/transport/provider.js";
-import type { TransportSpec } from "../src/transport/spec.js";
 import { fakeAppServerPeer } from "./support/app-server-fixture.js";
 
-const first: TransportSpec = {
+const first: AppServerTransportSpec = {
   _tag: "ChildProcess",
   id: "app-bundled",
   executable: "/fake/first",
   args: [],
   approvals: "decline",
 };
-const second: TransportSpec = {
+const second: AppServerTransportSpec = {
   _tag: "ChildProcess",
   id: "cli",
   executable: "/fake/second",
@@ -53,7 +53,6 @@ test("closes a rejected candidate before connecting the next", async () => {
     serverInfo: localServerInfo(),
   }).peer;
   const provider: TransportProviderService = {
-    candidates: Effect.succeed([first, second]),
     appServerCandidates: Effect.succeed([first, second]),
     desktopCandidate: Effect.succeed(Option.none()),
     connect: (spec) => Effect.acquireRelease(
@@ -84,7 +83,6 @@ test("closes a rejected candidate before connecting the next", async () => {
 
 test("represents missing local app-server candidates as availability", async () => {
   const provider: TransportProviderService = {
-    candidates: Effect.succeed([]),
     appServerCandidates: Effect.succeed([]),
     desktopCandidate: Effect.succeed(Option.none()),
     connect: () => Effect.die("unexpected connect"),
@@ -107,7 +105,6 @@ test("represents missing local app-server candidates as availability", async () 
 
 test("canonical acquisition does not evaluate Desktop candidates", async () => {
   const provider: TransportProviderService = {
-    candidates: Effect.die("combined candidates must stay unused"),
     appServerCandidates: Effect.succeed([]),
     desktopCandidate: Effect.die("Desktop probe must stay unused"),
     connect: () => Effect.die("unexpected connect"),
@@ -128,7 +125,6 @@ test("canonical acquisition does not evaluate Desktop candidates", async () => {
 
 test("reports every rejected canonical candidate without free text", async () => {
   const provider: TransportProviderService = {
-    candidates: Effect.succeed([first, second]),
     appServerCandidates: Effect.succeed([first, second]),
     desktopCandidate: Effect.succeed(Option.none()),
     connect: (spec) => Effect.succeed(
@@ -151,7 +147,6 @@ test("reports every rejected canonical candidate without free text", async () =>
 
 test("does not misclassify provider defects as unavailable candidates", async () => {
   const provider: TransportProviderService = {
-    candidates: Effect.succeed([first]),
     appServerCandidates: Effect.succeed([first]),
     desktopCandidate: Effect.succeed(Option.none()),
     connect: () => Effect.die("provider defect"),
@@ -170,13 +165,13 @@ test("does not misclassify provider defects as unavailable candidates", async ()
 
 test("rejects remote specs before provider connection", async () => {
   let connections = 0;
-  const remotePipe: TransportSpec = {
+  const remotePipe: AppServerTransportSpec = {
     _tag: "UnixSocket",
     id: "daemon",
     socketPath: "\\\\remote-host\\pipe\\codex",
     approvals: "decline",
   };
-  const remoteCodeMode: TransportSpec = {
+  const remoteCodeMode: AppServerTransportSpec = {
     _tag: "ChildProcess",
     id: "cli",
     executable: "/fake/codex",
@@ -184,7 +179,6 @@ test("rejects remote specs before provider connection", async () => {
     approvals: "decline",
   };
   const provider: TransportProviderService = {
-    candidates: Effect.succeed([remotePipe, remoteCodeMode]),
     appServerCandidates: Effect.succeed([remotePipe, remoteCodeMode]),
     desktopCandidate: Effect.succeed(Option.none()),
     connect: () => Effect.sync(() => {

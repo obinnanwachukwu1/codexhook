@@ -34,17 +34,3 @@ export interface TurnRequest {
   readonly idleTimeout: Duration.DurationInput;
   readonly turnTimeout: Duration.DurationInput;
 }
-
-export type TurnOutcome =
-  | {
-      readonly _tag: "Completed";
-      readonly threadId: ThreadId;
-      readonly turnId: TurnId;
-      readonly transport: TransportId;
-    }
-  | {
-      readonly _tag: "Steered";
-      readonly threadId: ThreadId;
-      readonly turnId: TurnId;
-      readonly transport: TransportId;
-    };
