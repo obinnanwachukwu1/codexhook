@@ -84,7 +84,10 @@ test("rejects oversized outbound requests before the write barrier", async () =>
   const router = await listen(
     endpoint.socketPath,
     await fixture("initialize-legacy.json"),
-    (message) => {
+    (message, send) => {
+      if (message.method === "thread-stream-following-changed") {
+        send(ownerSnapshot("thread-1"));
+      }
       if (message.method === "thread-follower-start-turn") starts += 1;
     },
   );
@@ -92,6 +95,7 @@ test("rejects oversized outbound requests before the write barrier", async () =>
     const session = await DesktopProtocolSession.connect(endpoint.socketPath, {
       maxOutboundFrameBytes: 512,
     });
+    await session.followThread("thread-1");
     await assert.rejects(
       session.startTurn("thread-1", { input: "x".repeat(1_024) }, 1_000),
       (error: unknown) =>
@@ -143,7 +147,15 @@ test("bounds and rejects malformed frame lengths, JSON, and envelopes", () => {
     malformedEnvelopes += 1;
   });
   assert.deepEqual(decoder.push(encodeDesktopFrame([])), []);
-  assert.equal(malformedEnvelopes, 1);
+  assert.deepEqual(
+    decoder.push(encodeDesktopFrame({ type: "broadcast", sourceClientId: 42 })),
+    [],
+  );
+  assert.deepEqual(
+    decoder.push(encodeDesktopFrame({ type: "request", targetClientId: "" })),
+    [],
+  );
+  assert.equal(malformedEnvelopes, 3);
 });
 
 test("malformed JSON diagnostics do not retain frame contents", () => {
@@ -183,6 +195,9 @@ test("does not infer a started turn from historical snapshot entities", async ()
     endpoint.socketPath,
     await fixture("initialize-legacy.json"),
     (message, send) => {
+      if (message.method === "thread-stream-following-changed") {
+        send(ownerSnapshot("thread-1"));
+      }
       if (message.method !== "thread-follower-start-turn") return;
       send({
         type: "response",
@@ -204,6 +219,7 @@ test("does not infer a started turn from historical snapshot entities", async ()
   );
   try {
     const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await session.followThread("thread-1");
     await assert.rejects(
       session.startTurn("thread-1", {}, 1_000),
       (error: unknown) =>
@@ -217,3 +233,15 @@ test("does not infer a started turn from historical snapshot entities", async ()
     await endpoint.cleanup();
   }
 });
+
+function ownerSnapshot(threadId: string) {
+  return {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-owner",
+    params: {
+      conversationId: threadId,
+      change: { type: "snapshot", revision: 1 },
+    },
+  };
+}

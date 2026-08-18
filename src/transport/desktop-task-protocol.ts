@@ -173,16 +173,14 @@ export class DesktopIpcProtocol implements DesktopTaskProtocol {
   async loadHistory(threadId: string): Promise<boolean> {
     const reply = await this.session.loadCompleteHistory(
       threadId,
-      this.session.requestTimeout(30_000),
+      30_000,
     );
     return reply.outcome._tag === "Accepted";
   }
 
   async inject(command: DesktopCommand): Promise<DesktopCommandReply> {
     try {
-      const timeoutMs = this.session.requestTimeout(
-        command.timeoutMs ?? 30_000,
-      );
+      const timeoutMs = command.timeoutMs ?? 30_000;
       const reply = command.kind === "start"
         ? await this.session.startTurn(
             command.threadId,

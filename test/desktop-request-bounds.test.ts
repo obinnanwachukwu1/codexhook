@@ -14,6 +14,17 @@ test("Desktop injection bounds a delivery budget to the request limit", async ()
     endpoint.socketPath,
     await fixture("initialize-v1.json"),
     (message, send) => {
+      if (message.method === "thread-stream-following-changed") {
+        send({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          sourceClientId: "desktop-owner",
+          params: {
+            conversationId: "thread-1",
+            change: { type: "snapshot", revision: 1 },
+          },
+        });
+      }
       if (message.method !== "thread-follower-start-turn") return;
       starts += 1;
       send({
@@ -27,6 +38,7 @@ test("Desktop injection bounds a delivery budget to the request limit", async ()
   try {
     const protocol = await DesktopIpcProtocol.connect(endpoint.socketPath);
     try {
+      await protocol.follow("thread-1");
       const reply = await protocol.inject({
         kind: "start",
         threadId: "thread-1",

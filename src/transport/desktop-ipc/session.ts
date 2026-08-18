@@ -108,10 +108,6 @@ export class DesktopProtocolSession {
     return this.connection.profile;
   }
 
-  requestTimeout(timeoutMs: number): number {
-    return Math.min(timeoutMs, this.limits.maxRequestTimeoutMs);
-  }
-
   close(): void {
     this.closing = true;
     this.threadOwners.reset();
@@ -158,6 +154,7 @@ export class DesktopProtocolSession {
       this.limits,
       threadId,
       deadline,
+      false,
     );
     const response = await connection.raw.request(
       connection.adapter.methods.history,
@@ -189,6 +186,7 @@ export class DesktopProtocolSession {
       this.limits,
       threadId,
       deadline,
+      true,
     );
     const response = await connection.raw.request(
       connection.adapter.methods.start,
@@ -220,6 +218,7 @@ export class DesktopProtocolSession {
       this.limits,
       threadId,
       deadline,
+      true,
     );
     const response = await connection.raw.request(
       connection.adapter.methods.steer,
@@ -242,6 +241,7 @@ export class DesktopProtocolSession {
     capability: DesktopProtocolCapability,
   ): Promise<NegotiatedConnection> {
     const connection = await this.ensureConnection();
+    if (this.closing) throw this.closedError();
     if (!connection.profile.capabilities[capability]) {
       throw new DesktopProtocolError(
         "unsupported-capability",

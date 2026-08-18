@@ -27,8 +27,7 @@ export function requestDeadline(
 ): number {
   if (
     !Number.isSafeInteger(timeoutMs) ||
-    timeoutMs < limits.minRequestTimeoutMs ||
-    timeoutMs > limits.maxRequestTimeoutMs
+    timeoutMs < limits.minRequestTimeoutMs
   ) {
     throw new DesktopProtocolError(
       "invalid-timeout",
@@ -37,7 +36,7 @@ export function requestDeadline(
       "Desktop IPC request timeout is outside bounds",
     );
   }
-  return Date.now() + timeoutMs;
+  return Date.now() + Math.min(timeoutMs, limits.maxRequestTimeoutMs);
 }
 
 export function remainingRequestTimeout(
@@ -62,8 +61,17 @@ export async function requestTarget(
   limits: SessionLimits,
   threadId: string,
   deadline: number,
+  requireFollow: boolean,
 ): Promise<string | undefined> {
-  if (!followedThreads.has(threadId)) return undefined;
+  if (!followedThreads.has(threadId)) {
+    if (!requireFollow) return undefined;
+    throw new DesktopProtocolError(
+      "task-not-followed",
+      "operation",
+      "not-written",
+      "Desktop IPC task must be followed before mutation",
+    );
+  }
   const owner = await owners.wait(
     threadId,
     remainingRequestTimeout(limits, deadline),

@@ -9,6 +9,7 @@ import type { DesktopProtocolObservation } from "../src/transport/desktop-ipc/in
 import {
   fixture,
   listen,
+  sendOwnerSnapshot,
   testEndpoint,
 } from "./support/desktop-ipc-router.js";
 
@@ -280,6 +281,7 @@ test("responds to discovery and reports sanitized lifecycle observations", async
     endpoint.socketPath,
     await fixture("initialize-legacy.json"),
     (message, send) => {
+      if (sendOwnerSnapshot(message, send)) return;
       if (message.type === "client-discovery-response") {
         discovery((message as unknown as { response?: unknown }).response);
       }
@@ -312,6 +314,7 @@ test("responds to discovery and reports sanitized lifecycle observations", async
     assert.deepEqual(await discovered, { canHandle: false });
     const observations: DesktopProtocolObservation[] = [];
     session.onObservation((observation) => observations.push(observation));
+    await session.followThread("thread-1");
     await session.startTurn("thread-1", {}, 1_000);
     session.close();
     assert.deepEqual(new Set(observations.map((item) => item._tag)), new Set([
@@ -338,7 +341,8 @@ test("enforces pending and timeout bounds before writing extra bytes", async () 
   const router = await listen(
     endpoint.socketPath,
     await fixture("initialize-legacy.json"),
-    (message) => {
+    (message, send) => {
+      if (sendOwnerSnapshot(message, send)) return;
       if (message.method === "thread-follower-start-turn") {
         starts += 1;
         firstStart();
@@ -349,6 +353,7 @@ test("enforces pending and timeout bounds before writing extra bytes", async () 
     const session = await DesktopProtocolSession.connect(endpoint.socketPath, {
       maxPendingRequests: 1,
     });
+    await session.followThread("thread-1");
     const pending = session.startTurn("thread-1", {}, 30);
     await firstStarted;
     await assert.rejects(

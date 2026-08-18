@@ -10,6 +10,7 @@ export type DesktopProtocolFailure =
   | "response-malformed"
   | "socket-failed"
   | "socket-unavailable"
+  | "task-not-followed"
   | "unknown-protocol-version"
   | "unsupported-capability"
   | "write-failed";

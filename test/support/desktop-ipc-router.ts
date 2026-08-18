@@ -30,6 +30,25 @@ export interface Router {
   readonly socketCount: () => number;
 }
 
+export function sendOwnerSnapshot(
+  message: DesktopWireEnvelope,
+  send: (message: unknown) => void,
+  threadId = "thread-1",
+  owner = "desktop-owner",
+): boolean {
+  if (message.method !== "thread-stream-following-changed") return false;
+  send({
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: owner,
+    params: {
+      conversationId: threadId,
+      change: { type: "snapshot", revision: 1 },
+    },
+  });
+  return true;
+}
+
 const fixtures = fileURLToPath(new URL(
   "../../../test/fixtures/desktop-ipc/",
   import.meta.url,

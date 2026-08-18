@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DesktopProtocolSession } from "../src/transport/desktop-ipc/index.js";
+import { followDesktopThread } from
+  "../src/transport/desktop-ipc/session-follow.js";
+import { DesktopThreadOwners } from
+  "../src/transport/desktop-ipc/thread-owners.js";
 import {
   fixture,
   listen,
@@ -73,11 +77,139 @@ test("targets followed task operations to the state snapshot owner", async () =>
     const session = await DesktopProtocolSession.connect(endpoint.socketPath);
     await session.followThread("thread-1");
     await session.steerTurn("thread-1", { input: [] }, 1_000);
-    await session.steerTurn("unfollowed-thread", { input: [] }, 1_000);
-    assert.deepEqual(targets, ["desktop-owner-1", undefined]);
+    assert.deepEqual(targets, ["desktop-owner-1"]);
     session.close();
   } finally {
     await router.close();
+    await endpoint.cleanup();
+  }
+});
+
+test("never writes an unfollowed task mutation", async () => {
+  const endpoint = await testEndpoint();
+  let mutations = 0;
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message) => {
+      if (
+        message.method === "thread-follower-start-turn" ||
+        message.method === "thread-follower-steer-turn"
+      ) mutations += 1;
+    },
+  );
+  try {
+    const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await assert.rejects(
+      session.startTurn("thread-1", {}, 1_000),
+      (error: unknown) =>
+        error instanceof Error &&
+        "failure" in error &&
+        error.failure === "task-not-followed" &&
+        "writeState" in error &&
+        error.writeState === "not-written",
+    );
+    await assert.rejects(
+      session.steerTurn("thread-1", {}, 1_000),
+      (error: unknown) =>
+        error instanceof Error &&
+        "failure" in error &&
+        error.failure === "task-not-followed",
+    );
+    assert.equal(mutations, 0);
+    session.close();
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
+});
+
+test("a failed repeated follow preserves existing owner state", async () => {
+  const followed = new Set(["thread-1"]);
+  const owners = new DesktopThreadOwners();
+  owners.observe({
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-owner",
+    params: {
+      conversationId: "thread-1",
+      change: { type: "snapshot", revision: 1 },
+    },
+  }, followed);
+  await assert.rejects(followDesktopThread({
+    adapter: {
+      methods: { follow: "follow", history: "history", start: "start", steer: "steer" },
+      version: 1,
+      followParams: () => ({}),
+    },
+    raw: {
+      broadcast: async () => {
+        throw new Error("synthetic write failure");
+      },
+    },
+  }, followed, owners, "thread-1"));
+  assert.equal(followed.has("thread-1"), true);
+  assert.equal(owners.target("thread-1"), "desktop-owner");
+});
+
+test("close wakes every pending owner waiter without writing", async () => {
+  const endpoint = await testEndpoint();
+  let mutations = 0;
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message) => {
+      if (
+        message.method === "thread-follower-start-turn" ||
+        message.method === "thread-follower-steer-turn"
+      ) mutations += 1;
+    },
+  );
+  try {
+    const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await session.followThread("thread-1");
+    const pending = [
+      session.startTurn("thread-1", {}, 1_000),
+      session.steerTurn("thread-1", {}, 1_000),
+    ];
+    await new Promise((resolve) => setImmediate(resolve));
+    session.close();
+    const results = await Promise.allSettled(pending);
+    assert.deepEqual(results.map((result) => result.status), [
+      "rejected",
+      "rejected",
+    ]);
+    assert.equal(mutations, 0);
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
+});
+
+test("disconnect wakes pending owner waiters without writing", async () => {
+  const endpoint = await testEndpoint();
+  let mutations = 0;
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message) => {
+      if (message.method === "thread-follower-start-turn") mutations += 1;
+    },
+  );
+  const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+  try {
+    await session.followThread("thread-1");
+    const pending = session.startTurn("thread-1", {}, 1_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    await router.close();
+    await assert.rejects(pending, (error: unknown) =>
+      error instanceof Error &&
+      "failure" in error &&
+      error.failure === "request-timeout"
+    );
+    assert.equal(mutations, 0);
+  } finally {
+    session.close();
     await endpoint.cleanup();
   }
 });

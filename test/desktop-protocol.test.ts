@@ -3,13 +3,10 @@ import test from "node:test";
 import {
   DesktopProtocolError,
   DesktopProtocolSession,
+  type DesktopWireEnvelope,
 } from "../src/transport/desktop-ipc/index.js";
-import type { DesktopWireEnvelope } from "../src/transport/desktop-ipc/index.js";
-import {
-  fixture,
-  listen,
-  testEndpoint,
-} from "./support/desktop-ipc-router.js";
+import { fixture, listen, sendOwnerSnapshot, testEndpoint } from
+  "./support/desktop-ipc-router.js";
 
 test("selects legacy and explicit v1 adapters across response shapes", async () => {
   for (const entry of [
@@ -32,6 +29,7 @@ test("selects legacy and explicit v1 adapters across response shapes", async () 
       endpoint.socketPath,
       await fixture(entry.initialize),
       (message, send) => {
+        if (sendOwnerSnapshot(message, send)) return;
         if (message.method === "thread-follower-start-turn") {
           send({
             type: "response",
@@ -46,6 +44,7 @@ test("selects legacy and explicit v1 adapters across response shapes", async () 
       const session = await DesktopProtocolSession.connect(endpoint.socketPath);
       assert.equal(session.profile.fingerprint.adapterId, entry.adapterId);
       assert.equal(session.profile.fingerprint.digest.length, 24);
+      await session.followThread("thread-1");
       const receipt = await session.startTurn("thread-1", {}, 1_000);
       assert.equal(receipt.outcome._tag, "Accepted");
       if (receipt.outcome._tag === "Accepted") {
@@ -67,6 +66,7 @@ test("preserves the minimal handshake and legacy success response semantics", as
     endpoint.socketPath,
     await fixture("initialize-legacy.json"),
     (message, send) => {
+      if (sendOwnerSnapshot(message, send)) return;
       if (message.method === "thread-follower-start-turn") {
         send({
           type: "response",
@@ -85,6 +85,7 @@ test("preserves the minimal handshake and legacy success response semantics", as
   try {
     const session = await DesktopProtocolSession.connect(endpoint.socketPath);
     assert.deepEqual(initializeParams, { clientType: "codexhook" });
+    await session.followThread("thread-1");
     const receipt = await session.startTurn("thread-1", {}, 1_000);
     assert.equal(
       receipt.outcome._tag === "Accepted" && receipt.outcome.value.turnId,
@@ -174,6 +175,7 @@ test("reports an unknown result type as an explicit written incompatibility", as
     endpoint.socketPath,
     await fixture("initialize-legacy.json"),
     (message, send) => {
+      if (sendOwnerSnapshot(message, send)) return;
       if (message.method !== "thread-follower-start-turn") return;
       send({
         type: "response",
@@ -185,6 +187,7 @@ test("reports an unknown result type as an explicit written incompatibility", as
   );
   try {
     const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await session.followThread("thread-1");
     await assert.rejects(
       session.startTurn("thread-1", {}, 1_000),
       (error: unknown) =>
@@ -204,7 +207,8 @@ test("fails an in-flight request when the router sends a malformed frame", async
   const router = await listen(
     endpoint.socketPath,
     await fixture("initialize-legacy.json"),
-    (message, _send, sendRaw) => {
+    (message, send, sendRaw) => {
+      if (sendOwnerSnapshot(message, send)) return;
       if (message.method === "thread-follower-start-turn") {
         sendRaw(Buffer.alloc(4));
       }
@@ -214,6 +218,7 @@ test("fails an in-flight request when the router sends a malformed frame", async
     const session = await DesktopProtocolSession.connect(endpoint.socketPath);
     const observations: string[] = [];
     session.onObservation((observation) => observations.push(observation._tag));
+    await session.followThread("thread-1");
     await assert.rejects(
       session.startTurn("thread-1", {}, 1_000),
       (error: unknown) =>
@@ -234,12 +239,14 @@ test("times out without retrying an uncertain request", async () => {
   const router = await listen(
     endpoint.socketPath,
     await fixture("initialize-legacy.json"),
-    (message) => {
+    (message, send) => {
+      if (sendOwnerSnapshot(message, send)) return;
       if (message.method === "thread-follower-start-turn") starts += 1;
     },
   );
   try {
     const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await session.followThread("thread-1");
     await assert.rejects(
       session.startTurn("thread-1", {}, 20),
       (error: unknown) =>
@@ -261,6 +268,7 @@ test("correlates concurrent responses that arrive out of order", async () => {
     endpoint.socketPath,
     await fixture("initialize-legacy.json"),
     (message, send) => {
+      if (sendOwnerSnapshot(message, send)) return;
       pending.push(message);
       if (pending.length !== 2) return;
       for (const message of pending.toReversed()) {
@@ -281,6 +289,7 @@ test("correlates concurrent responses that arrive out of order", async () => {
   );
   try {
     const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await session.followThread("thread-1");
     const [first, second] = await Promise.all([
       session.startTurn("thread-1", { ordinal: 1 }, 1_000),
       session.startTurn("thread-1", { ordinal: 2 }, 1_000),
