@@ -1,53 +1,127 @@
-import type { IpcEnvelope } from "./desktop-ipc-client.js";
 import type { Turn } from "./protocol.js";
+import type { DesktopChange } from "./desktop-protocol.js";
 
-interface Patch {
-  readonly op?: string;
-  readonly path?: ReadonlyArray<string | number>;
-  readonly value?: unknown;
+type ConnectionState = "disconnected" | "connecting" | "connected";
+type AttachmentState = "detached" | "following" | "synchronized";
+type ActivityState = "unknown" | "idle" | "active";
+type InjectionState =
+  | "idle"
+  | "injecting"
+  | "confirmed"
+  | "uncertain"
+  | "rejected";
+
+export interface DesktopTaskSnapshot {
+  readonly connection: ConnectionState;
+  readonly attachment: AttachmentState;
+  readonly activity: ActivityState;
+  readonly injection: InjectionState;
+  readonly generation: number;
+  readonly revision: number | null;
+  readonly turns: ReadonlyArray<Turn>;
 }
 
+export type DesktopChangeResult = "applied" | "ignored" | "resync";
+
 export class DesktopThreadState {
+  private attachment: AttachmentState = "detached";
+  private connection: ConnectionState = "disconnected";
   private readonly entityTurns = new Map<string, string>();
+  private generation = 0;
   private initialized = false;
+  private injection: InjectionState = "idle";
   private readonly listeners = new Set<() => void>();
-  private resync = false;
-  private revision: number | null = null;
+  private revisionValue: number | null = null;
   private readonly turns = new Map<string, Turn>();
 
   constructor(readonly threadId: string) {}
+
+  get ready(): boolean {
+    return this.initialized && this.attachment === "synchronized";
+  }
+
+  get revision(): number | null {
+    return this.revisionValue;
+  }
 
   snapshot(): ReadonlyArray<Turn> {
     return [...this.turns.values()];
   }
 
-  get ready(): boolean {
-    return this.initialized;
+  evidence(): DesktopTaskSnapshot {
+    return {
+      connection: this.connection,
+      attachment: this.attachment,
+      activity: !this.ready
+        ? "unknown"
+        : this.activeTurn() == null ? "idle" : "active",
+      injection: this.injection,
+      generation: this.generation,
+      revision: this.revisionValue,
+      turns: this.snapshot(),
+    };
   }
 
-  takeResyncRequest(): boolean {
-    if (!this.resync) return false;
-    this.resync = false;
-    return true;
+  activeTurn(): Turn | undefined {
+    return [...this.turns.values()]
+      .reverse()
+      .find((turn) => turn.status === "inProgress");
   }
 
   turn(turnId: string): Turn | undefined {
     return this.turns.get(turnId);
   }
 
-  observeTurn(turnId: string): void {
-    if (this.turns.has(turnId)) return;
-    this.turns.set(turnId, {
-      id: turnId,
-      status: "inProgress",
-      error: null,
-    });
+  beginConnecting(): void {
+    this.connection = "connecting";
+    this.attachment = "detached";
+    this.initialized = false;
+    this.emit();
   }
 
-  waitFor(
-    predicate: () => boolean,
-    timeoutMs: number,
-  ): Promise<void> {
+  beginFollowing(generation: number): void {
+    this.connection = "connected";
+    this.attachment = "following";
+    this.generation = generation;
+    this.initialized = false;
+    this.revisionValue = null;
+    this.emit();
+  }
+
+  beginResync(): void {
+    this.attachment = "following";
+    this.initialized = false;
+    this.emit();
+  }
+
+  disconnected(): void {
+    this.connection = "disconnected";
+    this.attachment = "detached";
+    this.initialized = false;
+    if (this.injection === "injecting") this.injection = "uncertain";
+    this.emit();
+  }
+
+  beginInjection(): void {
+    this.injection = "injecting";
+    this.emit();
+  }
+
+  finishInjection(result: "confirmed" | "uncertain" | "rejected"): void {
+    this.injection = result;
+    this.emit();
+  }
+
+  apply(change: DesktopChange, generation: number): DesktopChangeResult {
+    if (generation !== this.generation || this.connection !== "connected") {
+      return "ignored";
+    }
+    if (change.type === "snapshot") return this.applySnapshot(change);
+    if (change.type !== "patches") return "ignored";
+    return this.applyPatches(change);
+  }
+
+  waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
     if (predicate()) return Promise.resolve();
     return new Promise((resolve, reject) => {
       const listener = () => {
@@ -67,48 +141,40 @@ export class DesktopThreadState {
     });
   }
 
-  apply(message: IpcEnvelope): void {
-    if (
-      message.method !== "thread-stream-state-changed" ||
-      message.params == null ||
-      typeof message.params !== "object"
-    ) return;
-    const params = message.params as {
-      conversationId?: unknown;
-      change?: unknown;
-    };
-    if (params.conversationId !== this.threadId) return;
-    const change = params.change as {
-      type?: string;
-      baseRevision?: number;
-      revision?: number;
-      conversationState?: unknown;
-      patches?: ReadonlyArray<Patch>;
-    } | undefined;
-    if (change?.type === "snapshot") {
-      if (typeof change.revision === "number") {
-        this.revision = change.revision;
-      }
-      this.initialized = true;
-      this.entityTurns.clear();
-      this.turns.clear();
-      this.readSnapshot(change.conversationState);
-    } else if (change?.type === "patches") {
-      if (
-        this.revision != null &&
-        change.baseRevision !== this.revision
-      ) {
-        this.initialized = false;
-        this.resync = true;
-        for (const listener of this.listeners) listener();
-        return;
-      }
-      for (const patch of change.patches ?? []) this.readPatch(patch);
-      if (typeof change.revision === "number") {
-        this.revision = change.revision;
-      }
+  private applySnapshot(change: DesktopChange): DesktopChangeResult {
+    if (!validRevision(change.revision)) return this.requestResync();
+    this.revisionValue = change.revision;
+    this.entityTurns.clear();
+    this.turns.clear();
+    this.readSnapshot(change.conversationState);
+    this.initialized = true;
+    this.attachment = "synchronized";
+    this.emit();
+    return "applied";
+  }
+
+  private applyPatches(change: DesktopChange): DesktopChangeResult {
+    if (!this.initialized || this.revisionValue == null) {
+      return this.requestResync();
     }
-    for (const listener of this.listeners) listener();
+    if (!validRevision(change.baseRevision) ||
+        !validRevision(change.revision)) {
+      return this.requestResync();
+    }
+    if (change.revision <= this.revisionValue) return "ignored";
+    if (
+      change.baseRevision !== this.revisionValue ||
+      change.revision <= change.baseRevision
+    ) return this.requestResync();
+    for (const patch of change.patches ?? []) this.readPatch(patch);
+    this.revisionValue = change.revision;
+    this.emit();
+    return "applied";
+  }
+
+  private requestResync(): DesktopChangeResult {
+    this.beginResync();
+    return "resync";
   }
 
   private readSnapshot(value: unknown): void {
@@ -118,57 +184,82 @@ export class DesktopThreadState {
         history?: { entitiesByKey?: Record<string, unknown> };
       };
     };
-    const entities =
-      state.turnHistory?.history?.entitiesByKey ?? {};
+    const entities = state.turnHistory?.history?.entitiesByKey ?? {};
     for (const [key, entity] of Object.entries(entities)) {
       this.readEntity(entity, key);
     }
   }
 
-  private readPatch(patch: Patch): void {
+  private readPatch(
+    patch: NonNullable<DesktopChange["patches"]>[number],
+  ): void {
     const path = patch.path ?? [];
-    if (!path.includes("entitiesByKey")) return;
-    const keyIndex = path.indexOf("entitiesByKey") + 1;
-    const key = path[keyIndex];
-    if (
-      path.at(-1) === "turnId" &&
-      typeof key === "string" &&
-      typeof patch.value === "string"
-    ) {
+    const marker = path.indexOf("entitiesByKey");
+    if (marker < 0) return;
+    const key = path[marker + 1];
+    if (typeof key !== "string") return;
+    if (patch.op === "remove" && path.length === marker + 2) {
+      const turnId = this.entityTurns.get(key);
+      this.entityTurns.delete(key);
+      if (turnId != null) this.turns.delete(turnId);
+      return;
+    }
+    if (path.at(-1) === "turnId" && typeof patch.value === "string") {
       this.entityTurns.set(key, patch.value);
       this.observeTurn(patch.value);
       return;
     }
-    if (path.at(-1) === "status") {
-      const turnId =
-        typeof key === "string" ? this.entityTurns.get(key) : null;
-      const existing = turnId == null ? null : this.turns.get(turnId);
-      if (existing != null && typeof patch.value === "string") {
-        this.turns.set(existing.id, {
-          ...existing,
-          status: normalizeStatus(patch.value),
-        });
-      }
+    const turnId = this.entityTurns.get(key);
+    const existing = turnId == null ? undefined : this.turns.get(turnId);
+    if (path.at(-1) === "status" && existing != null) {
+      this.turns.set(existing.id, {
+        ...existing,
+        status: normalizeStatus(patch.value),
+      });
       return;
     }
-    this.readEntity(patch.value, typeof key === "string" ? key : undefined);
+    if (path.at(-1) === "error" && existing != null) {
+      this.turns.set(existing.id, {
+        ...existing,
+        error: readError(patch.value),
+      });
+      return;
+    }
+    this.readEntity(patch.value, key);
   }
 
-  private readEntity(value: unknown, entityKey?: string): void {
+  private readEntity(value: unknown, entityKey: string): void {
     if (value == null || typeof value !== "object") return;
     const entity = value as {
       turnId?: unknown;
       status?: unknown;
-      error?: { message?: string } | null;
+      error?: unknown;
     };
     if (typeof entity.turnId !== "string") return;
-    if (entityKey != null) this.entityTurns.set(entityKey, entity.turnId);
+    this.entityTurns.set(entityKey, entity.turnId);
     this.turns.set(entity.turnId, {
       id: entity.turnId,
       status: normalizeStatus(entity.status),
-      error: entity.error,
+      error: readError(entity.error),
     });
   }
+
+  private observeTurn(turnId: string): void {
+    if (this.turns.has(turnId)) return;
+    this.turns.set(turnId, {
+      id: turnId,
+      status: "inProgress",
+      error: null,
+    });
+  }
+
+  private emit(): void {
+    for (const listener of this.listeners) listener();
+  }
+}
+
+function validRevision(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
 function normalizeStatus(value: unknown): Turn["status"] {
@@ -177,4 +268,10 @@ function normalizeStatus(value: unknown): Turn["status"] {
     value === "failed"
     ? value
     : "inProgress";
+}
+
+function readError(value: unknown): Turn["error"] {
+  if (value == null || typeof value !== "object") return null;
+  const message = (value as { readonly message?: unknown }).message;
+  return typeof message === "string" ? { message } : {};
 }

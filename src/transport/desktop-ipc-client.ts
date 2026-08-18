@@ -48,6 +48,8 @@ export class DesktopIpcClient {
   private buffer = Buffer.alloc(0);
   private clientId = "initializing-client";
   private readonly broadcasts = new Set<(message: IpcEnvelope) => void>();
+  private readonly disconnects = new Set<(error: Error) => void>();
+  private disconnected = false;
   private readonly pending = new Map<string, Pending>();
 
   private constructor(
@@ -120,6 +122,11 @@ export class DesktopIpcClient {
   onBroadcast(listener: (message: IpcEnvelope) => void): () => void {
     this.broadcasts.add(listener);
     return () => this.broadcasts.delete(listener);
+  }
+
+  onDisconnect(listener: (error: Error) => void): () => void {
+    this.disconnects.add(listener);
+    return () => this.disconnects.delete(listener);
   }
 
   broadcast(method: string, params: unknown, version: number): void {
@@ -216,10 +223,13 @@ export class DesktopIpcClient {
   }
 
   private rejectAll(error: Error): void {
+    if (this.disconnected) return;
+    this.disconnected = true;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
       pending.reject(error);
     }
     this.pending.clear();
+    for (const listener of this.disconnects) listener(error);
   }
 }
