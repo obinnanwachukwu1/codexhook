@@ -30,8 +30,11 @@ export function decideDesktopEvidence(
 ): DesktopEvidenceDecision {
   if (canonical._tag === "Absent") {
     const unsettled = unsettledWriteDiagnostic(receipt);
-    return unsettled != null
-      ? { _tag: "Ambiguous", diagnostic: unsettled }
+    if (unsettled != null) {
+      return { _tag: "Ambiguous", diagnostic: unsettled };
+    }
+    return receipt._tag === "Acknowledged" || desktop._tag === "Found"
+      ? { _tag: "Ambiguous", diagnostic: WRITE_AMBIGUOUS }
       : { _tag: "Fallback" };
   }
   if (canonical._tag === "Unresolved") {

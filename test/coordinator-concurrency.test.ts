@@ -322,11 +322,8 @@ test("a hung desktop health probe cannot retain the task gate", async () => {
   const fixture = coordinatorFixture({
     routeState: () => {
       routeCalls += 1;
-      if (routeCalls === 1) {
-        entered.resolve();
-        return Effect.never;
-      }
-      return Effect.succeed({ _tag: "Unattached" });
+      entered.resolve();
+      return Effect.never;
     },
   });
   try {
@@ -340,6 +337,8 @@ test("a hung desktop health probe cannot retain the task gate", async () => {
     const results = await Promise.all([first, second]);
     assert.equal(results.every((result) =>
       result._tag === "ConfirmedAppServer"), true);
+    assert.equal(routeCalls, 1);
+    assert.equal((await fixture.circuitState(request().threadId))._tag, "Open");
     assert.deepEqual(fixture.recorder.localDeliveries,
       ["delivery-health-timeout", "delivery-after-health-timeout"]);
   } finally {

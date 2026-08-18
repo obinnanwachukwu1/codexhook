@@ -1,7 +1,9 @@
 import { Context, Effect, Exit, Layer } from "effect";
 import { Logger } from "../logger.js";
 import type { ThreadId, TurnRequest } from "../types.js";
-import { boundedEvidence, boundedReceipt, boundedRouteState, INTERNAL } from "./bounded.js";
+import {
+  boundedEvidence, boundedReceipt, boundedRouteState, INTERNAL, TIMEOUT,
+} from "./bounded.js";
 import {
   decideDesktopEvidence,
   unsettledWriteDiagnostic,
@@ -238,6 +240,10 @@ export function DeliveryCoordinatorLive(
             desktop.routeState(request.threadId),
             request.turnTimeout,
           );
+          if (state._tag === "TimedOut") {
+            openDesktopCircuit(delivery, TIMEOUT);
+            return { _tag: "DirectAppServer", desktopReceipt: null };
+          }
           // Keep these states distinct: public adapters retain why desktop was
           // skipped even though both states currently route through app-server.
           if (state._tag !== "HealthyAttached") {
@@ -301,12 +307,7 @@ export function DeliveryCoordinatorLive(
             } as const;
           }
           if (decision._tag === "Fallback") {
-            if (receipt._tag === "Acknowledged" ||
-                desktopEvidence._tag === "Found") {
-              openDesktopCircuit(delivery, WRITE_AMBIGUOUS);
-            } else {
-              closeIfOwnedBy(delivery);
-            }
+            closeIfOwnedBy(delivery);
             return yield* submitAppServer(request, gate, {
               desktopReceipt: receipt,
               desktopEvidence,

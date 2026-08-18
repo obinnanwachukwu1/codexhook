@@ -54,12 +54,13 @@ test("desktop evidence decision table is exhaustive and pure", () => {
           desktopProof,
           canonicalProof,
         );
+        const cannotFallback = receipt._tag === "Acknowledged" ||
+          receipt === timedOut || receipt === internalFailure ||
+          desktopProof._tag === "Found";
         const expected = canonicalProof._tag === "Found"
           ? "Confirm"
           : canonicalProof._tag === "Absent"
-            ? receipt === timedOut || receipt === internalFailure
-              ? "Ambiguous"
-              : "Fallback"
+            ? cannotFallback ? "Ambiguous" : "Fallback"
             : "Ambiguous";
         assert.equal(
           result._tag,
@@ -96,7 +97,7 @@ test("unattached and unhealthy tasks route directly through app-server", async (
 test("canonical evidence drives the outcome and circuit transition", async (t) => {
   const cases = [
     { canonical: found, outcome: "ConfirmedDesktop", circuit: "Closed" },
-    { canonical: absent, outcome: "ConfirmedAppServer", circuit: "Open" },
+    { canonical: absent, outcome: "Ambiguous", circuit: "Open" },
     { canonical: unresolved, outcome: "Ambiguous", circuit: "Open" },
   ] as const;
   for (const entry of cases) {
@@ -111,6 +112,7 @@ test("canonical evidence drives the outcome and circuit transition", async (t) =
           (await fixture.circuitState(request().threadId))._tag,
           entry.circuit,
         );
+        assert.deepEqual(fixture.recorder.localDeliveries, []);
       } finally {
         await fixture.runtime.dispose();
       }
@@ -229,6 +231,8 @@ test("fallback proof preserves both canonical observations", async () => {
     canonicalEvidence: () => Effect.succeed(
       ++reconciliation === 1 ? absent : found,
     ),
+    desktopReceipt: () => Effect.succeed(uncertain),
+    desktopEvidence: () => Effect.succeed(unresolved),
     localReceipt: () => Effect.succeed(uncertain),
   });
   try {
