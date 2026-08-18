@@ -1,62 +1,150 @@
-import type { DesktopWireEnvelope } from "./desktop-ipc/index.js";
 import type { Turn } from "./protocol.js";
+import { DesktopTimeoutError } from "./desktop-errors.js";
+import type {
+  DesktopTaskChange,
+  DesktopTurnDelta,
+} from "./desktop-task-protocol.js";
 
-interface Patch {
-  readonly op?: string;
-  readonly path?: ReadonlyArray<string | number>;
-  readonly value?: unknown;
+type ConnectionState = "disconnected" | "connecting" | "connected";
+type AttachmentState = "detached" | "following" | "synchronized";
+type ActivityState = "unknown" | "idle" | "active";
+type InjectionState =
+  | "idle"
+  | "injecting"
+  | "confirmed"
+  | "uncertain"
+  | "rejected";
+
+export interface DesktopTaskSnapshot {
+  readonly connection: ConnectionState;
+  readonly attachment: AttachmentState;
+  readonly activity: ActivityState;
+  readonly injection: InjectionState;
+  readonly generation: number;
+  readonly revision: number | null;
+  readonly turns: ReadonlyArray<Turn>;
 }
 
+export type DesktopChangeResult = "applied" | "ignored" | "resync";
+
 export class DesktopThreadState {
+  private attachmentValue: AttachmentState = "detached";
+  private connectionValue: ConnectionState = "disconnected";
+  private readonly deliveryIds = new Set<string>();
+  private readonly deliveryTurns = new Map<string, string>();
   private readonly entityTurns = new Map<string, string>();
-  private initialized = false;
+  private generationValue = 0;
+  private injection: InjectionState = "idle";
   private readonly listeners = new Set<() => void>();
-  private resync = false;
-  private revision: number | null = null;
+  private revisionValue: number | null = null;
   private readonly turns = new Map<string, Turn>();
 
   constructor(readonly threadId: string) {}
 
-  snapshot(): ReadonlyArray<Turn> {
-    return [...this.turns.values()];
+  get attachment(): AttachmentState {
+    return this.attachmentValue;
+  }
+
+  get connection(): ConnectionState {
+    return this.connectionValue;
+  }
+
+  get generation(): number {
+    return this.generationValue;
   }
 
   get ready(): boolean {
-    return this.initialized;
+    return this.attachmentValue === "synchronized";
   }
 
-  reset(): void {
-    this.entityTurns.clear();
-    this.initialized = false;
-    this.resync = false;
-    this.revision = null;
-    this.turns.clear();
-    for (const listener of this.listeners) listener();
+  get revision(): number | null {
+    return this.revisionValue;
   }
 
-  takeResyncRequest(): boolean {
-    if (!this.resync) return false;
-    this.resync = false;
-    return true;
+  turnsSnapshot(): ReadonlyArray<Turn> {
+    return [...this.turns.values()];
+  }
+
+  evidence(): DesktopTaskSnapshot {
+    return {
+      connection: this.connectionValue,
+      attachment: this.attachmentValue,
+      activity: !this.ready
+        ? "unknown"
+        : [...this.turns.values()].some(
+            (turn) => turn.status === "inProgress",
+          ) ? "active" : "idle",
+      injection: this.injection,
+      generation: this.generationValue,
+      revision: this.revisionValue,
+      turns: this.turnsSnapshot(),
+    };
+  }
+
+  activeTurn(): Turn | undefined {
+    const active = [...this.turns.values()].filter(
+      (turn) => turn.status === "inProgress",
+    );
+    return active.length === 1 ? active[0] : undefined;
+  }
+
+  hasMultipleActiveTurns(): boolean {
+    let count = 0;
+    for (const turn of this.turns.values()) {
+      if (turn.status === "inProgress" && ++count > 1) return true;
+    }
+    return false;
   }
 
   turn(turnId: string): Turn | undefined {
     return this.turns.get(turnId);
   }
 
-  observeTurn(turnId: string): void {
-    if (this.turns.has(turnId)) return;
-    this.turns.set(turnId, {
-      id: turnId,
-      status: "inProgress",
-      error: null,
-    });
+  hasDelivery(deliveryId: string, turnId?: string): boolean {
+    if (!this.deliveryIds.has(deliveryId)) return false;
+    return turnId == null || this.deliveryTurns.get(deliveryId) === turnId;
   }
 
-  waitFor(
-    predicate: () => boolean,
-    timeoutMs: number,
-  ): Promise<void> {
+  beginConnecting(): void {
+    this.connectionValue = "connecting";
+    this.attachmentValue = "detached";
+    this.emit();
+  }
+
+  beginFollowing(generation: number): void {
+    this.connectionValue = "connected";
+    this.attachmentValue = "following";
+    this.generationValue = generation;
+    this.revisionValue = null;
+    this.clearObservedState();
+    this.emit();
+  }
+
+  beginResync(): void {
+    this.attachmentValue = "following";
+    this.emit();
+  }
+
+  disconnected(): void {
+    this.connectionValue = "disconnected";
+    this.attachmentValue = "detached";
+    if (this.injection === "injecting") this.injection = "uncertain";
+    this.emit();
+  }
+
+  setInjection(result: InjectionState): void {
+    this.injection = result;
+    this.emit();
+  }
+
+  apply(change: DesktopTaskChange, generation: number): DesktopChangeResult {
+    if (generation !== this.generationValue ||
+        this.connectionValue !== "connected") return "ignored";
+    if (change._tag === "Snapshot") return this.applySnapshot(change);
+    return this.applyPatches(change);
+  }
+
+  waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
     if (predicate()) return Promise.resolve();
     return new Promise((resolve, reject) => {
       const listener = () => {
@@ -66,7 +154,7 @@ export class DesktopThreadState {
       };
       const timeout = setTimeout(() => {
         cleanup();
-        reject(new Error("Desktop thread state timed out"));
+        reject(new DesktopTimeoutError("Desktop thread state timed out"));
       }, timeoutMs);
       const cleanup = () => {
         clearTimeout(timeout);
@@ -76,114 +164,122 @@ export class DesktopThreadState {
     });
   }
 
-  apply(message: DesktopWireEnvelope): void {
-    if (
-      message.method !== "thread-stream-state-changed" ||
-      message.params == null ||
-      typeof message.params !== "object"
-    ) return;
-    const params = message.params as {
-      conversationId?: unknown;
-      change?: unknown;
-    };
-    if (params.conversationId !== this.threadId) return;
-    const change = params.change as {
-      type?: string;
-      baseRevision?: number;
-      revision?: number;
-      conversationState?: unknown;
-      patches?: ReadonlyArray<Patch>;
-    } | undefined;
-    if (change?.type === "snapshot") {
-      if (typeof change.revision === "number") {
-        this.revision = change.revision;
-      }
-      this.initialized = true;
-      this.entityTurns.clear();
-      this.turns.clear();
-      this.readSnapshot(change.conversationState);
-    } else if (change?.type === "patches") {
-      if (
-        this.revision != null &&
-        change.baseRevision !== this.revision
-      ) {
-        this.initialized = false;
-        this.resync = true;
-        for (const listener of this.listeners) listener();
-        return;
-      }
-      for (const patch of change.patches ?? []) this.readPatch(patch);
-      if (typeof change.revision === "number") {
-        this.revision = change.revision;
-      }
+  private applySnapshot(
+    change: Extract<DesktopTaskChange, { readonly _tag: "Snapshot" }>,
+  ): DesktopChangeResult {
+    if (!validRevision(change.revision)) return this.requestResync();
+    if (this.revisionValue != null &&
+        (change.revision < this.revisionValue ||
+          (this.ready && change.revision === this.revisionValue))) {
+      return "ignored";
     }
+    this.revisionValue = change.revision;
+    this.clearObservedState();
+    for (const entity of change.entities) {
+      this.bindTurn(entity.key, entity.turn);
+    }
+    for (const deliveryId of change.deliveryIds) {
+      this.deliveryIds.add(deliveryId);
+    }
+    this.bindDeliveries(change.deliveryBindings ?? []);
+    this.attachmentValue = "synchronized";
+    this.emit();
+    return "applied";
+  }
+
+  private applyPatches(
+    change: Extract<DesktopTaskChange, { readonly _tag: "Patches" }>,
+  ): DesktopChangeResult {
+    if (!this.ready || this.revisionValue == null) {
+      return this.requestResync();
+    }
+    if (!validRevision(change.baseRevision) ||
+        !validRevision(change.revision)) return this.requestResync();
+    if (change.revision <= this.revisionValue) return "ignored";
+    if (change.baseRevision !== this.revisionValue ||
+        change.revision <= change.baseRevision) return this.requestResync();
+    for (const delta of change.deltas) this.applyDelta(delta);
+    for (const deliveryId of change.deliveryIds) {
+      this.deliveryIds.add(deliveryId);
+    }
+    this.bindDeliveries(change.deliveryBindings ?? []);
+    this.revisionValue = change.revision;
+    this.emit();
+    return "applied";
+  }
+
+  private applyDelta(delta: DesktopTurnDelta): void {
+    if (delta._tag === "Upsert") {
+      this.bindTurn(delta.entity.key, delta.entity.turn);
+      return;
+    }
+    if (delta._tag === "Bind") {
+      this.bindTurn(delta.key, this.turns.get(delta.turnId) ?? {
+        id: delta.turnId,
+        status: "inProgress",
+        error: null,
+      });
+      return;
+    }
+    const turnId = this.entityTurns.get(delta.key);
+    const turn = turnId == null ? undefined : this.turns.get(turnId);
+    if (delta._tag === "Remove") {
+      this.entityTurns.delete(delta.key);
+      if (turnId != null &&
+          ![...this.entityTurns.values()].includes(turnId)) {
+        this.turns.delete(turnId);
+        this.dropTurnDeliveries(turnId);
+      }
+    } else if (turn != null && delta._tag === "Status") {
+      this.turns.set(turn.id, { ...turn, status: delta.status });
+    } else if (turn != null && delta._tag === "Error") {
+      this.turns.set(turn.id, { ...turn, error: delta.error });
+    }
+  }
+
+  private bindTurn(key: string, turn: Turn): void {
+    const previous = this.entityTurns.get(key);
+    this.entityTurns.set(key, turn.id);
+    if (previous != null && previous !== turn.id &&
+        ![...this.entityTurns.values()].includes(previous)) {
+      this.turns.delete(previous);
+      this.dropTurnDeliveries(previous);
+    }
+    this.turns.set(turn.id, turn);
+  }
+
+  private requestResync(): DesktopChangeResult {
+    this.beginResync();
+    return "resync";
+  }
+
+  private clearObservedState(): void {
+    this.deliveryIds.clear();
+    this.deliveryTurns.clear();
+    this.entityTurns.clear();
+    this.turns.clear();
+  }
+
+  private bindDeliveries(
+    bindings: ReadonlyArray<{ readonly key: string; readonly deliveryId: string }>,
+  ): void {
+    for (const binding of bindings) {
+      const turnId = this.entityTurns.get(binding.key);
+      if (turnId != null) this.deliveryTurns.set(binding.deliveryId, turnId);
+    }
+  }
+
+  private dropTurnDeliveries(turnId: string): void {
+    for (const [deliveryId, observedTurnId] of this.deliveryTurns) {
+      if (observedTurnId === turnId) this.deliveryTurns.delete(deliveryId);
+    }
+  }
+
+  private emit(): void {
     for (const listener of this.listeners) listener();
-  }
-
-  private readSnapshot(value: unknown): void {
-    if (value == null || typeof value !== "object") return;
-    const state = value as {
-      turnHistory?: {
-        history?: { entitiesByKey?: Record<string, unknown> };
-      };
-    };
-    const entities =
-      state.turnHistory?.history?.entitiesByKey ?? {};
-    for (const [key, entity] of Object.entries(entities)) {
-      this.readEntity(entity, key);
-    }
-  }
-
-  private readPatch(patch: Patch): void {
-    const path = patch.path ?? [];
-    if (!path.includes("entitiesByKey")) return;
-    const keyIndex = path.indexOf("entitiesByKey") + 1;
-    const key = path[keyIndex];
-    if (
-      path.at(-1) === "turnId" &&
-      typeof key === "string" &&
-      typeof patch.value === "string"
-    ) {
-      this.entityTurns.set(key, patch.value);
-      this.observeTurn(patch.value);
-      return;
-    }
-    if (path.at(-1) === "status") {
-      const turnId =
-        typeof key === "string" ? this.entityTurns.get(key) : null;
-      const existing = turnId == null ? null : this.turns.get(turnId);
-      if (existing != null && typeof patch.value === "string") {
-        this.turns.set(existing.id, {
-          ...existing,
-          status: normalizeStatus(patch.value),
-        });
-      }
-      return;
-    }
-    this.readEntity(patch.value, typeof key === "string" ? key : undefined);
-  }
-
-  private readEntity(value: unknown, entityKey?: string): void {
-    if (value == null || typeof value !== "object") return;
-    const entity = value as {
-      turnId?: unknown;
-      status?: unknown;
-      error?: { message?: string } | null;
-    };
-    if (typeof entity.turnId !== "string") return;
-    if (entityKey != null) this.entityTurns.set(entityKey, entity.turnId);
-    this.turns.set(entity.turnId, {
-      id: entity.turnId,
-      status: normalizeStatus(entity.status),
-      error: entity.error,
-    });
   }
 }
 
-function normalizeStatus(value: unknown): Turn["status"] {
-  return value === "completed" ||
-    value === "interrupted" ||
-    value === "failed"
-    ? value
-    : "inProgress";
+function validRevision(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
 }

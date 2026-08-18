@@ -4,16 +4,19 @@ import {
   Duration,
   Effect,
   FiberId,
-  Option,
   Schema,
   Scope,
 } from "effect";
 import {
   DesktopProtocolError,
-  DesktopProtocolSession,
-  type DesktopKnownRejection,
 } from "./desktop-ipc/index.js";
-import { DesktopThreadState } from "./desktop-state.js";
+import { DesktopAttachment } from "./desktop-attachment.js";
+import { desktopOutcomeDetail } from "./desktop-injection.js";
+import {
+  desktopErrorMessage,
+  DesktopTimeoutError,
+} from "./desktop-errors.js";
+import { DesktopIpcProtocol } from "./desktop-task-protocol.js";
 import {
   TransportIncompatible,
   TransportUnavailable,
@@ -44,61 +47,10 @@ function ticketPayload(ticket: RpcTicket): {
   };
 }
 
-function confirmsNoSubmission(error: DesktopKnownRejection): boolean {
-  return error !== "unknown";
-}
-
-function desktopSubmitError(
-  cause: unknown,
-): RpcNotWritten | RpcWriteAmbiguous {
-  if (cause instanceof RpcNotWritten) return cause;
-  if (
-    cause instanceof DesktopProtocolError &&
-    cause.writeState === "not-written"
-  ) {
-    return new RpcNotWritten({ detail: cause.message });
-  }
-  return new RpcWriteAmbiguous({
-    detail: cause instanceof Error ? cause.message : String(cause),
-  });
-}
-
 function makePeer(
   spec: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
-  client: DesktopProtocolSession,
+  attachment: DesktopAttachment,
 ): AppServerPeer {
-  const states = new Map<string, DesktopThreadState>();
-  client.onObservation((observation) => {
-    if (observation._tag !== "Reconnecting") return;
-    for (const state of states.values()) state.reset();
-  });
-  client.onBroadcast((message) => {
-    for (const state of states.values()) {
-      state.apply(message);
-      if (state.takeResyncRequest()) {
-        void client
-          .loadCompleteHistory(state.threadId, 30_000)
-          .catch(() => undefined);
-      }
-    }
-  });
-
-  const follow = async (threadId: string): Promise<DesktopThreadState> => {
-    let state = states.get(threadId);
-    if (state == null) {
-      state = new DesktopThreadState(threadId);
-      states.set(threadId, state);
-      try {
-        await client.followThread(threadId);
-      } catch (cause) {
-        if (states.get(threadId) === state) states.delete(threadId);
-        throw cause;
-      }
-    }
-    await state.waitFor(() => state?.ready === true, 5_000);
-    return state;
-  };
-
   const prepare: AppServerPeer["prepare"] = (method, params) =>
     Effect.sync(() => ({
       id: randomUUID(),
@@ -112,70 +64,65 @@ function makePeer(
       try: async () => {
         const { method, params } = ticketPayload(ticket);
         const threadId = String(params.threadId ?? "");
-        const { threadId: _, ...input } = params;
-        const response = method === "turn/steer"
-          ? await client.steerTurn(threadId, input, 30_000)
-          : await client.startTurn(threadId, input, 30_000);
-        if (response.outcome._tag === "Rejected") {
-          if (confirmsNoSubmission(response.outcome.rejection)) {
-            throw new RpcNotWritten({
-              detail: `Desktop confirmed no submission (${response.outcome.rejection})`,
+        const deliveryId = String(params.clientUserMessageId ?? "");
+        const result = await attachment.inject(method === "turn/steer"
+          ? {
+              kind: "steer",
+              threadId,
+              expectedTurnId: String(params.expectedTurnId ?? ""),
+              clientUserMessageId: deliveryId,
+              input: params.input,
+            }
+          : {
+              kind: "start",
+              threadId,
+              clientUserMessageId: deliveryId,
+              input: params.input,
             });
-          }
+        if (result._tag === "NotSubmitted") {
+          throw new RpcNotWritten({ detail: desktopOutcomeDetail(result) });
+        }
+        if (result._tag === "Ambiguous") {
+          throw new RpcWriteAmbiguous({ detail: desktopOutcomeDetail(result) });
+        }
+        if (result._tag === "Rejected") {
           Deferred.unsafeDone(
             ticket.reply,
             Effect.fail(
               new RpcErrorReply({
                 code: -32_000,
-                message: "Desktop rejected the request",
+                message: desktopOutcomeDetail(result),
               }),
             ),
           );
           return;
         }
-        const observedTurnId = response.outcome.value.turnId;
-        if (observedTurnId != null) {
-          states.get(threadId)?.observeTurn(observedTurnId);
-        }
-        if (method !== "turn/steer" && observedTurnId == null) {
-          throw new RpcWriteAmbiguous({
-            detail: "Desktop accepted start without a turn id",
-          });
-        }
-        const result =
-          method === "turn/steer"
-            ? {
-                turnId:
-                  observedTurnId ??
-                  String(params.expectedTurnId ?? ""),
-              }
-            : {
-                turn: {
-                  id: observedTurnId,
-                  status: "inProgress" as const,
-                  error: null,
-                },
-              };
-        Deferred.unsafeDone(ticket.reply, Effect.succeed(result));
+        Deferred.unsafeDone(
+          ticket.reply,
+          Effect.succeed(
+            method === "turn/steer"
+              ? { turnId: result.turnId }
+              : { turn: result.turn },
+          ),
+        );
       },
-      catch: desktopSubmitError,
+      catch: (cause) => cause instanceof RpcNotWritten ||
+          cause instanceof RpcWriteAmbiguous
+        ? cause
+        : new RpcWriteAmbiguous({ detail: desktopErrorMessage(cause) }),
     });
 
   const reply: AppServerPeer["reply"] = (ticket, schema, timeout) =>
     Deferred.await(ticket.reply).pipe(
       Effect.timeoutFail({
         duration: timeout,
-        onTimeout: () =>
-          new RpcTimeout({ millis: durationMillis(timeout) }),
+        onTimeout: () => new RpcTimeout({ millis: durationMillis(timeout) }),
       }),
-      Effect.flatMap((value) =>
-        Schema.decodeUnknown(schema)(value).pipe(
-          Effect.mapError(
-            (error) =>
-              new RpcMalformed({ detail: String(error) }),
-          ),
+      Effect.flatMap((value) => Schema.decodeUnknown(schema)(value).pipe(
+        Effect.mapError((error) =>
+          new RpcMalformed({ detail: String(error) }),
         ),
-      ),
+      )),
     );
 
   const request: AppServerPeer["request"] = (
@@ -185,44 +132,38 @@ function makePeer(
     timeout,
   ) => {
     if (method !== "thread/resume") {
-      return Effect.fail(
-        new RpcNotWritten({
-          detail: `Desktop IPC does not support ${method}`,
-        }),
-      );
+      return Effect.fail(new RpcNotWritten({
+        detail: `Desktop IPC does not support ${method}`,
+      }));
     }
     const threadId = String(
       (params as { readonly threadId?: unknown }).threadId ?? "",
     );
     return Effect.tryPromise({
       try: async () => {
-        const state = await follow(threadId);
-        return { thread: { id: threadId, turns: state.snapshot() } };
+        const turns = await attachment.resume(threadId);
+        return { thread: { id: threadId, turns } };
       },
-      catch: (cause) =>
-        new RpcNotWritten({
-          detail: cause instanceof Error ? cause.message : String(cause),
-        }),
+      catch: (cause) => new RpcNotWritten({
+        detail: desktopErrorMessage(cause),
+      }),
     }).pipe(
       Effect.timeoutFail({
         duration: timeout,
-        onTimeout: () =>
-          new RpcTimeout({ millis: durationMillis(timeout) }),
+        onTimeout: () => new RpcTimeout({ millis: durationMillis(timeout) }),
       }),
-      Effect.flatMap((value) =>
-        Schema.decodeUnknown(schema)(value).pipe(
-          Effect.mapError(
-            (error) => new RpcMalformed({ detail: String(error) }),
-          ),
+      Effect.flatMap((value) => Schema.decodeUnknown(schema)(value).pipe(
+        Effect.mapError((error) =>
+          new RpcMalformed({ detail: String(error) }),
         ),
-      ),
+      )),
     );
   };
 
   return {
     spec,
     serverInfo: null,
-    isAlive: Effect.sync(() => client.alive),
+    isAlive: Effect.sync(() => attachment.connected),
     onNotification: (_listener, onClose) => {
       queueMicrotask(() => onClose?.());
       return () => undefined;
@@ -232,39 +173,64 @@ function makePeer(
     submit,
     reply,
     request,
-    awaitTurn: (turnId, timeout) =>
-      Effect.tryPromise({
-        try: async () => {
-          const followed = [...states.values()];
-          const state =
-            followed.find(
-              (candidate) => candidate.turn(turnId) != null,
-            ) ??
-            (followed.length === 1 ? followed[0] : null);
-          if (state == null) {
-            throw new Error("Desktop task was not followed");
-          }
-          await state.waitFor(
-            () => {
-              const turn = state.turn(turnId);
-              return turn != null && turn.status !== "inProgress";
-            },
-            durationMillis(timeout),
-          );
-          const turn = state.turn(turnId);
-          if (turn == null) throw new Error("Desktop turn disappeared");
-          return turn;
-        },
-        catch: (cause) =>
-          cause instanceof Error &&
-          cause.message.includes("timed out")
-            ? new RpcTimeout({ millis: durationMillis(timeout) })
-            : new RpcDisconnected({
-                detail:
-                  cause instanceof Error ? cause.message : String(cause),
-              }),
+    awaitTurn: (threadId, turnId, timeout) => Effect.tryPromise({
+        try: () => attachment.awaitTurn(
+          threadId,
+          turnId,
+          durationMillis(timeout),
+        ),
+        catch: (cause) => cause instanceof DesktopTimeoutError
+          ? new RpcTimeout({ millis: durationMillis(timeout) })
+          : new RpcDisconnected({ detail: desktopErrorMessage(cause) }),
       }),
   };
+}
+
+function connectError(cause: unknown) {
+  const detail = desktopErrorMessage(cause);
+  if (!(cause instanceof DesktopProtocolError)) {
+    return new TransportIncompatible({
+      transport: "desktop" as const,
+      stage: "initialize" as const,
+      detail,
+    });
+  }
+  if (cause.failure === "socket-unavailable") {
+    return new TransportUnavailable({
+      transport: "desktop" as const,
+      reason: "not-running" as const,
+      detail,
+    });
+  }
+  if (cause.failure === "socket-failed") {
+    return new TransportUnavailable({
+      transport: "desktop" as const,
+      reason: "connect-failed" as const,
+      detail,
+    });
+  }
+  if (
+    cause.failure === "connect-timeout" ||
+    cause.failure === "request-timeout"
+  ) {
+    return new TransportUnavailable({
+      transport: "desktop" as const,
+      reason: "handshake-timeout" as const,
+      detail,
+    });
+  }
+  if (cause.failure === "closed" || cause.failure === "write-failed") {
+    return new TransportUnavailable({
+      transport: "desktop" as const,
+      reason: "exited" as const,
+      detail,
+    });
+  }
+  return new TransportIncompatible({
+    transport: "desktop" as const,
+    stage: "malformed" as const,
+    detail,
+  });
 }
 
 export function connectDesktop(
@@ -275,74 +241,23 @@ export function connectDesktop(
   Scope.Scope
 > {
   return Effect.suspend(() => {
-    let acquired: DesktopProtocolSession | null = null;
+    let acquired: DesktopAttachment | null = null;
     const open = Effect.tryPromise({
-      try: (signal) => DesktopProtocolSession.connect(
+      try: (signal) => DesktopIpcProtocol.connect(
         spec.socketPath,
-        {},
         signal,
-        (client) => {
-          acquired = client;
-        },
       ),
-      catch: (cause) => {
-        const detail =
-          cause instanceof Error ? cause.message : String(cause);
-        if (!(cause instanceof DesktopProtocolError)) {
-          return new TransportIncompatible({
-            transport: "desktop",
-            stage: "initialize",
-            detail,
-          });
-        }
-        if (cause.failure === "socket-unavailable") {
-          return new TransportUnavailable({
-            transport: "desktop",
-            reason: "not-running",
-            detail,
-          });
-        }
-        if (cause.failure === "socket-failed") {
-          return new TransportUnavailable({
-            transport: "desktop",
-            reason: "connect-failed",
-            detail,
-          });
-        }
-        if (cause.failure === "connect-timeout") {
-          return new TransportUnavailable({
-            transport: "desktop",
-            reason: "connect-failed",
-            detail,
-          });
-        }
-        if (cause.failure === "request-timeout") {
-          return new TransportUnavailable({
-            transport: "desktop",
-            reason: "handshake-timeout",
-            detail,
-          });
-        }
-        if (
-          cause.failure === "closed" ||
-          cause.failure === "write-failed"
-        ) {
-          return new TransportUnavailable({
-            transport: "desktop",
-            reason: "exited",
-            detail,
-          });
-        }
-        return new TransportIncompatible({
-          transport: "desktop",
-          stage: "malformed",
-          detail,
-        });
-      },
-    });
+      catch: connectError,
+    }).pipe(Effect.map((protocol) => {
+      const attachment = new DesktopAttachment(protocol);
+      acquired = attachment;
+      return attachment;
+    }));
     return Effect.acquireReleaseInterruptible(
       open,
       () => Effect.sync(() => acquired?.close()),
-    ).pipe(Effect.map((client) => makePeer(spec, client)));
+    ).pipe(
+      Effect.map((attachment) => makePeer(spec, attachment)),
+    );
   });
 }

@@ -32,6 +32,8 @@ export interface DesktopProtocolFingerprint {
 }
 
 export interface DesktopProtocolProfile {
+  /** Codexhook adapter contract version, independent of app/build metadata. */
+  readonly compatibility: { readonly major: number; readonly revision: number };
   readonly capabilities: DesktopCapabilities;
   readonly fingerprint: DesktopProtocolFingerprint;
 }

@@ -43,7 +43,7 @@ export function confirmDesktopVisibility(
         REFRESH_TIMEOUT,
       ).pipe(
         Effect.zipRight(
-          peer.awaitTurn(outcome.turnId, REFRESH_TIMEOUT),
+          peer.awaitTurn(outcome.threadId, outcome.turnId, REFRESH_TIMEOUT),
         ),
         Effect.catchAll((error) =>
           peer.isAlive.pipe(
