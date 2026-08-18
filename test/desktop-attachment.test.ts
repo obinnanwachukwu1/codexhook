@@ -57,7 +57,10 @@ test("serializes commands per task and rejects a racing second start", async () 
   assert.equal(protocol.injections.length, 1);
   release();
   assert.equal((await first)._tag, "Confirmed");
-  assert.equal((await second)._tag, "NotSubmitted");
+  const secondResult = await second;
+  assert.equal(secondResult._tag, "NotSubmitted");
+  if (secondResult._tag !== "NotSubmitted") return;
+  assert.equal(secondResult.submissionReason, "task-busy");
   assert.equal(protocol.injections.length, 1);
 });
 

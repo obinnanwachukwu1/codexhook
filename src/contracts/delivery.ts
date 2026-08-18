@@ -102,8 +102,9 @@ export function mayFallback(
 ): boolean {
   return outcome.route === PHASE_ONE_DELIVERY_POLICY.preferredRoute &&
     outcome._tag === "NotSubmitted" &&
-    // Type checking forces this allowlist to be revisited for new reasons.
-    PHASE_ONE_DELIVERY_POLICY.fallbackAfter.includes(outcome.reason);
+    PHASE_ONE_DELIVERY_POLICY.fallbackAfter.some(
+      (reason) => reason === outcome.reason,
+    );
 }
 
 export interface DeliveryCoordinator {

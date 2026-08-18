@@ -123,9 +123,14 @@ test("fallback requires a confirmed Desktop non-submission", () => {
     ...notSubmitted,
     reason: "confirmed-not-submitted",
   };
+  const taskBusy: RouteSubmissionOutcome = {
+    ...notSubmitted,
+    reason: "task-busy",
+  };
 
   assert.equal(mayFallback(notSubmitted), true);
   assert.equal(mayFallback(confirmedNotSubmitted), true);
+  assert.equal(mayFallback(taskBusy), false);
   assert.equal(mayFallback(ambiguous), false);
   assert.equal(mayFallback(confirmed), false);
   assert.equal(mayFallback(rejected), false);

@@ -1,4 +1,4 @@
-import { Duration, Effect, Layer, Option } from "effect";
+import { Cause, Duration, Effect, Layer, Option } from "effect";
 import {
   type DeliveryAttempt,
   type DeliveryOutcome,
@@ -18,9 +18,7 @@ import type { DeliveryId, ThreadId } from "../types.js";
 import {
   TaskGatePool,
   attempt,
-  awaitIdle,
   confirmed,
-  inspectIdle,
   reconcileDelivery,
   remainingWait,
   routeResult,
@@ -30,9 +28,16 @@ import {
   type PendingReconciliation,
   type RoutingResult,
 } from "./coordinator-support.js";
+import {
+  awaitActivityCycle,
+  awaitIdle,
+  inspectIdle,
+} from "./coordinator-queue.js";
 
 interface RetryIdle {
   readonly _tag: "RetryIdle";
+  /** Desktop observed activity that the canonical stream must see complete. */
+  readonly requireActivity: boolean;
 }
 
 type DesktopDecision = RouteSubmissionOutcome<"desktop"> | RetryIdle;
@@ -122,7 +127,7 @@ export const LocalDeliveryCoordinatorLive = Layer.effect(
             ) as RouteSubmissionOutcome<"desktop">;
           }
           if (request.mode === "queue" && followed.value.activeTurnId != null) {
-            return { _tag: "RetryIdle" } as const;
+            return { _tag: "RetryIdle", requireActivity: true } as const;
           }
           if (Date.now() >= deadline) {
             return timeoutBeforeWrite(
@@ -161,10 +166,12 @@ export const LocalDeliveryCoordinatorLive = Layer.effect(
               : "pre-submit-failure",
           failure.diagnostic,
         ) as RouteSubmissionOutcome<"desktop">)),
-        Effect.catchAllCause(() => Effect.succeed(
-          unexpected(request, "desktop", submitted) as
-            RouteSubmissionOutcome<"desktop">,
-        )),
+        Effect.catchAllCause((cause) => Cause.isInterruptedOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.succeed(
+            unexpected(request, "desktop", submitted) as
+              RouteSubmissionOutcome<"desktop">,
+          )),
       );
     };
 
@@ -211,10 +218,14 @@ export const LocalDeliveryCoordinatorLive = Layer.effect(
           replyTimeout: remainingWait(request, deadline),
         });
       });
-      return operation.pipe(Effect.catchAllCause(() => Effect.succeed(
-        unexpected(request, "app-server", submitted) as
-          RouteSubmissionOutcome<"app-server">,
-      )));
+      return operation.pipe(Effect.catchAllCause((cause) =>
+        Cause.isInterruptedOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.succeed(
+            unexpected(request, "app-server", submitted) as
+              RouteSubmissionOutcome<"app-server">,
+          )
+      ));
     };
 
     const route = (
@@ -224,6 +235,11 @@ export const LocalDeliveryCoordinatorLive = Layer.effect(
       const desktopStarted = Date.now();
       const desktopOutcome = yield* submitDesktop(request, deadline);
       if (desktopOutcome._tag === "RetryIdle") return desktopOutcome;
+      if (
+        request.mode === "queue" &&
+        desktopOutcome._tag === "NotSubmitted" &&
+        desktopOutcome.reason === "task-busy"
+      ) return { _tag: "RetryIdle", requireActivity: true } as const;
       const desktopAttempt = attempt(desktopOutcome, desktopStarted);
       if (desktopOutcome._tag === "Ambiguous") {
         desktopBreakers.set(request.task.threadId, request.deliveryId);
@@ -332,16 +348,22 @@ export const LocalDeliveryCoordinatorLive = Layer.effect(
               return idleUnavailable(request, inspection.diagnostic);
             }
             if (inspection._tag === "Active") {
-              return { _tag: "RetryIdle" } as const;
+              return { _tag: "RetryIdle", requireActivity: false } as const;
             }
             return yield* route(request, deadline);
           }));
         }),
-        Effect.flatMap((result) => result._tag === "RetryIdle"
-          ? Effect.sleep("10 millis").pipe(
-              Effect.zipRight(queueDelivery(request, deadline)),
-            )
-          : finish(request, deadline, result)),
+        Effect.flatMap((result) => {
+          if (result._tag !== "RetryIdle") {
+            return finish(request, deadline, result);
+          }
+          if (!result.requireActivity) return queueDelivery(request, deadline);
+          return awaitActivityCycle(local, request, deadline).pipe(
+            Effect.flatMap((failure) => failure == null
+              ? queueDelivery(request, deadline)
+              : Effect.succeed(idleUnavailable(request, failure))),
+          );
+        }),
       );
     });
 

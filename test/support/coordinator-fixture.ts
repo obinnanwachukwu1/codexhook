@@ -103,6 +103,7 @@ export function snapshot(
 }
 
 export interface CoordinatorFixtureOptions {
+  desktopFollow?: DesktopSession["follow"];
   desktopSubmit?: DesktopSession["submit"];
   desktopAvailability?: DesktopProtocol["availability"];
   localSubmit?: LocalCodexService["submit"];
@@ -115,12 +116,12 @@ export interface CoordinatorFixtureOptions {
 export function coordinatorRuntime(options: CoordinatorFixtureOptions = {}) {
   const session: DesktopSession = {
     compatibility: desktopCompatibility,
-    follow: (localTask) => Effect.succeed({
+    follow: options.desktopFollow ?? ((localTask) => Effect.succeed({
       task: localTask,
       activeTurnId: options.activeTurnId === undefined
         ? TurnId("active-turn")
         : options.activeTurnId,
-    }),
+    })),
     submit: options.desktopSubmit ?? ((input) => Effect.succeed({
       ...confirmed("desktop", input),
       route: "desktop" as const,

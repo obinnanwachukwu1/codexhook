@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Deferred, Effect, Stream } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber, Stream } from "effect";
 import type { LocalTaskEvent } from "../src/contracts/local-codex.js";
 import { LocalDeliveryCoordinator } from "../src/contracts/delivery.js";
 import { TurnId } from "../src/types.js";
@@ -127,6 +127,145 @@ test("queue mode waits for canonical idle evidence before mutation", async () =>
   });
   try {
     assert.equal((await deliver(service, input))._tag, "ConfirmedDesktop");
+  } finally {
+    await service.dispose();
+  }
+});
+
+test("Desktop busy waits for a canonical activity cycle without fallback or polling", async () => {
+  const input = request(task(), "queue-race", "queue", "200 millis");
+  const releaseActivity = await Effect.runPromise(Deferred.make<void>());
+  const active: LocalTaskEvent = {
+    type: "snapshot",
+    history: {
+      task: input.task,
+      turns: [{
+        id: TurnId("racing-turn"),
+        status: "in-progress",
+        deliveryIds: [],
+      }],
+    },
+  };
+  const completed: LocalTaskEvent = {
+    type: "turn-changed",
+    task: input.task,
+    turn: {
+      id: TurnId("racing-turn"),
+      status: "completed",
+      deliveryIds: [],
+    },
+  };
+  let subscriptions = 0;
+  let desktopSubmits = 0;
+  let localWrites = 0;
+  const service = coordinatorRuntime({
+    activeTurnId: null,
+    events: () => {
+      subscriptions += 1;
+      if (subscriptions !== 3) return Stream.succeed(snapshot(input));
+      return Stream.concat(
+        Stream.succeed(snapshot(input)),
+        Stream.concat(
+          Stream.fromEffect(Deferred.await(releaseActivity).pipe(
+            Effect.as(active),
+          )),
+          Stream.succeed(completed),
+        ),
+      );
+    },
+    desktopSubmit: (submission) => Effect.sync(() => {
+      desktopSubmits += 1;
+      if (desktopSubmits === 1) {
+        return {
+          _tag: "NotSubmitted" as const,
+          route: "desktop" as const,
+          deliveryId: submission.deliveryId,
+          reason: "task-busy" as const,
+          diagnostic: diagnostic("desktop-unavailable", "desktop"),
+        };
+      }
+      return {
+        _tag: "Confirmed" as const,
+        route: "desktop" as const,
+        deliveryId: submission.deliveryId,
+        turnId: TurnId("queued-turn"),
+        operation: "start" as const,
+      };
+    }),
+    localSubmit: () => Effect.sync(() => {
+      localWrites += 1;
+      throw new Error("must not fall back while the task is busy");
+    }),
+  });
+  try {
+    const pending = deliver(service, input);
+    while (desktopSubmits === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(desktopSubmits, 1);
+    assert.equal(localWrites, 0);
+    await Effect.runPromise(Deferred.succeed(releaseActivity, undefined));
+    assert.equal((await pending)._tag, "ConfirmedDesktop");
+    assert.equal(desktopSubmits, 2);
+    assert.equal(localWrites, 0);
+  } finally {
+    await service.dispose();
+  }
+});
+
+test("interrupting Desktop preparation cannot start an app-server fallback", async () => {
+  const entered = await Effect.runPromise(Deferred.make<void>());
+  let localWrites = 0;
+  const service = coordinatorRuntime({
+    desktopFollow: () => Deferred.succeed(entered, undefined).pipe(
+      Effect.zipRight(Effect.never),
+    ),
+    localSubmit: () => Effect.sync(() => {
+      localWrites += 1;
+      throw new Error("shutdown must not start another write");
+    }),
+  });
+  try {
+    const coordinator = await service.runPromise(LocalDeliveryCoordinator);
+    const fiber = Effect.runFork(coordinator.deliver(request()));
+    await Effect.runPromise(Deferred.await(entered));
+    const exit = await Effect.runPromise(Fiber.interrupt(fiber));
+    assert.equal(Exit.isFailure(exit), true);
+    if (Exit.isFailure(exit)) {
+      assert.equal(Cause.isInterruptedOnly(exit.cause), true);
+    }
+    assert.equal(localWrites, 0);
+  } finally {
+    await service.dispose();
+  }
+});
+
+test("interrupting an app-server submission remains an interruption", async () => {
+  const entered = await Effect.runPromise(Deferred.make<void>());
+  let submissions = 0;
+  const service = coordinatorRuntime({
+    desktopAvailability: Effect.succeed({
+      status: "unavailable",
+      diagnostic: diagnostic("desktop-unavailable", "desktop"),
+    }),
+    localSubmit: () => Effect.sync(() => {
+      submissions += 1;
+    }).pipe(
+      Effect.zipRight(Deferred.succeed(entered, undefined)),
+      Effect.zipRight(Effect.never),
+    ),
+  });
+  try {
+    const coordinator = await service.runPromise(LocalDeliveryCoordinator);
+    const fiber = Effect.runFork(coordinator.deliver(request()));
+    await Effect.runPromise(Deferred.await(entered));
+    const exit = await Effect.runPromise(Fiber.interrupt(fiber));
+    assert.equal(Exit.isFailure(exit), true);
+    if (Exit.isFailure(exit)) {
+      assert.equal(Cause.isInterruptedOnly(exit.cause), true);
+    }
+    assert.equal(submissions, 1);
   } finally {
     await service.dispose();
   }

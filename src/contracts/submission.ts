@@ -7,6 +7,8 @@ export type NotSubmittedReason =
   | "unavailable"
   | "incompatible"
   | "pre-submit-failure"
+  /** The task is active; queue mode must observe that activity finish. */
+  | "task-busy"
   /** The route replied after transport write but proved no Codex task write. */
   | "confirmed-not-submitted";
 

@@ -30,7 +30,10 @@ export type RoutingResult = DeliveryOutcome | PendingReconciliation;
 export function unavailable(
   request: DeliveryRequest,
   route: DeliveryRoute,
-  reason: "unavailable" | "incompatible" | "pre-submit-failure",
+  reason: Extract<
+    RouteSubmissionOutcome,
+    { readonly _tag: "NotSubmitted" }
+  >["reason"],
   diagnostic: SanitizedDiagnostic,
 ): RouteSubmissionOutcome {
   return {
@@ -188,123 +191,11 @@ export function routeResult(
   };
 }
 
-function timeoutDiagnostic(
+export function timeoutDiagnostic(
   route: DeliveryRoute,
   stage: "await-turn" | "reconcile-app-server",
 ): SanitizedDiagnostic {
   return sanitizeDiagnostic({ code: "timeout", stage, route });
-}
-
-export function awaitIdle(
-  local: LocalCodexService,
-  request: DeliveryRequest,
-  deadline: number,
-): Effect.Effect<SanitizedDiagnostic | null> {
-  const active = new Set<TurnId>();
-  let initialized = false;
-  const ready = local.events(request.task).pipe(
-    Stream.filterMap((event) => {
-      if (event.type === "task-removed") {
-        return Option.some(sanitizeDiagnostic({
-          code: "task-not-found",
-          stage: "await-turn",
-          route: "app-server",
-        }));
-      }
-      if (event.type === "snapshot") {
-        initialized = true;
-        active.clear();
-        for (const turn of event.history.turns) {
-          if (turn.status === "in-progress") active.add(turn.id);
-        }
-      } else if (initialized) {
-        if (event.turn.status === "in-progress") active.add(event.turn.id);
-        else active.delete(event.turn.id);
-      }
-      return initialized && active.size === 0
-        ? Option.some(null)
-        : Option.none();
-    }),
-    Stream.runHead,
-    Effect.timeoutOption(remainingWait(request, deadline)),
-    Effect.match({
-      onFailure: (failure) => failure.diagnostic,
-      onSuccess: (timed) => Option.isSome(timed) && Option.isSome(timed.value)
-        ? timed.value.value
-        : timeoutDiagnostic("app-server", "await-turn"),
-    }),
-    Effect.catchAllCause(() => Effect.succeed(sanitizeDiagnostic({
-      code: "internal",
-      stage: "await-turn",
-      route: "app-server",
-    }))),
-  );
-  return ready;
-}
-
-export type IdleInspection =
-  | { readonly _tag: "Idle" }
-  | { readonly _tag: "Active" }
-  | { readonly _tag: "Failed"; readonly diagnostic: SanitizedDiagnostic };
-
-/** Snapshot-first, one-event recheck used only while the mutation gate is held. */
-export function inspectIdle(
-  local: LocalCodexService,
-  request: DeliveryRequest,
-  deadline: number,
-): Effect.Effect<IdleInspection> {
-  return local.events(request.task).pipe(
-    Stream.runHead,
-    Effect.timeoutOption(remainingWait(request, deadline)),
-    Effect.match({
-      onFailure: (failure): IdleInspection => ({
-        _tag: "Failed",
-        diagnostic: failure.diagnostic,
-      }),
-      onSuccess: (timed): IdleInspection => {
-        if (Option.isNone(timed) || Option.isNone(timed.value)) {
-          return {
-            _tag: "Failed",
-            diagnostic: timeoutDiagnostic("app-server", "await-turn"),
-          };
-        }
-        const event = timed.value.value;
-        if (event.type === "task-removed") {
-          return {
-            _tag: "Failed",
-            diagnostic: sanitizeDiagnostic({
-              code: "task-not-found",
-              stage: "await-turn",
-              route: "app-server",
-            }),
-          };
-        }
-        if (event.type !== "snapshot") {
-          return {
-            _tag: "Failed",
-            diagnostic: sanitizeDiagnostic({
-              code: "internal",
-              stage: "await-turn",
-              route: "app-server",
-            }),
-          };
-        }
-        return event.history.turns.some((turn) =>
-            turn.status === "in-progress"
-          )
-          ? { _tag: "Active" }
-          : { _tag: "Idle" };
-      },
-    }),
-    Effect.catchAllCause(() => Effect.succeed({
-      _tag: "Failed" as const,
-      diagnostic: sanitizeDiagnostic({
-        code: "internal",
-        stage: "await-turn",
-        route: "app-server",
-      }),
-    })),
-  );
 }
 
 function eventTurn(
