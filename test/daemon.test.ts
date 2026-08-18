@@ -57,11 +57,10 @@ test("the unified daemon starts healthy and stops idempotently", async () => {
     const body = await health.json() as {
       status: string;
       lifecycle: { phase: string };
-      taskAccess: { source: string; candidatesFound: boolean };
+      taskAccess: { candidatesFound: boolean };
     };
     assert.equal(health.status, body.status === "ok" ? 200 : 503);
     assert.equal(body.lifecycle.phase, "ready");
-    assert.equal(body.taskAccess.source, "app-server");
     const probe = await probeDaemon(origin);
     assert.equal(probe.state, "running");
     if (probe.state === "running") {

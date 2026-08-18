@@ -73,8 +73,6 @@ export interface AppServerTaskEvent {
 
 export interface AppServerTaskStatus {
   readonly candidatesFound: boolean;
-  readonly candidates: ReadonlyArray<string>;
-  readonly source: "app-server";
 }
 
 export class AppServerTaskFailure extends Data.TaggedError(
@@ -114,33 +112,34 @@ function normalize(task: typeof Task.Type): AppServerTask {
   };
 }
 
+// Desktop IPC exposes thread/resume only; task list/history/events require a
+// full app-server peer.
+const TASK_CAPABLE_TRANSPORTS: ReadonlyArray<TransportId> = [
+  "daemon",
+  "app-bundled",
+  "cli",
+];
+
+function isTaskCapable(candidate: TransportId): boolean {
+  return TASK_CAPABLE_TRANSPORTS.includes(candidate);
+}
+
 function canonicalCandidates(
   candidates: ReadonlyArray<TransportSpec>,
 ): ReadonlyArray<TransportSpec> {
-  const order = ["daemon", "app-bundled", "cli"] as const;
   return candidates
-    .filter((candidate) =>
-      order.includes(candidate.id as (typeof order)[number]),
-    )
+    .filter((candidate) => isTaskCapable(candidate.id))
     .sort((left, right) =>
-      order.indexOf(left.id as (typeof order)[number]) -
-      order.indexOf(right.id as (typeof order)[number]),
+      TASK_CAPABLE_TRANSPORTS.indexOf(left.id) -
+      TASK_CAPABLE_TRANSPORTS.indexOf(right.id),
     );
 }
 
 export function appServerTaskStatus(
   candidates: ReadonlyArray<TransportId>,
 ): AppServerTaskStatus {
-  const available = candidates.filter(
-    (candidate) =>
-      candidate === "daemon" ||
-      candidate === "app-bundled" ||
-      candidate === "cli",
-  );
   return {
-    candidatesFound: available.length > 0,
-    candidates: available,
-    source: "app-server",
+    candidatesFound: candidates.some(isTaskCapable),
   };
 }
 

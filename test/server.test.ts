@@ -152,6 +152,29 @@ test("reports a claimed queue overflow as terminal, not retryable", async () => 
   assert.equal((await fetch(url, { method: "POST" })).status, 404);
 });
 
+test("reports steer capacity without calling it a thread queue", async () => {
+  const { registry, origin } = await fixture(() =>
+    Effect.succeed(Option.none()),
+  );
+  const hook = registry.create({
+    id: "steer-full",
+    threadId: "thread-1",
+    mode: "steer",
+    prependBody: "",
+    expiresAt: Math.floor(Date.now() / 1000) + 60,
+    maxDeliveries: 1,
+  });
+
+  const response = await fetch(`${origin}/w/${hook.token}`, {
+    method: "POST",
+  });
+  assert.equal(response.status, 202);
+  assert.equal(
+    (await response.json() as { reason: string }).reason,
+    "steer delivery capacity is full",
+  );
+});
+
 test("health responses identify the codexhook listener", async () => {
   const { origin } = await fixture(() => Effect.succeed(Option.none()));
   const response = await fetch(`${origin}/healthz`);

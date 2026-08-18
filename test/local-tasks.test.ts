@@ -122,8 +122,6 @@ test("task status derives from the transport health snapshot", () => {
     appServerTaskStatus(["desktop", "daemon", "cli"]),
     {
       candidatesFound: true,
-      candidates: ["daemon", "cli"],
-      source: "app-server",
     },
   );
 });

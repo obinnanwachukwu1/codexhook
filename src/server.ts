@@ -193,10 +193,13 @@ export function createCodexhookServer(
         Effect.flatMap(Delivery, (service) => service.submit(hook, body)),
       );
       if (Option.isNone(accepted)) {
+        const dropReason = hook.mode === "steer"
+          ? "steer delivery capacity is full"
+          : "thread delivery queue is full";
         logger.warn("delivery_dropped", {
           hookId: hook.id,
           threadId: hook.threadId,
-          reason: "thread delivery queue is full",
+          reason: dropReason,
         });
         // The hook was atomically claimed already. A 5xx would invite a
         // provider retry even though a one-shot URL is intentionally gone.
@@ -205,7 +208,7 @@ export function createCodexhookServer(
           deliveryId: null,
           hookId: hook.id,
           dropped: true,
-          reason: "thread delivery queue is full",
+          reason: dropReason,
         });
         return;
       }

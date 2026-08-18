@@ -99,7 +99,8 @@ export async function startUnifiedDaemon(
         lifecycle.beginDrain();
         logger.info("server_draining", { reason, graceMs });
         const deadline = Date.now() + graceMs;
-        httpDrained = await closeCodexhookServer(server, graceMs);
+        const httpGraceMs = Math.floor(graceMs / 2);
+        httpDrained = await closeCodexhookServer(server, httpGraceMs);
         await lifecycle.waitForIdle(Math.max(0, deadline - Date.now()));
         await runtime.runPromise(
           Effect.flatMap(Delivery, (service) => service.stopAccepting),
