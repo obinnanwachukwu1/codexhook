@@ -16,6 +16,7 @@ export class TransportUnavailable extends Data.TaggedError(
     | "connect-failed"
     | "handshake-timeout"
     | "not-running"
+    | "pre-submit-failure"
     | "exited";
   readonly detail: string;
 }> {}

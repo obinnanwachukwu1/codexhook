@@ -9,9 +9,6 @@ import {
 } from "effect";
 import {
   DesktopAttachment,
-  DesktopNotWrittenError,
-  DesktopRejectedError,
-  DesktopUncertainError,
 } from "./desktop-attachment.js";
 import {
   DesktopIpcConnectError,
@@ -51,8 +48,6 @@ function makePeer(
   spec: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
   attachment: DesktopAttachment,
 ): AppServerPeer {
-  const followedThreads = new Set<string>();
-  const turnThreads = new Map<string, string>();
   const prepare: AppServerPeer["prepare"] = (method, params) =>
     Effect.sync(() => ({
       id: randomUUID(),
@@ -66,28 +61,30 @@ function makePeer(
       try: async () => {
         const { method, params } = ticketPayload(ticket);
         const threadId = String(params.threadId ?? "");
-        let result;
-        try {
-          result = await attachment.inject({
-            kind: method === "turn/steer" ? "steer" : "start",
-            threadId,
-            ...(method === "turn/steer"
-              ? { expectedTurnId: String(params.expectedTurnId ?? "") }
-              : {}),
-            clientUserMessageId: String(params.clientUserMessageId ?? ""),
-            input: params.input,
-          });
-        } catch (cause) {
-          if (!(cause instanceof DesktopRejectedError)) throw cause;
+        const result = await attachment.inject({
+          kind: method === "turn/steer" ? "steer" : "start",
+          threadId,
+          ...(method === "turn/steer"
+            ? { expectedTurnId: String(params.expectedTurnId ?? "") }
+            : {}),
+          clientUserMessageId: String(params.clientUserMessageId ?? ""),
+          input: params.input,
+        });
+        if (result._tag === "NotSubmitted") {
+          throw new RpcNotWritten({ detail: result.reason });
+        }
+        if (result._tag === "Ambiguous") {
+          throw new RpcWriteAmbiguous({ detail: result.reason });
+        }
+        if (result._tag === "Rejected") {
           Deferred.unsafeDone(
             ticket.reply,
             Effect.fail(
-              new RpcErrorReply({ code: -32_000, message: cause.message }),
+              new RpcErrorReply({ code: -32_000, message: result.reason }),
             ),
           );
           return;
         }
-        turnThreads.set(result.turnId, threadId);
         Deferred.unsafeDone(
           ticket.reply,
           Effect.succeed(
@@ -97,17 +94,10 @@ function makePeer(
           ),
         );
       },
-      catch: (cause) => {
-        if (cause instanceof DesktopNotWrittenError) {
-          return new RpcNotWritten({ detail: cause.message });
-        }
-        if (cause instanceof DesktopUncertainError) {
-          return new RpcWriteAmbiguous({ detail: cause.message });
-        }
-        return new RpcWriteAmbiguous({
-          detail: cause instanceof Error ? cause.message : String(cause),
-        });
-      },
+      catch: (cause) => cause instanceof RpcNotWritten ||
+          cause instanceof RpcWriteAmbiguous
+        ? cause
+        : new RpcWriteAmbiguous({ detail: errorMessage(cause) }),
     });
 
   const reply: AppServerPeer["reply"] = (ticket, schema, timeout) =>
@@ -140,8 +130,6 @@ function makePeer(
     return Effect.tryPromise({
       try: async () => {
         const turns = await attachment.resume(threadId);
-        followedThreads.add(threadId);
-        for (const turn of turns) turnThreads.set(turn.id, threadId);
         return { thread: { id: threadId, turns } };
       },
       catch: (cause) => new RpcNotWritten({
@@ -163,47 +151,16 @@ function makePeer(
   return {
     spec,
     isAlive: Effect.sync(() => attachment.connected),
-    notify: (method, params) => {
-      if (method !== "turn/interrupt") return Effect.void;
-      const input = params as {
-        readonly threadId?: unknown;
-        readonly turnId?: unknown;
-      };
-      return Effect.tryPromise({
-        try: () => attachment.inject({
-          kind: "interrupt",
-          threadId: String(input.threadId ?? ""),
-          expectedTurnId: String(input.turnId ?? ""),
-        }).then(() => undefined),
-        catch: (cause) => cause instanceof DesktopNotWrittenError
-          ? new RpcNotWritten({ detail: cause.message })
-          : new RpcWriteAmbiguous({ detail: errorMessage(cause) }),
-      });
-    },
+    notify: () => Effect.void,
     prepare,
     submit,
     reply,
     request,
     awaitTurn: (turnId, timeout) => Effect.tryPromise({
-        try: () => {
-          const threadId = turnThreads.get(turnId) ??
-            [...followedThreads].find((candidate) =>
-              attachment.state(candidate).turns.some(
-                (turn) => turn.id === turnId,
-              ),
-            ) ??
-            (followedThreads.size === 1
-              ? [...followedThreads][0]
-              : undefined);
-          if (threadId == null) {
-            throw new Error("Desktop task was not followed");
-          }
-          return attachment.awaitTurn(
-            threadId,
-            turnId,
-            durationMillis(timeout),
-          );
-        },
+        try: () => attachment.awaitTurn(
+          turnId,
+          durationMillis(timeout),
+        ),
         catch: (cause) => errorMessage(cause).includes("timed out")
           ? new RpcTimeout({ millis: durationMillis(timeout) })
           : new RpcDisconnected({ detail: errorMessage(cause) }),

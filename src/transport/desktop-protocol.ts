@@ -2,6 +2,7 @@ import {
   DesktopIpcClient,
   type IpcEnvelope,
 } from "./desktop-ipc-client.js";
+import type { Turn } from "./protocol.js";
 
 const IPC_VERSION = {
   following: 1,
@@ -11,17 +12,40 @@ const IPC_VERSION = {
   steer: 1,
 } as const;
 
-export type DesktopChange = {
-  readonly type?: string;
-  readonly baseRevision?: number;
-  readonly revision?: number;
-  readonly conversationState?: unknown;
-  readonly patches?: ReadonlyArray<{
-    readonly op?: string;
-    readonly path?: ReadonlyArray<string | number>;
-    readonly value?: unknown;
-  }>;
-};
+export interface DesktopTurnEntity {
+  readonly key: string;
+  readonly turn: Turn;
+}
+
+export type DesktopTurnDelta =
+  | { readonly _tag: "Upsert"; readonly entity: DesktopTurnEntity }
+  | { readonly _tag: "Bind"; readonly key: string; readonly turnId: string }
+  | {
+      readonly _tag: "Status";
+      readonly key: string;
+      readonly status: Turn["status"];
+    }
+  | {
+      readonly _tag: "Error";
+      readonly key: string;
+      readonly error: Turn["error"];
+    }
+  | { readonly _tag: "Remove"; readonly key: string };
+
+export type DesktopTaskChange =
+  | {
+      readonly _tag: "Snapshot";
+      readonly revision: number | null;
+      readonly entities: ReadonlyArray<DesktopTurnEntity>;
+      readonly deliveryIds: ReadonlyArray<string>;
+    }
+  | {
+      readonly _tag: "Patches";
+      readonly baseRevision: number | null;
+      readonly revision: number | null;
+      readonly deltas: ReadonlyArray<DesktopTurnDelta>;
+      readonly deliveryIds: ReadonlyArray<string>;
+    };
 
 export interface DesktopCommand {
   readonly kind: "start" | "steer" | "interrupt";
@@ -36,11 +60,11 @@ export type DesktopCommandReply =
   | {
       readonly _tag: "Rejected";
       readonly reason: string;
-      readonly retrySafe: boolean;
+      readonly notWritten: boolean;
     };
 
-/** Semantic boundary used by task attachment; it contains no IPC framing. */
-export interface DesktopProtocol {
+/** Connection-scoped seam consumed by semantic task attachment. */
+export interface DesktopTaskProtocol {
   readonly connected: boolean;
   readonly close: () => void;
   readonly follow: (threadId: string) => Promise<void>;
@@ -49,14 +73,20 @@ export interface DesktopProtocol {
   ) => Promise<DesktopCommandReply>;
   readonly loadHistory: (threadId: string) => Promise<void>;
   readonly onChange: (
-    listener: (threadId: string, change: DesktopChange) => void,
+    listener: (threadId: string, change: DesktopTaskChange) => void,
   ) => () => void;
   readonly onDisconnect: (
     listener: (error: Error) => void,
   ) => () => void;
 }
 
-export type DesktopProtocolConnector = () => Promise<DesktopProtocol>;
+export type DesktopProtocolConnector = () => Promise<DesktopTaskProtocol>;
+
+const METHODS = {
+  interrupt: "thread-follower-interrupt-turn",
+  start: "thread-follower-start-turn",
+  steer: "thread-follower-steer-turn",
+} as const;
 
 function safeRejection(error: string): boolean {
   return [
@@ -72,7 +102,7 @@ function safeRejection(error: string): boolean {
 
 function readChange(
   message: IpcEnvelope,
-): { readonly threadId: string; readonly change: DesktopChange } | null {
+): { readonly threadId: string; readonly change: DesktopTaskChange } | null {
   if (
     message.method !== "thread-stream-state-changed" ||
     message.params == null ||
@@ -82,20 +112,38 @@ function readChange(
     readonly conversationId?: unknown;
     readonly change?: unknown;
   };
-  if (
-    typeof params.conversationId !== "string" ||
-    params.change == null ||
-    typeof params.change !== "object"
-  ) return null;
+  if (typeof params.conversationId !== "string") return null;
+  const change = record(params.change);
+  if (change?.type === "snapshot") {
+    return {
+      threadId: params.conversationId,
+      change: {
+        _tag: "Snapshot",
+        revision: readRevision(change.revision),
+        entities: snapshotEntities(change.conversationState),
+        deliveryIds: deliveryIds(change.conversationState),
+      },
+    };
+  }
+  if (change?.type !== "patches") return null;
+  const patches = Array.isArray(change.patches) ? change.patches : [];
   return {
     threadId: params.conversationId,
-    change: params.change as DesktopChange,
+    change: {
+      _tag: "Patches",
+      baseRevision: readRevision(change.baseRevision),
+      revision: readRevision(change.revision),
+      deltas: patches.flatMap(readDelta),
+      deliveryIds: patches.flatMap((patch) =>
+        deliveryIds(record(patch)?.value)
+      ),
+    },
   };
 }
 
-export class DesktopIpcProtocol implements DesktopProtocol {
+export class DesktopIpcProtocol implements DesktopTaskProtocol {
   private readonly changes = new Set<
-    (threadId: string, change: DesktopChange) => void
+    (threadId: string, change: DesktopTaskChange) => void
   >();
   private readonly disconnects = new Set<(error: Error) => void>();
 
@@ -147,24 +195,9 @@ export class DesktopIpcProtocol implements DesktopProtocol {
   }
 
   async inject(command: DesktopCommand): Promise<DesktopCommandReply> {
-    const method = `thread-follower-${command.kind}-turn`;
-    const params = command.kind === "start"
-      ? {
-          conversationId: command.threadId,
-          turnStartParams: {
-            clientUserMessageId: command.clientUserMessageId,
-            input: command.input,
-          },
-        }
-      : {
-          conversationId: command.threadId,
-          turnId: command.expectedTurnId,
-          clientUserMessageId: command.clientUserMessageId,
-          input: command.input,
-        };
     const reply = await this.client.request(
-      method,
-      params,
+      METHODS[command.kind],
+      commandParams(command),
       IPC_VERSION[command.kind],
       30_000,
     );
@@ -173,7 +206,7 @@ export class DesktopIpcProtocol implements DesktopProtocol {
       return {
         _tag: "Rejected",
         reason,
-        retrySafe: safeRejection(reason),
+        notWritten: safeRejection(reason),
       };
     }
     const outer = reply.result as
@@ -183,7 +216,7 @@ export class DesktopIpcProtocol implements DesktopProtocol {
   }
 
   onChange(
-    listener: (threadId: string, change: DesktopChange) => void,
+    listener: (threadId: string, change: DesktopTaskChange) => void,
   ): () => void {
     this.changes.add(listener);
     return () => this.changes.delete(listener);
@@ -193,4 +226,118 @@ export class DesktopIpcProtocol implements DesktopProtocol {
     this.disconnects.add(listener);
     return () => this.disconnects.delete(listener);
   }
+}
+
+function commandParams(command: DesktopCommand): unknown {
+  if (command.kind === "start") {
+    return {
+      conversationId: command.threadId,
+      turnStartParams: {
+        clientUserMessageId: command.clientUserMessageId,
+        input: command.input,
+      },
+    };
+  }
+  if (command.kind === "steer") {
+    return {
+      conversationId: command.threadId,
+      expectedTurnId: command.expectedTurnId,
+      clientUserMessageId: command.clientUserMessageId,
+      input: command.input,
+    };
+  }
+  return {
+    conversationId: command.threadId,
+    turnId: command.expectedTurnId,
+  };
+}
+
+function snapshotEntities(value: unknown): ReadonlyArray<DesktopTurnEntity> {
+  const history = record(record(record(value)?.turnHistory)?.history);
+  const entities = record(history?.entitiesByKey) ?? {};
+  return Object.entries(entities).flatMap(([key, entity]) => {
+    const turn = readTurn(entity);
+    return turn == null ? [] : [{ key, turn }];
+  });
+}
+
+function readDelta(value: unknown): ReadonlyArray<DesktopTurnDelta> {
+  const patch = record(value);
+  const path = Array.isArray(patch?.path) ? patch.path : [];
+  const marker = path.indexOf("entitiesByKey");
+  const key = marker < 0 ? undefined : path[marker + 1];
+  if (typeof key !== "string") return [];
+  const root = path.length === marker + 2;
+  if (patch?.op === "remove" && root) return [{ _tag: "Remove", key }];
+  if (root) {
+    const turn = readTurn(patch?.value);
+    return turn == null ? [] : [{ _tag: "Upsert", entity: { key, turn } }];
+  }
+  if (path.at(-1) === "turnId" && typeof patch?.value === "string") {
+    return [{ _tag: "Bind", key, turnId: patch.value }];
+  }
+  if (path.at(-1) === "status") {
+    return [{ _tag: "Status", key, status: normalizeStatus(patch?.value) }];
+  }
+  if (path.at(-1) === "error") {
+    return [{ _tag: "Error", key, error: readError(patch?.value) }];
+  }
+  return [];
+}
+
+function readTurn(value: unknown): Turn | null {
+  const entity = record(value);
+  if (typeof entity?.turnId !== "string") return null;
+  return {
+    id: entity.turnId,
+    status: normalizeStatus(entity.status),
+    error: readError(entity.error),
+  };
+}
+
+function deliveryIds(value: unknown): ReadonlyArray<string> {
+  const found = new Set<string>();
+  const pending: unknown[] = [value];
+  for (let visited = 0; pending.length > 0 && visited < 10_000; visited += 1) {
+    const next = pending.pop();
+    if (next == null || typeof next !== "object") continue;
+    if (Array.isArray(next)) {
+      pending.push(...next);
+      continue;
+    }
+    for (const [key, child] of Object.entries(next)) {
+      if (key === "clientUserMessageId" && typeof child === "string") {
+        found.add(child);
+      } else {
+        pending.push(child);
+      }
+    }
+  }
+  return [...found];
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value != null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function readRevision(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) >= 0
+    ? value as number
+    : null;
+}
+
+function normalizeStatus(value: unknown): Turn["status"] {
+  return value === "completed" ||
+    value === "interrupted" ||
+    value === "failed"
+    ? value
+    : "inProgress";
+}
+
+function readError(value: unknown): Turn["error"] {
+  if (value == null || typeof value !== "object") return null;
+  const message = (value as { readonly message?: unknown }).message;
+  return typeof message === "string" ? { message } : {};
 }

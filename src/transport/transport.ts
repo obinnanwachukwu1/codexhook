@@ -88,7 +88,7 @@ function preSubmitUnavailable(
 ): TransportUnavailable {
   return new TransportUnavailable({
     transport,
-    reason: "exited",
+    reason: "pre-submit-failure",
     detail: error.detail,
   });
 }

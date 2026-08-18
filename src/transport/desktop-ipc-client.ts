@@ -223,13 +223,13 @@ export class DesktopIpcClient {
   }
 
   private rejectAll(error: Error): void {
-    if (this.disconnected) return;
-    this.disconnected = true;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
       pending.reject(error);
     }
     this.pending.clear();
+    if (this.disconnected) return;
+    this.disconnected = true;
     for (const listener of this.disconnects) listener(error);
   }
 }
