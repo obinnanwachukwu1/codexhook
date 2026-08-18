@@ -1,25 +1,20 @@
 import { Writable } from "node:stream";
 import {
-  Deferred,
   Effect,
-  FiberId,
   Layer,
+  ManagedRuntime,
   Option,
-  Schema,
 } from "effect";
 import { Logger } from "../../src/logger.js";
 import type { DiagnosticEvent } from "../../src/diagnostics/contracts.js";
+import { Delivery, DeliveryLive } from "../../src/delivery/delivery.js";
 import {
   DeliveryId,
   ThreadId,
   type TurnRequest,
+  type WebhookRecord,
 } from "../../src/types.js";
 import { TransportUnavailable } from "../../src/transport/errors.js";
-import {
-  type AppServerPeer,
-  RpcNotWritten,
-  RpcWriteAmbiguous,
-} from "../../src/transport/rpc.js";
 import {
   TransportProvider,
   type TransportProviderService,
@@ -29,20 +24,14 @@ import {
   CodexTransport,
   makeCodexTransportLive,
 } from "../../src/transport/transport.js";
+import {
+  fakeTransportPeer,
+  type PeerRecorder,
+  type WriteBehavior,
+} from "./fake-transport-peer.js";
+export type { WriteBehavior } from "./fake-transport-peer.js";
 
-export type WriteBehavior =
-  | "ok"
-  | "active-ok"
-  | "before-write"
-  | "connect-fail"
-  | "connect-handshake-fail"
-  | "ambiguous"
-  | "follow-fail"
-  | "follow-fail-then-visible"
-  | "follow-fail-then-close"
-  | "follow-fail-then-disconnect-refresh";
-
-export interface Recorder {
+export interface Recorder extends PeerRecorder {
   readonly diagnostics: DiagnosticEvent[];
   readonly logs: Array<Record<string, unknown>>;
   readonly opens: string[];
@@ -90,111 +79,6 @@ export const daemon: TransportSpec = {
   socketPath: "/fake/app-server.sock",
   approvals: "decline",
 };
-
-function fakePeer(
-  spec: TransportSpec,
-  behavior: WriteBehavior,
-  recorder: Recorder,
-  connectionOrdinal: number,
-): AppServerPeer {
-  let alive = true;
-  let sequence = 0;
-  return {
-    spec,
-    isAlive: Effect.sync(() => alive),
-    notify: () => Effect.void,
-    prepare: (method) =>
-      Effect.sync(() => ({
-        id: `fake-${++sequence}`,
-        method,
-        serialized: "{}\n",
-        reply: Deferred.unsafeMake(FiberId.none),
-      })),
-    submit: (ticket) => {
-      if (behavior === "before-write") {
-        alive = false;
-        return Effect.fail(
-          new RpcNotWritten({ detail: "closed before write" }),
-        );
-      }
-      if (behavior === "ambiguous") {
-        alive = false;
-        recorder.writes.push({ transport: spec.id, method: ticket.method });
-        return Effect.fail(
-          new RpcWriteAmbiguous({ detail: "closed after write" }),
-        );
-      }
-      recorder.writes.push({ transport: spec.id, method: ticket.method });
-      return Effect.void;
-    },
-    reply: <A, I>(
-      ticket: { readonly method: string },
-      _schema: Schema.Schema<A, I>,
-    ): Effect.Effect<A, never> =>
-      Effect.succeed(
-        (ticket.method === "turn/steer"
-          ? { turnId: "turn-1" }
-          : { turn: { id: "turn-1", status: "inProgress" } }) as A,
-      ),
-    request: <A, I>(
-      method: string,
-      _params: unknown,
-      _schema: Schema.Schema<A, I>,
-    ) => {
-      const disconnectsDuringRefresh =
-        spec.id === "desktop" &&
-        method === "thread/resume" &&
-        behavior === "follow-fail-then-disconnect-refresh" &&
-        connectionOrdinal === 2;
-      if (disconnectsDuringRefresh) {
-        alive = false;
-        return Effect.fail(
-          new RpcNotWritten({ detail: "Desktop closed during refresh" }),
-        );
-      }
-      const followFails =
-        spec.id === "desktop" &&
-        method === "thread/resume" &&
-        (behavior === "follow-fail" ||
-          behavior === "follow-fail-then-close" ||
-          (behavior === "follow-fail-then-disconnect-refresh" &&
-            connectionOrdinal === 1) ||
-          (behavior === "follow-fail-then-visible" &&
-            connectionOrdinal === 1));
-      if (followFails) {
-        return Effect.fail(
-          new RpcNotWritten({ detail: "Desktop thread state timed out" }),
-        );
-      }
-      const turns =
-        spec.id === "desktop" && recorder.completedTurnId != null
-          ? [{
-              id: recorder.completedTurnId,
-              status: "completed" as const,
-            }]
-          : behavior === "active-ok"
-            ? [{ id: "turn-active", status: "inProgress" as const }]
-            : [];
-      return Effect.succeed(
-        (method === "thread/resume"
-          ? { thread: { id: "thread-1", turns } }
-          : {}) as A,
-      );
-    },
-    awaitTurn: (turnId) =>
-      Effect.sync(() => {
-        if (turnId === "turn-active") {
-          recorder.writes.push({
-            transport: spec.id,
-            method: `await/${turnId}`,
-          });
-        } else {
-          recorder.completedTurnId = turnId;
-        }
-        return { id: turnId, status: "completed" as const };
-      }),
-  };
-}
 
 export function fakeProvider(
   scripts: Readonly<Record<string, WriteBehavior>>,
@@ -263,7 +147,7 @@ export function fakeProvider(
           const ordinal = recorder.opens.filter(
             (opened) => opened === spec.id,
           ).length;
-          return fakePeer(
+          return fakeTransportPeer(
             spec,
             scripts[spec.id] ?? "ok",
             recorder,
@@ -295,16 +179,18 @@ function request(mode: "queue" | "steer"): TurnRequest {
   };
 }
 
+function diagnosticObserver(fixture: TransportFixture) {
+  return { record: (event: DiagnosticEvent) =>
+    fixture.recorder.diagnostics.push(event) };
+}
 function delivery(fixture: TransportFixture, mode: "queue" | "steer") {
   return Effect.scoped(
     Effect.flatMap(CodexTransport, (transport) =>
       transport.deliver(request(mode)),
     ).pipe(
-      Effect.provide(makeCodexTransportLive(fixture.logger, {
-        record(event) {
-          fixture.recorder.diagnostics.push(event);
-        },
-      })),
+      Effect.provide(
+        makeCodexTransportLive(fixture.logger, diagnosticObserver(fixture)),
+      ),
       Effect.provide(fixture.layer),
     ),
   );
@@ -322,4 +208,41 @@ export function runTransportExit(
   mode: "queue" | "steer" = "queue",
 ) {
   return Effect.runPromiseExit(delivery(fixture, mode));
+}
+
+export async function runDelivery(
+  fixture: TransportFixture,
+  mode: "queue" | "steer" = "queue",
+): Promise<void> {
+  const diagnostics = diagnosticObserver(fixture);
+  const appLayer = DeliveryLive(fixture.logger, diagnostics).pipe(
+    Layer.provideMerge(makeCodexTransportLive(fixture.logger, diagnostics)),
+    Layer.provide(fixture.layer),
+  );
+  const runtime = ManagedRuntime.make(appLayer);
+  const hook: WebhookRecord = {
+    id: "fixture",
+    threadId: ThreadId("thread-1"),
+    mode,
+    prependBody: "",
+    expiresAt: null,
+    remainingDeliveries: null,
+    createdAt: Date.now(),
+  };
+  try {
+    await runtime.runPromise(Effect.flatMap(Delivery, (service) =>
+      service.submit(hook, "hello")));
+    const deadline = Date.now() + 1_000;
+    while (!hasTerminalLog(fixture) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    if (!hasTerminalLog(fixture)) throw new Error("delivery fixture timed out");
+  } finally {
+    await runtime.dispose();
+  }
+}
+
+function hasTerminalLog(fixture: TransportFixture): boolean {
+  return fixture.recorder.logs.some(({ event }) =>
+    event === "delivery_failed" || event === "delivery_finished");
 }

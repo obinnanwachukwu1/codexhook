@@ -24,13 +24,13 @@ import {
   type TurnRequest,
   type WebhookRecord,
 } from "../types.js";
-import { turnOutcomeTruth } from "../diagnostics/truth.js";
 import {
   disposition,
   errorTransport,
   type DeliveryError,
   type TransportError,
 } from "../transport/errors.js";
+import { truthForTransport } from "../transport/truth.js";
 import { CodexTransport } from "../transport/transport.js";
 import { composeMessage } from "./compose.js";
 
@@ -95,7 +95,7 @@ export function DeliveryLive(
         return transport.deliver(job.request).pipe(
           Effect.match({
             onSuccess: (outcome) => {
-              const truth = turnOutcomeTruth(outcome);
+              const truth = truthForTransport(outcome.transport);
               logger.info("delivery_finished", {
                 deliveryId: job.request.deliveryId,
                 hookId: job.hookId,

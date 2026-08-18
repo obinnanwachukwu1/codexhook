@@ -65,6 +65,7 @@ test("does not log delivery_finished when Desktop visibility is unconfirmed", as
           threadId,
           turnId,
           submittedTransport: "daemon",
+          reason: "refresh-failed",
           detail: "Desktop thread state timed out",
         }),
       ),

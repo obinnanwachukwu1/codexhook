@@ -1,10 +1,11 @@
 import type { TransportId, TurnOutcome } from "../types.js";
-import { turnOutcomeTruth } from "./truth.js";
 import {
   deliveryTruth,
   errorTransport,
   type DeliveryError,
+  type TryNextError,
 } from "../transport/errors.js";
+import { truthForTransport } from "../transport/truth.js";
 import type { TransportAttemptStage } from "../transport/attempts.js";
 import type { DesktopStateDiagnostic } from "../transport/desktop-state.js";
 import type {
@@ -20,7 +21,7 @@ export function deliverySucceededEvent(outcome: TurnOutcome): DiagnosticEvent {
     outcome: "succeeded",
     code: "submission.confirmed",
     transport: outcome.transport,
-    deliveryTruth: turnOutcomeTruth(outcome),
+    deliveryTruth: truthForTransport(outcome.transport),
   };
 }
 
@@ -69,7 +70,9 @@ function classifyDeliveryFailure(error: DeliveryError): FailureClassification {
       return {
         stage: "canonical_verification",
         outcome: "failed",
-        code: "canonical.unknown",
+        code: error.reason === "turn-not-exposed"
+          ? "canonical.absent"
+          : "canonical.unknown",
       };
     case "NoTransportAvailable":
       return {
@@ -98,11 +101,16 @@ function classifyDeliveryFailure(error: DeliveryError): FailureClassification {
             code: "protocol.unavailable",
           };
     case "ThreadUnavailable":
-    case "ThreadBusy":
       return {
         stage: "state_synchronization",
         outcome: "unavailable",
         code: "state.resume_failed",
+      };
+    case "ThreadBusy":
+      return {
+        stage: "state_synchronization",
+        outcome: "unavailable",
+        code: "state.await_failed",
       };
   }
 }
@@ -110,7 +118,7 @@ function classifyDeliveryFailure(error: DeliveryError): FailureClassification {
 export function attemptFailedEvent(
   transport: TransportId,
   attemptStage: TransportAttemptStage,
-  error: DeliveryError,
+  error: TryNextError,
 ): DiagnosticEvent {
   if (error._tag === "TransportUnavailable" && transport === "desktop") {
     return { ...classifyDeliveryFailure(error), transport };
@@ -163,14 +171,6 @@ export function canonicalFoundEvent(): DiagnosticEvent {
     outcome: "succeeded",
     code: "canonical.found",
     transport: "desktop",
-  };
-}
-
-export function canonicalAbsentEvent(): DiagnosticEvent {
-  return {
-    stage: "canonical_verification",
-    outcome: "failed",
-    code: "canonical.absent",
   };
 }
 

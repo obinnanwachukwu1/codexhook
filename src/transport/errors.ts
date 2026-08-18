@@ -5,10 +5,7 @@ import type {
   TransportId,
   TurnId,
 } from "../types.js";
-import {
-  truthForTransport,
-  type DeliveryTruth,
-} from "../diagnostics/truth.js";
+import { truthForTransport, type DeliveryTruth } from "./truth.js";
 
 export class TransportUnavailable extends Data.TaggedError(
   "TransportUnavailable",
@@ -92,6 +89,7 @@ export class DesktopVisibilityUnconfirmed extends Data.TaggedError(
   readonly threadId: ThreadId;
   readonly turnId: TurnId;
   readonly submittedTransport: Exclude<TransportId, "desktop">;
+  readonly reason: "turn-not-exposed" | "steer-unverified" | "refresh-failed";
   readonly detail: string;
 }> {}
 
@@ -128,7 +126,11 @@ export type Disposition =
     }
   | {
       readonly recovery: "stop";
-      readonly submission: "not-submitted" | "unknown" | "submitted";
+      readonly submission:
+        | "not-submitted"
+        | "unknown"
+        | "submitted"
+        | "rejected";
     };
 
 export const DISPOSITIONS = {
@@ -142,7 +144,7 @@ export const DISPOSITIONS = {
   },
   ThreadUnavailable: { recovery: "stop", submission: "not-submitted" },
   ThreadBusy: { recovery: "stop", submission: "not-submitted" },
-  SubmitRejected: { recovery: "stop", submission: "not-submitted" },
+  SubmitRejected: { recovery: "stop", submission: "rejected" },
   SubmitAmbiguous: { recovery: "stop", submission: "unknown" },
   TurnAbandoned: { recovery: "stop", submission: "unknown" },
   TurnFailed: { recovery: "stop", submission: "submitted" },
@@ -163,11 +165,13 @@ export function deliveryTruth(error: DeliveryError): DeliveryTruth {
   if (error._tag === "NoTransportAvailable") return "unavailable";
   switch (disposition(error).submission) {
     case "not-submitted":
-      return error._tag === "SubmitRejected" ? "rejected" : "unavailable";
+      return "unavailable";
     case "unknown":
       return "ambiguous";
     case "submitted":
       return truthForTransport(errorTransport(error));
+    case "rejected":
+      return "rejected";
   }
 }
 

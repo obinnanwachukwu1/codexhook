@@ -5,8 +5,8 @@ import {
 import {
   DELIVERY_TRUTHS,
   type DeliveryTruth,
-} from "./truth.js";
-export type { DeliveryTruth } from "./truth.js";
+} from "../transport/truth.js";
+export type { DeliveryTruth } from "../transport/truth.js";
 
 export const DIAGNOSTIC_STAGES = [
   "protocol",

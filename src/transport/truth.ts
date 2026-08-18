@@ -1,4 +1,4 @@
-import type { TransportId, TurnOutcome } from "../types.js";
+import type { TransportId } from "../types.js";
 
 export const DELIVERY_TRUTHS = [
   "confirmed_desktop",
@@ -14,8 +14,4 @@ export function truthForTransport(transport: TransportId): DeliveryTruth {
   return transport === "desktop"
     ? "confirmed_desktop"
     : "confirmed_app_server";
-}
-
-export function turnOutcomeTruth(outcome: TurnOutcome): DeliveryTruth {
-  return truthForTransport(outcome.transport);
 }

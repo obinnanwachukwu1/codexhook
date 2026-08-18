@@ -32,6 +32,7 @@ export function confirmDesktopVisibility(
           threadId: outcome.threadId,
           turnId: outcome.turnId,
           submittedTransport,
+          reason: "steer-unverified",
           detail:
             "Desktop cannot verify fallback input steered into an existing turn",
         });
@@ -65,6 +66,7 @@ export function confirmDesktopVisibility(
                 threadId: outcome.threadId,
                 turnId: outcome.turnId,
                 submittedTransport,
+                reason: "turn-not-exposed",
                 detail:
                   "Desktop did not expose the completed fallback turn",
               }),
@@ -83,6 +85,7 @@ export function confirmDesktopVisibility(
             threadId: outcome.threadId,
             turnId: outcome.turnId,
             submittedTransport,
+            reason: "refresh-failed",
             detail:
               "detail" in error && typeof error.detail === "string"
                 ? error.detail

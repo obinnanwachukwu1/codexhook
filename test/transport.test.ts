@@ -58,12 +58,6 @@ test("does not fall back after an ambiguous write", async () => {
   ]);
   assert.equal(recorder.maxLive, 1);
   assert.equal(
-    recorder.diagnostics.some((event) =>
-      event.code === "submission.ambiguous" && event.outcome === "ambiguous"
-    ),
-    true,
-  );
-  assert.equal(
     recorder.diagnostics.some((event) => event.stage === "fallback"),
     false,
   );
@@ -344,6 +338,10 @@ test("classifies every transport error and forbids ambiguous retry", () => {
   assert.deepEqual(DISPOSITIONS.SubmitAmbiguous, {
     recovery: "stop",
     submission: "unknown",
+  });
+  assert.deepEqual(DISPOSITIONS.SubmitRejected, {
+    recovery: "stop",
+    submission: "rejected",
   });
   assert.deepEqual(DISPOSITIONS.TurnAbandoned, {
     recovery: "stop",

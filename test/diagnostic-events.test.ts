@@ -3,14 +3,12 @@ import test from "node:test";
 import { Option } from "effect";
 import {
   attemptFailedEvent,
-  canonicalAbsentEvent,
   canonicalFoundEvent,
   canonicalUnknownEvent,
   deliveryFailedEvent,
   deliverySucceededEvent,
   desktopStateEvent,
 } from "../src/diagnostics/events.js";
-import { truthForTransport } from "../src/diagnostics/truth.js";
 import {
   deliveryTruth,
   DesktopVisibilityUnconfirmed,
@@ -21,6 +19,7 @@ import {
   TurnFailed,
   TurnTimeout,
 } from "../src/transport/errors.js";
+import { truthForTransport } from "../src/transport/truth.js";
 import {
   DeliveryId,
   ThreadId,
@@ -61,6 +60,7 @@ test("terminal delivery truth distinguishes confirmation from uncertainty", () =
     threadId,
     turnId,
     submittedTransport: "daemon",
+    reason: "refresh-failed",
     detail: "not visible",
   })), "confirmed_app_server");
 });
@@ -125,8 +125,15 @@ test("successful delivery diagnostics preserve the submitting plane", () => {
 });
 
 test("canonical item and Desktop state fixtures map to explicit journal states", () => {
+  const absent = deliveryFailedEvent(new DesktopVisibilityUnconfirmed({
+    threadId: ThreadId("thread-1"),
+    turnId: TurnId("turn-1"),
+    submittedTransport: "daemon",
+    reason: "turn-not-exposed",
+    detail: "turn not exposed",
+  }));
   assert.deepEqual(
-    [canonicalFoundEvent(), canonicalAbsentEvent(), canonicalUnknownEvent("deferred")]
+    [canonicalFoundEvent(), absent, canonicalUnknownEvent("deferred")]
       .map((event) => ({ code: event.code, outcome: event.outcome })),
     [
       { code: "canonical.found", outcome: "succeeded" },

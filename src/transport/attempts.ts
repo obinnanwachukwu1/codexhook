@@ -145,11 +145,11 @@ export function deliverWithFallback(
             detail: failure.detail,
             tryNext,
           });
-          recordDiagnostic(
-            diagnostics,
-            attemptFailedEvent(candidate.id, stage, error),
-          );
           if (tryNext) {
+            recordDiagnostic(
+              diagnostics,
+              attemptFailedEvent(candidate.id, stage, error),
+            );
             recordDiagnostic(diagnostics, fallbackAttemptedEvent(candidate.id));
           }
           if (!tryNext) return Effect.fail(error);
@@ -214,7 +214,6 @@ export function deliverWithFallback(
                     detail: errorDetail(error),
                     submittedTransport: outcome.transport,
                   });
-                  recordDiagnostic(diagnostics, canonicalUnknownEvent("failed"));
                 }),
               ),
               Effect.tap((visibility) =>
