@@ -132,6 +132,10 @@ test("fallback requires a confirmed Desktop non-submission", () => {
   assert.equal(mayFallback(confirmed), false);
   assert.equal(mayFallback(rejected), false);
   assert.equal(mayFallback(appServerFailure), false);
+  assert.equal(Object.isFrozen(PHASE_ONE_DELIVERY_POLICY), true);
+  assert.equal(Object.isFrozen(PHASE_ONE_DELIVERY_POLICY.fallbackAfter), true);
+  assert.equal(PHASE_ONE_DELIVERY_POLICY.preferredRoute, "desktop");
+  assert.equal(PHASE_ONE_DELIVERY_POLICY.fallbackRoute, "app-server");
   assert.equal(PHASE_ONE_DELIVERY_POLICY.retry, "none");
   assert.equal(
     PHASE_ONE_DELIVERY_POLICY.reconciliation,
@@ -189,6 +193,24 @@ test("diagnostic sanitization is safe for production failure shapes", () => {
     assert.deepEqual(diagnostic, { code: "internal" });
     assert.equal(Object.isFrozen(diagnostic), true);
   }
+});
+
+test("diagnostic sanitization contains hostile property access", () => {
+  const hostile = new Proxy({}, {
+    get() {
+      throw new Error("untrusted getter");
+    },
+  });
+  const diagnostic = sanitizeDiagnostic(hostile);
+  assert.deepEqual(diagnostic, { code: "internal" });
+  assert.equal(Object.isFrozen(diagnostic), true);
+});
+
+test("desktop follow failures have a fixed safe summary", () => {
+  assert.equal(
+    diagnosticSummary("desktop-not-following"),
+    "Desktop is not following the target task",
+  );
 });
 
 test("root exports retain legacy and contract services", async () => {

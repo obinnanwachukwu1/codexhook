@@ -32,8 +32,9 @@ stable seams before the runtime cutover.
    may inspect the snapshot-first app-server event stream for the same delivery
    ID in a turn's `deliveryIds`, but it must not issue another write.
    Reconciliation promotes the outcome only on a positive canonical match;
-   otherwise ambiguity remains visible. A reconciled Desktop write remains
-   `ConfirmedDesktop`.
+   otherwise ambiguity remains visible. Reconciliation is bounded by the
+   delivery timeouts; expiry remains `Ambiguous`. A reconciled Desktop write
+   remains `ConfirmedDesktop`.
 7. An explicit protocol refusal yields `Rejected`. Exhausting routes through
    pre-write failures yields `Unavailable`. Neither is reported as confirmed.
 8. Delivery is best effort, has no retry queue, and remains FIFO per task in
@@ -49,6 +50,9 @@ stable seams before the runtime cutover.
     not shared across concurrent task lanes. The possible-write region is
     uninterruptible until every failure, defect, or pending interruption is
     classified; an uncertain write becomes `Ambiguous`.
+12. `idleTimeout` bounds each individual wait (Desktop follow, submission
+    acknowledgement, or reconciliation match). `turnTimeout` bounds the whole
+    delivery, including reconciliation.
 
 ## Contract ownership
 

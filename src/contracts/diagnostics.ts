@@ -4,6 +4,7 @@ import type { DeliveryRoute } from "./submission.js";
 export const DIAGNOSTIC_CODES = [
   "desktop-unavailable",
   "desktop-incompatible",
+  "desktop-not-following",
   "app-server-unavailable",
   "app-server-incompatible",
   "task-not-local",
@@ -28,6 +29,7 @@ const CODES = new Set<string>(DIAGNOSTIC_CODES);
 const SUMMARIES = {
   "desktop-unavailable": "Desktop delivery is unavailable",
   "desktop-incompatible": "Desktop protocol is incompatible",
+  "desktop-not-following": "Desktop is not following the target task",
   "app-server-unavailable": "Local app-server is unavailable",
   "app-server-incompatible": "App-server protocol is incompatible",
   "task-not-local": "Task is outside the local Codex store",
@@ -71,19 +73,27 @@ function nonNegativeInteger(value: unknown): number | undefined {
  * error text cannot cross the public/logging contract by accident.
  */
 export function sanitizeDiagnostic(value: unknown): SanitizedDiagnostic {
-  const source = asRecord(value);
-  const safeCode = asDiagnosticCode(source.code);
-  const safeStage = isDeliveryStage(source.stage)
-    ? source.stage
-    : undefined;
-  const safeRoute = asRoute(source.route);
-  const protocolRevision = nonNegativeInteger(source.protocolRevision);
-  return Object.freeze({
-    code: safeCode,
-    ...(safeStage == null ? {} : { stage: safeStage }),
-    ...(safeRoute == null ? {} : { route: safeRoute }),
-    ...(protocolRevision == null ? {} : { protocolRevision }),
-  });
+  try {
+    const source = asRecord(value);
+    const code = source.code;
+    const stage = source.stage;
+    const route = source.route;
+    const revision = source.protocolRevision;
+    const safeCode = asDiagnosticCode(code);
+    const safeStage = isDeliveryStage(stage)
+      ? stage
+      : undefined;
+    const safeRoute = asRoute(route);
+    const protocolRevision = nonNegativeInteger(revision);
+    return Object.freeze({
+      code: safeCode,
+      ...(safeStage == null ? {} : { stage: safeStage }),
+      ...(safeRoute == null ? {} : { route: safeRoute }),
+      ...(protocolRevision == null ? {} : { protocolRevision }),
+    });
+  } catch {
+    return Object.freeze({ code: "internal" });
+  }
 }
 
 export function diagnosticSummary(code: DiagnosticCode): string {

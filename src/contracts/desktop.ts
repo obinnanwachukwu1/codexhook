@@ -1,7 +1,6 @@
 import type { Effect, Scope } from "effect";
 import type {
   DeliveryId,
-  DeliveryMode,
   TurnId,
 } from "../types.js";
 import type {
@@ -19,13 +18,17 @@ export interface DesktopFailure {
   readonly diagnostic: SanitizedDiagnostic;
 }
 
-export interface DesktopSubmissionRequest {
+interface DesktopSubmission {
   readonly task: LocalTaskRef;
   readonly deliveryId: DeliveryId;
-  readonly mode: DeliveryMode;
   readonly message: string;
-  readonly expectedTurnId?: TurnId;
 }
+
+/** A steer is fenced to the active turn observed by `follow`. */
+export type DesktopSubmissionRequest = DesktopSubmission & (
+  | { readonly mode: "queue" }
+  | { readonly mode: "steer"; readonly expectedTurnId: TurnId }
+);
 
 export interface DesktopTaskObservation {
   readonly task: LocalTaskRef;

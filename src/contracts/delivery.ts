@@ -18,10 +18,16 @@ export interface DeliveryRequest {
   readonly deliveryId: DeliveryId;
   readonly message: string;
   readonly mode: DeliveryMode;
+  /** Bounds each individual wait, including a reconciliation match. */
   readonly idleTimeout: Duration.Duration;
+  /** Bounds the complete delivery, including any reconciliation. */
   readonly turnTimeout: Duration.Duration;
 }
 
+/**
+ * Authoritative record for one route attempt. A nested diagnostic may repeat
+ * its route and stage so that it remains meaningful when logged on its own.
+ */
 export interface DeliveryAttempt {
   readonly route: DeliveryRoute;
   readonly stage: DeliveryStage;
@@ -38,7 +44,11 @@ interface ConfirmedDelivery {
   readonly attempts: ReadonlyArray<DeliveryAttempt>;
 }
 
-/** Confirmed tags identify the route that wrote, not the observing plane. */
+/**
+ * Confirmed tags identify the route that wrote, not the observing plane.
+ * Terminal route and diagnostic fields mirror the final attempt for callers
+ * that only need the classified result; `attempts` remains the audit trail.
+ */
 export type DeliveryOutcome =
   | (ConfirmedDelivery & {
       readonly _tag: "ConfirmedDesktop";
@@ -82,7 +92,7 @@ export const PHASE_ONE_DELIVERY_POLICY = Object.freeze({
   ambiguousSubmission: "stop-and-reconcile",
   reconciliation: "app-server-observe-only",
   retry: "none",
-});
+} as const);
 
 export type DeliveryPolicy = typeof PHASE_ONE_DELIVERY_POLICY;
 
@@ -91,16 +101,17 @@ export function mayFallback(
 ): boolean {
   return outcome.route === PHASE_ONE_DELIVERY_POLICY.preferredRoute &&
     outcome._tag === "NotSubmitted" &&
-    // This explicit allowlist remains fail-closed if new reasons are added.
+    // Type checking forces this allowlist to be revisited for new reasons.
     PHASE_ONE_DELIVERY_POLICY.fallbackAfter.includes(outcome.reason);
 }
 
 export interface DeliveryCoordinator {
-  readonly policy: typeof PHASE_ONE_DELIVERY_POLICY;
+  readonly policy: DeliveryPolicy;
   /**
    * Owns any Desktop scope for one delivery and returns a classified outcome;
    * no non-fatal adapter failure or defect may escape the effect. The possible
-   * write region is uninterruptible until its outcome is classified.
+   * write region is uninterruptible until its outcome is classified. Every
+   * wait is timeout-bounded; reconciliation expiry remains Ambiguous.
    */
   readonly deliver: (
     request: DeliveryRequest,

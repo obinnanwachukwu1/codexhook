@@ -43,7 +43,6 @@ export interface LocalTaskHistory {
 export type LocalTaskEvent =
   | {
       readonly type: "snapshot";
-      readonly task: LocalTaskRef;
       readonly history: LocalTaskHistory;
     }
   | {
