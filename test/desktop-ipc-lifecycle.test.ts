@@ -36,7 +36,19 @@ test("detects a live Unix socket replacement and re-follows before use", {
     initialize,
     (message, send) => {
       if (message.method != null) methods.push(message.method);
+      if (message.method === "thread-stream-following-changed") {
+        send({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          sourceClientId: "replacement-owner",
+          params: {
+            conversationId: "thread-1",
+            change: { type: "snapshot", revision: 1 },
+          },
+        });
+      }
       if (message.method === "thread-follower-start-turn") {
+        assert.equal(message.targetClientId, "replacement-owner");
         send({
           type: "response",
           requestId: message.requestId,
@@ -125,9 +137,19 @@ test("concurrent callers share one reconnect and one lifecycle observation", asy
     (message, send) => {
       if (message.method === "thread-stream-following-changed") {
         follows += 1;
+        send({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          sourceClientId: "replacement-owner",
+          params: {
+            conversationId: "thread-1",
+            change: { type: "snapshot", revision: 1 },
+          },
+        });
         return;
       }
       if (message.method !== "thread-follower-start-turn") return;
+      assert.equal(message.targetClientId, "replacement-owner");
       const params = message.params as {
         turnStartParams?: { ordinal?: unknown };
       };

@@ -105,6 +105,18 @@ test("encodes every v1 operation with its compatibility-specific shape", async (
     await fixture("initialize-legacy.json"),
     (message, send) => {
       if (message.method != null) observed.set(message.method, message.params);
+      if (message.method === "thread-stream-following-changed") {
+        send({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          sourceClientId: "desktop-owner",
+          params: {
+            conversationId: "thread-1",
+            change: { type: "snapshot", revision: 1 },
+          },
+        });
+        return;
+      }
       if (message.type !== "request") return;
       send({
         type: "response",
@@ -314,10 +326,20 @@ test("reconnects future operations after socket replacement without replay", asy
     (message, send) => {
       if (message.method === "thread-stream-following-changed") {
         follows += 1;
+        send({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          sourceClientId: "replacement-owner",
+          params: {
+            conversationId: "thread-1",
+            change: { type: "snapshot", revision: 1 },
+          },
+        });
         return;
       }
       if (message.method !== "thread-follower-start-turn") return;
       starts += 1;
+      assert.equal(message.targetClientId, "replacement-owner");
       send({
         type: "response",
         requestId: message.requestId,

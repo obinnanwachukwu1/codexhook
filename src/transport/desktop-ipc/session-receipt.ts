@@ -1,4 +1,3 @@
-import type { DesktopProtocolAdapter } from "./adapters.js";
 import { normalizeDesktopRejection } from "./adapters.js";
 import { DesktopProtocolError } from "./errors.js";
 import type {
@@ -7,13 +6,8 @@ import type {
   DesktopResponseEnvelope,
 } from "./types.js";
 
-interface ReceiptConnection {
-  readonly adapter: DesktopProtocolAdapter;
-  readonly profile: DesktopProtocolProfile;
-}
-
 export function desktopRequestReceipt<A>(
-  connection: ReceiptConnection,
+  profile: DesktopProtocolProfile,
   operation: DesktopRequestReceipt<A>["operation"],
   response: DesktopResponseEnvelope,
   decode: (value: unknown) => A,
@@ -31,7 +25,7 @@ export function desktopRequestReceipt<A>(
     );
   }
   return {
-    fingerprint: connection.profile.fingerprint,
+    fingerprint: profile.fingerprint,
     operation,
     requestId: response.requestId,
     outcome: response.resultType === "error"

@@ -9,13 +9,36 @@ import {
 
 test("targets followed task operations to the state snapshot owner", async () => {
   const endpoint = await testEndpoint();
-  let targetClientId: string | undefined;
+  const targets: Array<string | undefined> = [];
   const router = await listen(
     endpoint.socketPath,
     await fixture("initialize-v1.json"),
     (message, send) => {
+      if (message.method === "thread-stream-following-changed") {
+        send({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          sourceClientId: "desktop-owner-1",
+          version: 11,
+          params: {
+            conversationId: "thread-1",
+            change: { type: "snapshot", revision: 1 },
+          },
+        });
+        send({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          sourceClientId: "spoofed-owner",
+          version: 11,
+          params: {
+            conversationId: "thread-1",
+            change: { type: "snapshot", revision: 2 },
+          },
+        });
+        return;
+      }
       if (message.method !== "thread-follower-steer-turn") return;
-      targetClientId = message.targetClientId;
+      targets.push(message.targetClientId);
       send({
         type: "response",
         requestId: message.requestId,
@@ -24,22 +47,124 @@ test("targets followed task operations to the state snapshot owner", async () =>
       });
     },
     {
-      afterInitialize: (send) => send({
-        type: "broadcast",
-        method: "thread-stream-state-changed",
-        sourceClientId: "desktop-owner-1",
-        version: 11,
-        params: {
-          conversationId: "thread-1",
-          change: { type: "snapshot", revision: 1 },
-        },
-      }),
+      afterInitialize: (send) => {
+        send({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          sourceClientId: "unfollowed-claim",
+          params: {
+            conversationId: "thread-1",
+            change: { type: "snapshot", revision: 0 },
+          },
+        });
+        send({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          sourceClientId: "malformed-claim",
+          params: {
+            conversationId: "thread-1",
+            change: { type: "not-a-real-change" },
+          },
+        });
+      },
     },
   );
   try {
     const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await session.followThread("thread-1");
     await session.steerTurn("thread-1", { input: [] }, 1_000);
-    assert.equal(targetClientId, "desktop-owner-1");
+    await session.steerTurn("unfollowed-thread", { input: [] }, 1_000);
+    assert.deepEqual(targets, ["desktop-owner-1", undefined]);
+    session.close();
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
+});
+
+test("never writes a followed task without snapshot owner evidence", async () => {
+  const endpoint = await testEndpoint();
+  let starts = 0;
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message) => {
+      if (message.method === "thread-follower-start-turn") starts += 1;
+    },
+  );
+  try {
+    const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await session.followThread("thread-1");
+    await assert.rejects(
+      session.startTurn("thread-1", {}, 30),
+      (error: unknown) =>
+        error instanceof Error &&
+        "failure" in error &&
+        error.failure === "request-timeout" &&
+        "writeState" in error &&
+        error.writeState === "not-written",
+    );
+    assert.equal(starts, 0);
+    session.close();
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
+});
+
+test("routing rejection requires fresh owner evidence before another write", async () => {
+  const endpoint = await testEndpoint();
+  let publish!: (owner: string) => void;
+  let starts = 0;
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message, send) => {
+      publish = (owner) => send({
+        type: "broadcast",
+        method: "thread-stream-state-changed",
+        sourceClientId: owner,
+        params: {
+          conversationId: "thread-1",
+          change: { type: "snapshot", revision: starts + 1 },
+        },
+      });
+      if (message.method === "thread-stream-following-changed") {
+        publish("desktop-owner-1");
+        return;
+      }
+      if (message.method !== "thread-follower-start-turn") return;
+      starts += 1;
+      assert.equal(
+        message.targetClientId,
+        starts === 1 ? "desktop-owner-1" : "desktop-owner-2",
+      );
+      send(starts === 1
+        ? {
+            type: "response",
+            requestId: message.requestId,
+            resultType: "error",
+            error: "client-not-found",
+          }
+        : {
+            type: "response",
+            requestId: message.requestId,
+            resultType: "success",
+            result: { result: { turnId: "turn-2" } },
+          });
+    },
+  );
+  try {
+    const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await session.followThread("thread-1");
+    const rejected = await session.startTurn("thread-1", {}, 1_000);
+    assert.equal(rejected.outcome._tag, "Rejected");
+    await assert.rejects(session.startTurn("thread-1", {}, 30));
+    assert.equal(starts, 1);
+    publish("desktop-owner-2");
+    const accepted = await session.startTurn("thread-1", {}, 1_000);
+    assert.equal(accepted.outcome._tag, "Accepted");
+    assert.equal(starts, 2);
     session.close();
   } finally {
     await router.close();

@@ -3,6 +3,7 @@ import {
   DesktopProtocolSession,
   type DesktopKnownRejection,
   type DesktopProtocolProfile,
+  type DesktopProtocolSessionOptions,
 } from "./desktop-ipc/index.js";
 import { readDesktopChange } from "./desktop-task-decoder.js";
 import type { Turn } from "./protocol.js";
@@ -131,11 +132,12 @@ export class DesktopIpcProtocol implements DesktopTaskProtocol {
     socketPath: string,
     signal?: AbortSignal,
     onCreate?: (protocol: DesktopIpcProtocol) => void,
+    options: DesktopProtocolSessionOptions = {},
   ): Promise<DesktopIpcProtocol> {
     let protocol: DesktopIpcProtocol | null = null;
     await DesktopProtocolSession.connect(
       socketPath,
-      {},
+      options,
       signal,
       (session) => {
         protocol = new DesktopIpcProtocol(session);
@@ -169,7 +171,10 @@ export class DesktopIpcProtocol implements DesktopTaskProtocol {
   }
 
   async loadHistory(threadId: string): Promise<boolean> {
-    const reply = await this.session.loadCompleteHistory(threadId, 30_000);
+    const reply = await this.session.loadCompleteHistory(
+      threadId,
+      this.session.requestTimeout(30_000),
+    );
     return reply.outcome._tag === "Accepted";
   }
 
