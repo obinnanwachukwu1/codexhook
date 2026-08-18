@@ -5,6 +5,7 @@ import {
   doctor,
   serve,
   setup,
+  status,
   uninstall,
 } from "./commands/system.js";
 import { VERSION } from "./version.js";
@@ -19,6 +20,7 @@ Usage:
   codexhook revoke --thread <thread-id>
   codexhook revoke --all
   codexhook doctor [--json]
+  codexhook status [--json]
   codexhook uninstall [--purge]
 `;
 
@@ -39,6 +41,9 @@ async function main(): Promise<void> {
       break;
     case "doctor":
       await doctor(arguments_);
+      break;
+    case "status":
+      await status(arguments_);
       break;
     case "uninstall":
       await uninstall(arguments_);

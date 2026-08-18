@@ -6,6 +6,7 @@ export * from "./registry.js";
 export * from "./delivery/compose.js";
 export * from "./delivery/delivery.js";
 export * from "./server.js";
+export * from "./daemon.js";
 export * from "./transport/errors.js";
 export * from "./transport/spec.js";
 export * from "./transport/discovery.js";

@@ -2,16 +2,15 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { Effect, Layer, ManagedRuntime, Option } from "effect";
+import { Effect, Option } from "effect";
 import {
   DEFAULT_HOST,
   DEFAULT_PORT,
   dataDirectory,
-  databasePath,
   defaultBaseUrl,
 } from "../config.js";
+import { startUnifiedDaemon } from "../daemon.js";
 import { probeDaemon, requireDaemon } from "../daemon-control.js";
-import { DeliveryLive } from "../delivery/delivery.js";
 import {
   installationPaths,
   installationServicePaths,
@@ -22,12 +21,8 @@ import {
 import { backgroundServiceExists } from "../background-service.js";
 import { Logger } from "../logger.js";
 import { chooseInstallationPort, parsePort } from "../port.js";
-import { WebhookRegistry } from "../registry.js";
-import { listen } from "../server.js";
 import { desktopProbe } from "../transport/desktop-endpoint.js";
 import { discoverStandalone } from "../transport/discovery.js";
-import { TransportProviderLive } from "../transport/provider.js";
-import { makeCodexTransportLive } from "../transport/transport.js";
 import { VERSION } from "../version.js";
 
 export async function setup(arguments_: string[]): Promise<void> {
@@ -104,30 +99,79 @@ export async function serve(arguments_: string[]): Promise<void> {
   const port = parsePort(values.port ?? String(DEFAULT_PORT));
   const directory = values["data-directory"] ?? dataDirectory();
   const logger = new Logger();
-  const store = new WebhookRegistry(databasePath(directory));
-  const appLayer = DeliveryLive(logger).pipe(
-    Layer.provideMerge(makeCodexTransportLive(logger)),
-    Layer.provide(TransportProviderLive(logger)),
-  );
-  const runtime = ManagedRuntime.make(appLayer);
-  const server = await listen({
-    host,
-    port,
-    registry: store,
-    runtime,
-    logger,
+  let daemon: Awaited<ReturnType<typeof startUnifiedDaemon>> | undefined;
+  let requestedReason: string | undefined;
+  let requestedError: Error | undefined;
+  let stopping = false;
+  let resolveCompletion!: () => void;
+  let rejectCompletion!: (error: unknown) => void;
+  const completion = new Promise<void>((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
   });
-  logger.info("server_listening", { host, port, database: store.path });
-
-  const shutdown = async (signal: string) => {
-    logger.info("server_stopping", { signal });
-    server.close();
-    await runtime.dispose();
-    store.close();
-    process.exit(0);
+  const requestStop = (reason: string, error?: Error) => {
+    requestedReason ??= reason;
+    requestedError ??= error;
+    if (daemon == null || stopping) return;
+    stopping = true;
+    void daemon.stop(requestedReason).then(
+      () => {
+        if (requestedError == null) resolveCompletion();
+        else rejectCompletion(requestedError);
+      },
+      rejectCompletion,
+    );
   };
-  process.once("SIGINT", () => void shutdown("SIGINT"));
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  const onInterrupt = () => requestStop("SIGINT");
+  const onTerminate = () => requestStop("SIGTERM");
+  const onError = (error: Error) => requestStop("server-error", error);
+  process.once("SIGINT", onInterrupt);
+  process.once("SIGTERM", onTerminate);
+  try {
+    daemon = await startUnifiedDaemon({
+      host,
+      port,
+      dataDirectory: directory,
+      logger,
+    });
+    daemon.server.once("error", onError);
+    if (requestedReason != null) requestStop(requestedReason);
+    await completion;
+  } finally {
+    process.off("SIGINT", onInterrupt);
+    process.off("SIGTERM", onTerminate);
+    daemon?.server.off("error", onError);
+  }
+}
+
+export async function status(arguments_: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: arguments_,
+    strict: true,
+    options: { json: { type: "boolean", default: false } },
+  });
+  const manifest = readInstallManifest();
+  const port = manifest?.port ?? DEFAULT_PORT;
+  const origin = defaultBaseUrl(DEFAULT_HOST, port);
+  const daemon = await probeDaemon(origin);
+  const report = {
+    daemon,
+    origin,
+    publicBaseUrl: manifest?.baseUrl ?? null,
+  };
+  if (values.json) {
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+  } else if (daemon.state === "running") {
+    process.stdout.write(
+      `codexhook ${daemon.health.state} at ${origin} (${daemon.health.phase}).\n`,
+    );
+    process.stdout.write(
+      `local task access: ${daemon.health.taskAccessStatus}; Desktop IPC: ${daemon.health.desktopIpcAvailable ? "available" : "unavailable"}.\n`,
+    );
+  } else {
+    process.stdout.write(`codexhook daemon: ${daemon.state}.\n`);
+  }
+  if (daemon.state !== "running") process.exitCode = 1;
 }
 
 function nodeVersion(executable: string): string | null {

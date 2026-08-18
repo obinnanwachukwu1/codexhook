@@ -8,6 +8,11 @@ export const DEFAULT_PREPEND_BODY = "Webhook {hookId}:\n\n";
 export const DEFAULT_EXPIRES_IN = "24h";
 export const MAX_BODY_BYTES = 128 * 1024;
 export const MAX_PREPEND_BYTES = 4 * 1024;
+export const MAX_HTTP_CONNECTIONS = 128;
+export const HTTP_HEADERS_TIMEOUT_MS = 10_000;
+export const HTTP_REQUEST_TIMEOUT_MS = 30_000;
+export const HTTP_KEEP_ALIVE_TIMEOUT_MS = 5_000;
+export const SHUTDOWN_GRACE_MS = 15_000;
 
 export function dataDirectory(environment = process.env): string {
   return path.resolve(
