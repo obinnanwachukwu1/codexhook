@@ -1,4 +1,5 @@
 import type { DesktopWireEnvelope } from "./desktop-ipc/index.js";
+import { desktopStreamEnvelope } from "./desktop-ipc/stream-envelope.js";
 import type { Turn } from "./protocol.js";
 import type {
   DesktopTaskChange,
@@ -9,20 +10,13 @@ import type {
 export function readDesktopChange(
   message: DesktopWireEnvelope,
 ): { readonly threadId: string; readonly change: DesktopTaskChange } | null {
-  if (
-    message.method !== "thread-stream-state-changed" ||
-    message.params == null || typeof message.params !== "object"
-  ) return null;
-  const params = message.params as {
-    readonly conversationId?: unknown;
-    readonly change?: unknown;
-  };
-  if (typeof params.conversationId !== "string") return null;
-  const change = record(params.change);
+  const stream = desktopStreamEnvelope(message);
+  if (stream == null) return null;
+  const change = stream.change;
   if (change?.type === "snapshot") {
     const entities = snapshotEntityValues(change.conversationState);
     return {
-      threadId: params.conversationId,
+      threadId: stream.threadId,
       change: {
         _tag: "Snapshot",
         revision: readRevision(change.revision),
@@ -35,7 +29,7 @@ export function readDesktopChange(
   if (change?.type !== "patches") return null;
   const patches = Array.isArray(change.patches) ? change.patches : [];
   return {
-    threadId: params.conversationId,
+    threadId: stream.threadId,
     change: {
       _tag: "Patches",
       baseRevision: readRevision(change.baseRevision),

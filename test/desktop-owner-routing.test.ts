@@ -152,10 +152,29 @@ test("a failed repeated follow preserves existing owner state", async () => {
   assert.equal(owners.target("thread-1"), "desktop-owner");
 });
 
+test("an owner refresh follow is bounded before mutation", async () => {
+  const followed = new Set(["thread-1"]);
+  const owners = new DesktopThreadOwners();
+  const began = Date.now();
+  await assert.rejects(followDesktopThread({
+    adapter: {
+      methods: { follow: "follow", history: "history", start: "start", steer: "steer" },
+      version: 1,
+      followParams: () => ({}),
+    },
+    raw: { broadcast: () => new Promise<void>(() => undefined) },
+  }, followed, owners, "thread-1", 20), (error: unknown) =>
+    error instanceof Error &&
+    "failure" in error &&
+    error.failure === "request-timeout"
+  );
+  assert.equal(Date.now() - began < 250, true);
+});
+
 test("a closed owner registry rejects later waiters immediately", async () => {
   const owners = new DesktopThreadOwners();
   owners.close();
-  assert.equal(await owners.wait("thread-1", 120_000), null);
+  assert.deepEqual(await owners.wait("thread-1", 120_000), { _tag: "Closed" });
 });
 
 test("close wakes every pending owner waiter without writing", async () => {
@@ -187,6 +206,15 @@ test("close wakes every pending owner waiter without writing", async () => {
       "rejected",
       "rejected",
     ]);
+    for (const result of results) {
+      assert.equal(
+        result.status === "rejected" &&
+          result.reason instanceof Error &&
+          "failure" in result.reason &&
+          result.reason.failure === "closed",
+        true,
+      );
+    }
     assert.equal(mutations, 0);
   } finally {
     await router.close();
@@ -213,8 +241,9 @@ test("disconnect wakes pending owner waiters without writing", async () => {
     await router.close();
     await assert.rejects(pending, (error: unknown) =>
       error instanceof Error &&
-      "writeState" in error &&
-      error.writeState === "not-written"
+      "failure" in error &&
+      error.failure === "reconnect-failed" &&
+      "writeState" in error && error.writeState === "not-written"
     );
     assert.equal(Date.now() - disconnectedAt < 250, true);
     assert.equal(mutations, 0);

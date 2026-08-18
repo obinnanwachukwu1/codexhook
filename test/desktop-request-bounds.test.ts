@@ -10,6 +10,7 @@ import {
 test("Desktop injection bounds a delivery budget to the request limit", async () => {
   const endpoint = await testEndpoint();
   let starts = 0;
+  let wireTimeout: number | undefined;
   const router = await listen(
     endpoint.socketPath,
     await fixture("initialize-v1.json"),
@@ -27,6 +28,7 @@ test("Desktop injection bounds a delivery budget to the request limit", async ()
       }
       if (message.method !== "thread-follower-start-turn") return;
       starts += 1;
+      wireTimeout = (message as unknown as { timeoutMs?: number }).timeoutMs;
       send({
         type: "response",
         requestId: message.requestId,
@@ -49,6 +51,8 @@ test("Desktop injection bounds a delivery budget to the request limit", async ()
       });
       assert.equal(reply._tag, "Accepted");
       assert.equal(starts, 1);
+      assert.equal((wireTimeout ?? 0) > 29_000, true);
+      assert.equal((wireTimeout ?? Infinity) <= 30_000, true);
     } finally {
       protocol.close();
     }

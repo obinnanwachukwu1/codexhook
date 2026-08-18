@@ -3,25 +3,15 @@ import type { SessionLimits } from "./limits.js";
 import { DesktopThreadOwners } from "./thread-owners.js";
 import type { DesktopRequestReceipt } from "./types.js";
 
-const ROUTING_REJECTIONS = new Set([
-  "client-cannot-handle-request",
-  "client-not-found",
-  "no-client-found",
-  "no-handler-for-request",
-  "thread-role-timeout",
-  "thread-stream-owner-unavailable",
-]);
 const OWNER_EVIDENCE_TIMEOUT_MS = 1_000;
+export const MAX_MUTATION_TIMEOUT_MS = 30_000;
 
 export function dropRejectedOwner(
   owners: DesktopThreadOwners,
   threadId: string,
   receipt: DesktopRequestReceipt<unknown>,
 ): void {
-  if (
-    receipt.outcome._tag === "Rejected" &&
-    ROUTING_REJECTIONS.has(receipt.outcome.rejection)
-  ) owners.invalidate(threadId);
+  if (receipt.outcome._tag === "Rejected") owners.invalidate(threadId);
 }
 
 export function requestDeadline(
@@ -40,6 +30,13 @@ export function requestDeadline(
     );
   }
   return Date.now() + Math.min(timeoutMs, limits.maxRequestTimeoutMs);
+}
+
+export function mutationDeadline(
+  limits: SessionLimits,
+  timeoutMs: number,
+): number {
+  return requestDeadline(limits, Math.min(timeoutMs, MAX_MUTATION_TIMEOUT_MS));
 }
 
 export function remainingRequestTimeout(
@@ -76,15 +73,23 @@ export async function requestTarget(
     );
   }
   if (!requireFollow) return owners.target(threadId);
-  const owner = await owners.wait(
+  const result = await owners.wait(
     threadId,
     Math.min(
       OWNER_EVIDENCE_TIMEOUT_MS,
       remainingRequestTimeout(limits, deadline),
     ),
   );
-  if (owner != null) return owner;
+  if (result._tag === "Owner") return result.owner;
   owners.invalidate(threadId);
+  if (result._tag === "Closed" || result._tag === "Reset") {
+    throw new DesktopProtocolError(
+      result._tag === "Closed" ? "closed" : "reconnect-failed",
+      "operation",
+      "not-written",
+      "Desktop IPC owner evidence was interrupted by session lifecycle",
+    );
+  }
   throw new DesktopProtocolError(
     "request-timeout",
     "operation",

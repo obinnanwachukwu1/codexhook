@@ -28,6 +28,7 @@ import {
 } from "./session-negotiate.js";
 import {
   dropRejectedOwner,
+  mutationDeadline,
   remainingRequestTimeout,
   requestDeadline,
   requestTarget,
@@ -178,9 +179,9 @@ export class DesktopProtocolSession {
     params: Record<string, unknown>,
     timeoutMs: number,
   ): Promise<DesktopRequestReceipt<DesktopStartResult>> {
-    const deadline = requestDeadline(this.limits, timeoutMs);
+    const deadline = mutationDeadline(this.limits, timeoutMs);
     const connection = await this.ready("startTurn");
-    await this.refreshOwner(connection, threadId);
+    await this.refreshOwner(connection, threadId, deadline);
     const target = await requestTarget(
       this.threadOwners,
       this.followedThreads,
@@ -211,9 +212,9 @@ export class DesktopProtocolSession {
     params: Record<string, unknown>,
     timeoutMs: number,
   ): Promise<DesktopRequestReceipt<DesktopSteerResult>> {
-    const deadline = requestDeadline(this.limits, timeoutMs);
+    const deadline = mutationDeadline(this.limits, timeoutMs);
     const connection = await this.ready("steerTurn");
-    await this.refreshOwner(connection, threadId);
+    await this.refreshOwner(connection, threadId, deadline);
     const target = await requestTarget(
       this.threadOwners,
       this.followedThreads,
@@ -258,6 +259,7 @@ export class DesktopProtocolSession {
   private async refreshOwner(
     connection: NegotiatedConnection,
     threadId: string,
+    deadline: number,
   ): Promise<void> {
     if (
       !this.followedThreads.has(threadId) ||
@@ -270,10 +272,11 @@ export class DesktopProtocolSession {
         this.followedThreads,
         this.threadOwners,
         threadId,
+        remainingRequestTimeout(this.limits, deadline),
       );
     } catch (cause) {
       this.threadOwners.invalidate(threadId);
-      throw cause;
+      throw desktopReconnectError("Desktop IPC owner refresh failed");
     }
   }
 
