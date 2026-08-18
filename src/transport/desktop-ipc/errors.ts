@@ -1,5 +1,6 @@
 export type DesktopProtocolFailure =
   | "closed"
+  | "connect-timeout"
   | "frame-invalid"
   | "handshake-malformed"
   | "invalid-timeout"

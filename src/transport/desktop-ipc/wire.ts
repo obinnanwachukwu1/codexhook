@@ -31,6 +31,12 @@ export type DesktopObservationListener = (
   observation: DesktopProtocolObservation,
 ) => void;
 
+export interface DesktopOpenOptions {
+  readonly connectTimeoutMs: number;
+  readonly createConnection?: () => net.Socket;
+  readonly onOpeningSocket: (socket: net.Socket | null) => void;
+}
+
 interface PendingRequest {
   readonly reject: (error: DesktopProtocolError) => void;
   readonly resolve: (message: DesktopResponseEnvelope) => void;
@@ -90,24 +96,13 @@ export class RawDesktopConnection {
     limits: DesktopWireLimits,
     onBroadcast: DesktopBroadcastListener,
     onObservation: DesktopObservationListener,
+    options: DesktopOpenOptions,
   ): Promise<RawDesktopConnection> {
     const endpointIdentity = await desktopEndpointIdentity(socketPath);
-    const socket = net.createConnection(socketPath);
+    let socket: net.Socket;
     try {
-      await new Promise<void>((resolve, reject) => {
-        const connected = () => {
-          socket.off("error", rejected);
-          resolve();
-        };
-        const rejected = (cause: Error) => {
-          socket.off("connect", connected);
-          reject(cause);
-        };
-        socket.once("connect", connected);
-        socket.once("error", rejected);
-      });
+      socket = options.createConnection?.() ?? net.createConnection(socketPath);
     } catch (cause) {
-      socket.destroy();
       throw new DesktopProtocolError(
         isAbsentDesktopEndpointError(cause)
           ? "socket-unavailable"
@@ -116,6 +111,58 @@ export class RawDesktopConnection {
         "not-written",
         safeSocketError(cause),
       );
+    }
+    options.onOpeningSocket(socket);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (effect: () => void) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          socket.off("close", closed);
+          socket.off("connect", connected);
+          socket.off("error", rejected);
+          effect();
+        };
+        const connected = () => {
+          finish(resolve);
+        };
+        const rejected = (cause: Error) => {
+          finish(() => reject(cause));
+        };
+        const closed = () => finish(() => reject(new DesktopProtocolError(
+          "closed",
+          "connect",
+          "not-written",
+          "Desktop IPC connection closed during connect",
+        )));
+        const timeout = setTimeout(() => finish(() => reject(
+          new DesktopProtocolError(
+            "connect-timeout",
+            "connect",
+            "not-written",
+            "Desktop IPC connect timed out",
+          ),
+        )), options.connectTimeoutMs);
+        socket.once("close", closed);
+        socket.once("connect", connected);
+        socket.once("error", rejected);
+      });
+    } catch (cause) {
+      socket.once("error", () => undefined);
+      socket.destroy();
+      if (cause instanceof DesktopProtocolError) throw cause;
+      throw new DesktopProtocolError(
+        isAbsentDesktopEndpointError(cause)
+          ? "socket-unavailable"
+          : "socket-failed",
+        "connect",
+        "not-written",
+        safeSocketError(cause),
+      );
+    } finally {
+      options.onOpeningSocket(null);
     }
     return new RawDesktopConnection(
       socket,

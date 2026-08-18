@@ -7,10 +7,7 @@ import {
   type DesktopProtocolAdapter,
 } from "./adapters.js";
 import { DesktopProtocolError } from "./errors.js";
-import {
-  DEFAULT_MAX_INBOUND_FRAME_BYTES,
-  DEFAULT_MAX_OUTBOUND_FRAME_BYTES,
-} from "./framing.js";
+import { sessionLimits, type SessionLimits } from "./limits.js";
 import type {
   DesktopProtocolCapability,
   DesktopProtocolObservation,
@@ -28,37 +25,13 @@ import {
   RawDesktopConnection,
   type DesktopBroadcastListener,
   type DesktopObservationListener,
-  type DesktopWireLimits,
 } from "./wire.js";
-
-const DEFAULT_MAX_PENDING_REQUESTS = 64;
-const DEFAULT_MAX_REQUEST_TIMEOUT_MS = 120_000;
-const DEFAULT_MIN_REQUEST_TIMEOUT_MS = 10;
-
-interface SessionLimits extends DesktopWireLimits {
-  readonly handshakeTimeoutMs: number;
-}
+import type { Socket } from "node:net";
 
 interface NegotiatedConnection {
   readonly adapter: DesktopProtocolAdapter;
   readonly profile: DesktopProtocolProfile;
   readonly raw: RawDesktopConnection;
-}
-
-function limits(options: DesktopProtocolSessionOptions): SessionLimits {
-  return {
-    handshakeTimeoutMs: options.handshakeTimeoutMs ?? 5_000,
-    maxInboundFrameBytes:
-      options.maxInboundFrameBytes ?? DEFAULT_MAX_INBOUND_FRAME_BYTES,
-    maxOutboundFrameBytes:
-      options.maxOutboundFrameBytes ?? DEFAULT_MAX_OUTBOUND_FRAME_BYTES,
-    maxPendingRequests:
-      options.maxPendingRequests ?? DEFAULT_MAX_PENDING_REQUESTS,
-    maxRequestTimeoutMs:
-      options.maxRequestTimeoutMs ?? DEFAULT_MAX_REQUEST_TIMEOUT_MS,
-    minRequestTimeoutMs:
-      options.minRequestTimeoutMs ?? DEFAULT_MIN_REQUEST_TIMEOUT_MS,
-  };
 }
 
 function reconnectError(message: string): DesktopProtocolError {
@@ -75,22 +48,36 @@ export class DesktopProtocolSession {
   private readonly limits: SessionLimits;
   private readonly observations = new Set<DesktopObservationListener>();
   private openingRaw: RawDesktopConnection | null = null;
+  private openingSocket: Socket | null = null;
   private reconnecting: Promise<NegotiatedConnection> | null = null;
 
   private constructor(
     private readonly socketPath: string,
     options: DesktopProtocolSessionOptions,
   ) {
-    this.limits = limits(options);
+    this.limits = sessionLimits(options);
   }
 
   static async connect(
     socketPath: string,
     options: DesktopProtocolSessionOptions = {},
+    signal?: AbortSignal,
   ): Promise<DesktopProtocolSession> {
     const session = new DesktopProtocolSession(socketPath, options);
-    session.connection = await session.open(false);
-    return session;
+    const abort = () => session.close();
+    if (signal?.aborted) abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      if (session.closing) throw session.closedError();
+      session.connection = await session.open(false);
+      if (signal?.aborted) {
+        session.close();
+        throw session.closedError();
+      }
+      return session;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
   }
 
   static async probe(
@@ -124,6 +111,7 @@ export class DesktopProtocolSession {
   close(): void {
     this.closing = true;
     this.connection?.raw.close();
+    this.openingSocket?.destroy();
     this.openingRaw?.close();
     this.connection = null;
   }
@@ -295,6 +283,12 @@ export class DesktopProtocolSession {
       this.limits,
       (message) => this.receiveBroadcast(message),
       (observation) => this.emit(observation),
+      {
+        connectTimeoutMs: this.limits.handshakeTimeoutMs,
+        onOpeningSocket: (socket) => {
+          this.openingSocket = socket;
+        },
+      },
     );
     this.openingRaw = raw;
     if (this.closing) {

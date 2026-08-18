@@ -274,9 +274,18 @@ export function connectDesktop(
   TransportUnavailable | TransportIncompatible,
   Scope.Scope
 > {
-  return Effect.acquireRelease(
-    Effect.tryPromise({
-      try: () => DesktopProtocolSession.connect(spec.socketPath),
+  return Effect.suspend(() => {
+    let acquired: DesktopProtocolSession | null = null;
+    const open = Effect.tryPromise({
+      try: async (signal) => {
+        const client = await DesktopProtocolSession.connect(
+          spec.socketPath,
+          {},
+          signal,
+        );
+        acquired = client;
+        return client;
+      },
       catch: (cause) => {
         const detail =
           cause instanceof Error ? cause.message : String(cause);
@@ -295,6 +304,13 @@ export function connectDesktop(
           });
         }
         if (cause.failure === "socket-failed") {
+          return new TransportUnavailable({
+            transport: "desktop",
+            reason: "connect-failed",
+            detail,
+          });
+        }
+        if (cause.failure === "connect-timeout") {
           return new TransportUnavailable({
             transport: "desktop",
             reason: "connect-failed",
@@ -324,7 +340,10 @@ export function connectDesktop(
           detail,
         });
       },
-    }),
-    (client) => Effect.sync(() => client.close()),
-  ).pipe(Effect.map((client) => makePeer(spec, client)));
+    });
+    return Effect.acquireReleaseInterruptible(
+      open,
+      () => Effect.sync(() => acquired?.close()),
+    ).pipe(Effect.map((client) => makePeer(spec, client)));
+  });
 }
