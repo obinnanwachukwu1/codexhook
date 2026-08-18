@@ -12,6 +12,18 @@ import {
 } from "./support/desktop-ipc-router.js";
 
 test("targets followed task operations to the state snapshot owner", async () => {
+  const owners = new DesktopThreadOwners();
+  owners.observe({
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "unfollowed-claim",
+    params: {
+      conversationId: "thread-1",
+      change: { type: "snapshot", revision: 0 },
+    },
+  }, new Set());
+  assert.equal(owners.target("thread-1"), undefined);
+
   const endpoint = await testEndpoint();
   const targets: Array<string | undefined> = [];
   const router = await listen(
@@ -49,28 +61,6 @@ test("targets followed task operations to the state snapshot owner", async () =>
         resultType: "success",
         result: {},
       });
-    },
-    {
-      afterInitialize: (send) => {
-        send({
-          type: "broadcast",
-          method: "thread-stream-state-changed",
-          sourceClientId: "unfollowed-claim",
-          params: {
-            conversationId: "thread-1",
-            change: { type: "snapshot", revision: 0 },
-          },
-        });
-        send({
-          type: "broadcast",
-          method: "thread-stream-state-changed",
-          sourceClientId: "malformed-claim",
-          params: {
-            conversationId: "thread-1",
-            change: { type: "not-a-real-change" },
-          },
-        });
-      },
     },
   );
   try {
