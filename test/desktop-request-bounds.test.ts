@@ -44,6 +44,7 @@ test("Desktop injection bounds a delivery budget to the request limit", async ()
         threadId: "thread-1",
         clientUserMessageId: "delivery-1",
         input: [],
+        createdAt: 1,
         timeoutMs: 30 * 60 * 1_000,
       });
       assert.equal(reply._tag, "Accepted");

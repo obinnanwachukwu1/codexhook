@@ -90,7 +90,12 @@ test("Desktop steer preserves expected-turn and delivery identity fields", async
       threadId: "thread-1",
       expectedTurnId: "turn-active",
       clientUserMessageId: "delivery-1",
-      input: [{ type: "text", text: "steered message" }],
+      input: [
+        { type: "text", text: "steered " },
+        { type: "image", url: "ignored" },
+        { type: "text", text: "message" },
+      ],
+      createdAt: 123,
     });
     assert.equal(observed?.expectedTurnId, "turn-active");
     assert.equal(observed?.clientUserMessageId, "delivery-1");
@@ -106,7 +111,7 @@ test("Desktop steer preserves expected-turn and delivery identity fields", async
         workspaceRoots: [],
       },
       cwd: null,
-      createdAt: (observed?.restoreMessage as { createdAt: number }).createdAt,
+      createdAt: 123,
     });
     assert.equal("turnId" in (observed ?? {}), false);
     protocol.close();
@@ -306,6 +311,7 @@ async function rejectedStart(error: string) {
         threadId: "thread-1",
         clientUserMessageId: "delivery-1",
         input: [],
+        createdAt: 1,
       });
     } finally {
       protocol.close();

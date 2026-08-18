@@ -152,6 +152,12 @@ test("a failed repeated follow preserves existing owner state", async () => {
   assert.equal(owners.target("thread-1"), "desktop-owner");
 });
 
+test("a closed owner registry rejects later waiters immediately", async () => {
+  const owners = new DesktopThreadOwners();
+  owners.close();
+  assert.equal(await owners.wait("thread-1", 120_000), null);
+});
+
 test("close wakes every pending owner waiter without writing", async () => {
   const endpoint = await testEndpoint();
   let mutations = 0;
@@ -220,15 +226,27 @@ test("never writes a followed task without snapshot owner evidence", async () =>
   const router = await listen(
     endpoint.socketPath,
     await fixture("initialize-v1.json"),
-    (message) => {
+    (message, send) => {
+      if (message.method === "thread-stream-following-changed") {
+        send({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          params: {
+            conversationId: "thread-1",
+            change: { type: "snapshot", revision: 1 },
+          },
+        });
+        return;
+      }
       if (message.method === "thread-follower-start-turn") starts += 1;
     },
   );
   try {
     const session = await DesktopProtocolSession.connect(endpoint.socketPath);
     await session.followThread("thread-1");
+    const began = Date.now();
     await assert.rejects(
-      session.startTurn("thread-1", {}, 30),
+      session.startTurn("thread-1", {}, 30 * 60 * 1_000),
       (error: unknown) =>
         error instanceof Error &&
         "failure" in error &&
@@ -236,6 +254,7 @@ test("never writes a followed task without snapshot owner evidence", async () =>
         "writeState" in error &&
         error.writeState === "not-written",
     );
+    assert.equal(Date.now() - began < 250, true);
     assert.equal(starts, 0);
     session.close();
   } finally {
@@ -263,6 +282,17 @@ test("routing rejection requires fresh owner evidence before another write", asy
       });
       if (message.method === "thread-stream-following-changed") {
         publish("desktop-owner-1");
+        return;
+      }
+      if (message.method === "thread-follower-load-complete-history") {
+        assert.equal(message.targetClientId, undefined);
+        publish("desktop-owner-2");
+        send({
+          type: "response",
+          requestId: message.requestId,
+          resultType: "success",
+          result: {},
+        });
         return;
       }
       if (message.method !== "thread-follower-start-turn") return;
@@ -293,7 +323,8 @@ test("routing rejection requires fresh owner evidence before another write", asy
     assert.equal(rejected.outcome._tag, "Rejected");
     await assert.rejects(session.startTurn("thread-1", {}, 30));
     assert.equal(starts, 1);
-    publish("desktop-owner-2");
+    const history = await session.loadCompleteHistory("thread-1", 1_000);
+    assert.equal(history.outcome._tag, "Accepted");
     const accepted = await session.startTurn("thread-1", {}, 1_000);
     assert.equal(accepted.outcome._tag, "Accepted");
     assert.equal(starts, 2);

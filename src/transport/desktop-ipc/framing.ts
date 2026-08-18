@@ -1,12 +1,12 @@
 import { TextDecoder } from "node:util";
 import { DesktopProtocolError } from "./errors.js";
+import { routingId } from "./routing-id.js";
 import type { DesktopWireEnvelope } from "./types.js";
 
 export const DEFAULT_MAX_INBOUND_FRAME_BYTES = 256 * 1024 * 1024;
 export const DEFAULT_MAX_OUTBOUND_FRAME_BYTES = 16 * 1024 * 1024;
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
-const MAX_ROUTING_ID_LENGTH = 256;
 
 function frameError(message: string): DesktopProtocolError {
   return new DesktopProtocolError(
@@ -46,18 +46,14 @@ function wireEnvelope(value: unknown): DesktopWireEnvelope | null {
   if (record.resultType != null && typeof record.resultType !== "string") {
     return null;
   }
-  if (
-    !validRoutingId(record.sourceClientId) ||
-    !validRoutingId(record.targetClientId)
-  ) return null;
-  return record as unknown as DesktopWireEnvelope;
-}
-
-function validRoutingId(value: unknown): boolean {
-  return value == null ||
-    (typeof value === "string" &&
-      value.length > 0 &&
-      value.length <= MAX_ROUTING_ID_LENGTH);
+  const { sourceClientId, targetClientId, ...envelope } = record;
+  const source = routingId(sourceClientId);
+  const target = routingId(targetClientId);
+  return {
+    ...envelope,
+    ...(source == null ? {} : { sourceClientId: source }),
+    ...(target == null ? {} : { targetClientId: target }),
+  } as unknown as DesktopWireEnvelope;
 }
 
 export function encodeDesktopFrame(

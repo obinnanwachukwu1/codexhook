@@ -50,6 +50,7 @@ test("does not prove steer from a delivery present at the baseline", async () =>
     expectedTurnId: "turn-1",
     clientUserMessageId: "delivery-1",
     input: [],
+    createdAt: 1,
   });
   assert.equal(result._tag, "Ambiguous");
 });
@@ -109,6 +110,7 @@ test("does not prove steer from a delivery on another turn", async () => {
     expectedTurnId: "turn-current",
     clientUserMessageId: "delivery-2",
     input: [],
+    createdAt: 2,
   });
   assert.equal(result._tag, "Ambiguous");
 });

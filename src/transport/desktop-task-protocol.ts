@@ -56,6 +56,7 @@ export type DesktopCommand =
       readonly threadId: string;
       readonly clientUserMessageId: string;
       readonly input: unknown;
+      readonly createdAt: number;
       readonly timeoutMs?: number;
     }
   | {
@@ -64,6 +65,7 @@ export type DesktopCommand =
       readonly expectedTurnId: string;
       readonly clientUserMessageId: string;
       readonly input: unknown;
+      readonly createdAt: number;
       readonly timeoutMs?: number;
     };
 
@@ -254,20 +256,21 @@ function commandParams(command: DesktopCommand) {
         workspaceRoots: [],
       },
       cwd: null,
-      createdAt: Date.now(),
+      createdAt: command.createdAt,
     },
   };
 }
 
 function inputText(input: unknown): string {
   if (!Array.isArray(input)) return "";
-  const item = input.find((value) =>
+  return input.flatMap((value) =>
     value != null &&
-    typeof value === "object" &&
-    (value as { readonly type?: unknown }).type === "text" &&
-    typeof (value as { readonly text?: unknown }).text === "string"
-  ) as { readonly text: string } | undefined;
-  return item?.text ?? "";
+      typeof value === "object" &&
+      (value as { readonly type?: unknown }).type === "text" &&
+      typeof (value as { readonly text?: unknown }).text === "string"
+      ? [(value as { readonly text: string }).text]
+      : []
+  ).join("");
 }
 
 function rejection(reason: DesktopKnownRejection): DesktopCommandReply {

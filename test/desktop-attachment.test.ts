@@ -77,6 +77,7 @@ test("validates the synchronized active turn before steering", async () => {
     expectedTurnId: "turn-stale",
     clientUserMessageId: "delivery-2",
     input: [],
+    createdAt: 2,
   });
   assert.equal(result._tag, "NotSubmitted");
   assert.equal(protocol.injections.length, 0);
@@ -96,6 +97,7 @@ test("classifies multiple-active steer as non-fallback task activity", async () 
     expectedTurnId: "turn-1",
     clientUserMessageId: "delivery-2",
     input: [],
+    createdAt: 2,
   });
   assert.equal(result._tag, "NotSubmitted");
   if (result._tag !== "NotSubmitted") return;
@@ -126,6 +128,7 @@ test("proves steer by delivery identity on the expected turn", async () => {
     expectedTurnId: "turn-current",
     clientUserMessageId: "delivery-2",
     input: [],
+    createdAt: 2,
   });
   assert.equal(steered._tag, "Confirmed");
 });
@@ -155,6 +158,7 @@ test("does not confirm steer from an unrelated revision", async () => {
     expectedTurnId: "turn-current",
     clientUserMessageId: "delivery-2",
     input: [],
+    createdAt: 2,
   });
   assert.equal(result._tag, "Ambiguous");
 });

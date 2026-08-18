@@ -147,15 +147,17 @@ test("bounds and rejects malformed frame lengths, JSON, and envelopes", () => {
     malformedEnvelopes += 1;
   });
   assert.deepEqual(decoder.push(encodeDesktopFrame([])), []);
-  assert.deepEqual(
-    decoder.push(encodeDesktopFrame({ type: "broadcast", sourceClientId: 42 })),
-    [],
+  const [badSource] = decoder.push(
+    encodeDesktopFrame({ type: "broadcast", sourceClientId: 42 }),
   );
-  assert.deepEqual(
-    decoder.push(encodeDesktopFrame({ type: "request", targetClientId: "" })),
-    [],
+  const [badTarget] = decoder.push(
+    encodeDesktopFrame({ type: "request", targetClientId: "" }),
   );
-  assert.equal(malformedEnvelopes, 3);
+  assert.equal(badSource?.type, "broadcast");
+  assert.equal(badSource?.sourceClientId, undefined);
+  assert.equal(badTarget?.type, "request");
+  assert.equal(badTarget?.targetClientId, undefined);
+  assert.equal(malformedEnvelopes, 1);
 });
 
 test("malformed JSON diagnostics do not retain frame contents", () => {

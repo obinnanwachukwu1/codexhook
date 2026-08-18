@@ -9,6 +9,7 @@ const ROUTING_REJECTIONS = new Set([
   "no-client-found",
   "thread-stream-owner-unavailable",
 ]);
+const OWNER_EVIDENCE_TIMEOUT_MS = 1_000;
 
 export function dropRejectedOwner(
   owners: DesktopThreadOwners,
@@ -72,9 +73,13 @@ export async function requestTarget(
       "Desktop IPC task must be followed before mutation",
     );
   }
+  if (!requireFollow) return owners.target(threadId);
   const owner = await owners.wait(
     threadId,
-    remainingRequestTimeout(limits, deadline),
+    Math.min(
+      OWNER_EVIDENCE_TIMEOUT_MS,
+      remainingRequestTimeout(limits, deadline),
+    ),
   );
   if (owner != null) return owner;
   throw new DesktopProtocolError(

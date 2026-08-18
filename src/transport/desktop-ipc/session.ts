@@ -110,7 +110,7 @@ export class DesktopProtocolSession {
 
   close(): void {
     this.closing = true;
-    this.threadOwners.reset();
+    this.threadOwners.close();
     this.connection?.raw.close();
     this.openingSocket?.destroy();
     this.openingRaw?.close();
