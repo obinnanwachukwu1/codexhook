@@ -8,29 +8,12 @@ import {
   DesktopThreadState,
   type DesktopTaskSnapshot,
 } from "./desktop-state.js";
-
-export type DesktopInjectionOutcome =
-  | {
-      readonly _tag: "Confirmed";
-      readonly turnId: string;
-      readonly turn: Turn;
-      readonly state: DesktopTaskSnapshot;
-    }
-  | {
-      readonly _tag: "NotSubmitted";
-      readonly reason: string;
-      readonly state: DesktopTaskSnapshot;
-    }
-  | {
-      readonly _tag: "Ambiguous";
-      readonly reason: string;
-      readonly state: DesktopTaskSnapshot;
-    }
-  | {
-      readonly _tag: "Rejected";
-      readonly reason: string;
-      readonly state: DesktopTaskSnapshot;
-    };
+import type { DesktopInjectionOutcome } from "./desktop-injection.js";
+import {
+  desktopErrorMessage,
+  DesktopTimeoutError,
+  withDesktopTimeout,
+} from "./desktop-errors.js";
 
 interface DesktopAttachmentOptions {
   readonly followTimeoutMs?: number;
@@ -78,33 +61,32 @@ export class DesktopAttachment {
   async inject(command: DesktopCommand): Promise<DesktopInjectionOutcome> {
     return this.serialize(command.threadId, async () => {
       const state = this.getState(command.threadId);
-      state.resetInjection();
+      state.setInjection("idle");
       try {
         await this.synchronize(state);
       } catch (cause) {
-        return this.notSubmitted(state, errorMessage(cause));
+        return this.notSubmitted(state, desktopErrorMessage(cause));
       }
       const invalid = this.validationFailure(command, state);
       if (invalid != null) return this.notSubmitted(state, invalid);
       const baseline = state.revision;
+      const generation = state.generation;
       const protocol = this.protocol;
       if (protocol == null) {
         return this.notSubmitted(state, "Desktop is not connected");
       }
-      state.beginInjection();
+      state.setInjection("injecting");
       let reply;
       try {
         reply = await protocol.inject(command);
       } catch (cause) {
-        return this.ambiguous(state, errorMessage(cause));
+        return this.ambiguous(state, desktopErrorMessage(cause));
       }
       if (reply._tag === "Rejected") {
         if (reply.notWritten) {
-          state.finishInjection("idle");
           return this.notSubmitted(state, reply.reason);
         }
-        state.finishInjection("rejected");
-        return { _tag: "Rejected", reason: reply.reason, state: state.evidence() };
+        return this.rejected(state, reply.reason);
       }
       const turnId = command.kind === "start"
         ? reply.turnId
@@ -117,14 +99,14 @@ export class DesktopAttachment {
       }
       try {
         await state.waitFor(
-          () => this.proves(command, state, turnId, baseline) ||
+          () => this.proves(command, state, turnId, baseline, generation) ||
             state.connection === "disconnected",
           this.proofTimeoutMs,
         );
       } catch (cause) {
-        return this.ambiguous(state, errorMessage(cause));
+        return this.ambiguous(state, desktopErrorMessage(cause));
       }
-      if (!this.proves(command, state, turnId, baseline)) {
+      if (!this.proves(command, state, turnId, baseline, generation)) {
         return this.ambiguous(
           state,
           "Desktop disconnected before state confirmed the command",
@@ -134,7 +116,7 @@ export class DesktopAttachment {
       if (turn == null) {
         return this.ambiguous(state, "Desktop confirmation lost its turn");
       }
-      state.finishInjection("confirmed");
+      state.setInjection("confirmed");
       return {
         _tag: "Confirmed",
         turnId,
@@ -168,12 +150,13 @@ export class DesktopAttachment {
 
   close(): void {
     this.closed = true;
-    this.unbindProtocol();
-    this.unbindProtocol = () => undefined;
-    this.protocol?.close();
-    this.protocol = null;
+    const protocol = this.protocol;
+    if (protocol != null) {
+      this.detachProtocol(protocol, true);
+    } else {
+      for (const state of this.states.values()) state.disconnected();
+    }
     this.connectPromise = null;
-    for (const state of this.states.values()) state.disconnected();
   }
 
   private getState(threadId: string): DesktopThreadState {
@@ -187,39 +170,42 @@ export class DesktopAttachment {
 
   private async synchronize(state: DesktopThreadState): Promise<void> {
     const deadline = Date.now() + this.followTimeoutMs;
-    while (!state.ready) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) throw new Error("Desktop follow timed out");
-      const protocol = await withTimeout(
-        this.ensureConnected(state),
-        remaining,
-        "Desktop follow timed out",
-      );
-      if (state.attachment === "detached") {
-        state.beginFollowing(this.generation);
-        try {
-          await withTimeout(
-            protocol.follow(state.threadId),
-            Math.max(1, deadline - Date.now()),
-            "Desktop follow timed out",
-          );
-        } catch (cause) {
-          this.dropProtocol(protocol);
-          throw cause;
-        }
-      }
-      const wait = deadline - Date.now();
-      if (wait <= 0) throw new Error("Desktop follow timed out");
+    while (!state.ready) await this.followOnce(state, deadline);
+  }
+
+  private async followOnce(
+    state: DesktopThreadState,
+    deadline: number,
+  ): Promise<void> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new DesktopTimeoutError("Desktop follow timed out");
+    const protocol = await withDesktopTimeout(
+      this.ensureConnected(state),
+      remaining,
+      "Desktop follow timed out",
+    );
+    if (state.attachment === "detached") {
+      state.beginFollowing(this.generation);
       try {
-        await state.waitFor(
-          () => state.ready || state.connection === "disconnected",
-          wait,
+        await withDesktopTimeout(
+          protocol.follow(state.threadId),
+          Math.max(1, deadline - Date.now()),
+          "Desktop follow timed out",
         );
       } catch (cause) {
-        this.resyncing.delete(state.threadId);
-        state.retryFollowing();
+        this.detachProtocol(protocol, true);
         throw cause;
       }
+    }
+    try {
+      await state.waitFor(
+        () => state.ready || state.connection === "disconnected",
+        Math.max(1, deadline - Date.now()),
+      );
+    } catch (cause) {
+      this.resyncing.delete(state.threadId);
+      state.retryFollowing();
+      throw cause;
     }
   }
 
@@ -236,7 +222,9 @@ export class DesktopAttachment {
           protocol.close();
           throw new Error("Desktop attachment is closed");
         }
-        if (previous !== protocol) previous?.close();
+        if (previous !== protocol && previous != null) {
+          this.detachProtocol(previous, true);
+        }
         this.protocol = protocol;
         this.bind(protocol);
         try {
@@ -245,7 +233,7 @@ export class DesktopAttachment {
             await protocol.follow(candidate.threadId);
           }));
         } catch (cause) {
-          this.dropProtocol(protocol);
+          this.detachProtocol(protocol, true);
           throw cause;
         }
         return protocol;
@@ -278,12 +266,7 @@ export class DesktopAttachment {
       }
     });
     const removeDisconnect = protocol.onDisconnect(() => {
-      if (this.protocol !== protocol) return;
-      this.unbindProtocol();
-      this.unbindProtocol = () => undefined;
-      this.protocol = null;
-      this.resyncing.clear();
-      for (const state of this.states.values()) state.disconnected();
+      this.detachProtocol(protocol, false);
     });
     this.unbindProtocol = () => {
       removeChange();
@@ -302,12 +285,15 @@ export class DesktopAttachment {
     });
   }
 
-  private dropProtocol(protocol: DesktopTaskProtocol): void {
+  private detachProtocol(
+    protocol: DesktopTaskProtocol,
+    close: boolean,
+  ): void {
     if (this.protocol !== protocol) return;
     this.unbindProtocol();
     this.unbindProtocol = () => undefined;
     this.protocol = null;
-    protocol.close();
+    if (close) protocol.close();
     this.resyncing.clear();
     for (const state of this.states.values()) state.disconnected();
   }
@@ -335,21 +321,24 @@ export class DesktopAttachment {
     state: DesktopThreadState,
     turnId: string,
     baseline: number | null,
+    generation: number,
   ): boolean {
-    if (!state.ready || baseline == null || state.revision == null ||
+    if (!state.ready || state.generation !== generation || baseline == null ||
+        state.revision == null ||
         state.revision <= baseline) return false;
     const turn = state.turn(turnId);
     if (turn == null) return false;
     if (command.kind === "steer") {
-      return state.hasDelivery(command.clientUserMessageId ?? "");
+      return state.hasDelivery(command.clientUserMessageId);
     }
-    return command.kind !== "interrupt" || turn.status !== "inProgress";
+    return command.kind !== "interrupt" || turn.status === "interrupted";
   }
 
   private notSubmitted(
     state: DesktopThreadState,
     reason: string,
   ): DesktopInjectionOutcome {
+    state.setInjection("idle");
     return { _tag: "NotSubmitted", reason, state: state.evidence() };
   }
 
@@ -357,8 +346,16 @@ export class DesktopAttachment {
     state: DesktopThreadState,
     reason: string,
   ): DesktopInjectionOutcome {
-    state.finishInjection("uncertain");
+    state.setInjection("uncertain");
     return { _tag: "Ambiguous", reason, state: state.evidence() };
+  }
+
+  private rejected(
+    state: DesktopThreadState,
+    reason: string,
+  ): DesktopInjectionOutcome {
+    state.setInjection("rejected");
+    return { _tag: "Rejected", reason, state: state.evidence() };
   }
 
   private serialize<T>(threadId: string, command: () => Promise<T>): Promise<T> {
@@ -373,28 +370,4 @@ export class DesktopAttachment {
       if (this.queues.get(threadId) === current) this.queues.delete(threadId);
     });
   }
-}
-
-function withTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  message: string,
-): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
-    promise.then(
-      (value) => {
-        clearTimeout(timeout);
-        resolve(value);
-      },
-      (cause) => {
-        clearTimeout(timeout);
-        reject(cause);
-      },
-    );
-  });
-}
-
-function errorMessage(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }

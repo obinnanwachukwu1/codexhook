@@ -1,4 +1,5 @@
 import type { Turn } from "./protocol.js";
+import { DesktopTimeoutError } from "./desktop-errors.js";
 import type {
   DesktopTaskChange,
   DesktopTurnDelta,
@@ -32,7 +33,6 @@ export class DesktopThreadState {
   private readonly deliveryIds = new Set<string>();
   private readonly entityTurns = new Map<string, string>();
   private generationValue = 0;
-  private initialized = false;
   private injection: InjectionState = "idle";
   private readonly listeners = new Set<() => void>();
   private revisionValue: number | null = null;
@@ -53,7 +53,7 @@ export class DesktopThreadState {
   }
 
   get ready(): boolean {
-    return this.initialized && this.attachmentValue === "synchronized";
+    return this.attachmentValue === "synchronized";
   }
 
   get revision(): number | null {
@@ -95,7 +95,6 @@ export class DesktopThreadState {
   beginConnecting(): void {
     this.connectionValue = "connecting";
     this.attachmentValue = "detached";
-    this.initialized = false;
     this.emit();
   }
 
@@ -103,7 +102,6 @@ export class DesktopThreadState {
     this.connectionValue = "connected";
     this.attachmentValue = "following";
     this.generationValue = generation;
-    this.initialized = false;
     this.revisionValue = null;
     this.clearObservedState();
     this.emit();
@@ -111,31 +109,17 @@ export class DesktopThreadState {
 
   beginResync(): void {
     this.attachmentValue = "following";
-    this.initialized = false;
     this.emit();
   }
 
   disconnected(): void {
     this.connectionValue = "disconnected";
     this.attachmentValue = "detached";
-    this.initialized = false;
     if (this.injection === "injecting") this.injection = "uncertain";
     this.emit();
   }
 
-  beginInjection(): void {
-    this.injection = "injecting";
-    this.emit();
-  }
-
-  resetInjection(): void {
-    this.injection = "idle";
-    this.emit();
-  }
-
-  finishInjection(
-    result: "idle" | "confirmed" | "uncertain" | "rejected",
-  ): void {
+  setInjection(result: InjectionState): void {
     this.injection = result;
     this.emit();
   }
@@ -143,7 +127,6 @@ export class DesktopThreadState {
   retryFollowing(): void {
     if (this.connectionValue !== "connected") return;
     this.attachmentValue = "detached";
-    this.initialized = false;
     this.emit();
   }
 
@@ -164,7 +147,7 @@ export class DesktopThreadState {
       };
       const timeout = setTimeout(() => {
         cleanup();
-        reject(new Error("Desktop thread state timed out"));
+        reject(new DesktopTimeoutError("Desktop thread state timed out"));
       }, timeoutMs);
       const cleanup = () => {
         clearTimeout(timeout);
@@ -180,19 +163,17 @@ export class DesktopThreadState {
     if (!validRevision(change.revision)) return this.requestResync();
     if (this.revisionValue != null &&
         (change.revision < this.revisionValue ||
-          (this.initialized && change.revision === this.revisionValue))) {
+          (this.ready && change.revision === this.revisionValue))) {
       return "ignored";
     }
     this.revisionValue = change.revision;
     this.clearObservedState();
     for (const entity of change.entities) {
-      this.entityTurns.set(entity.key, entity.turn.id);
-      this.turns.set(entity.turn.id, entity.turn);
+      this.bindTurn(entity.key, entity.turn);
     }
     for (const deliveryId of change.deliveryIds) {
       this.deliveryIds.add(deliveryId);
     }
-    this.initialized = true;
     this.attachmentValue = "synchronized";
     this.emit();
     return "applied";
@@ -201,7 +182,7 @@ export class DesktopThreadState {
   private applyPatches(
     change: Extract<DesktopTaskChange, { readonly _tag: "Patches" }>,
   ): DesktopChangeResult {
-    if (!this.initialized || this.revisionValue == null) {
+    if (!this.ready || this.revisionValue == null) {
       return this.requestResync();
     }
     if (!validRevision(change.baseRevision) ||
@@ -220,31 +201,40 @@ export class DesktopThreadState {
 
   private applyDelta(delta: DesktopTurnDelta): void {
     if (delta._tag === "Upsert") {
-      this.entityTurns.set(delta.entity.key, delta.entity.turn.id);
-      this.turns.set(delta.entity.turn.id, delta.entity.turn);
+      this.bindTurn(delta.entity.key, delta.entity.turn);
       return;
     }
     if (delta._tag === "Bind") {
-      this.entityTurns.set(delta.key, delta.turnId);
-      if (!this.turns.has(delta.turnId)) {
-        this.turns.set(delta.turnId, {
-          id: delta.turnId,
-          status: "inProgress",
-          error: null,
-        });
-      }
+      this.bindTurn(delta.key, this.turns.get(delta.turnId) ?? {
+        id: delta.turnId,
+        status: "inProgress",
+        error: null,
+      });
       return;
     }
     const turnId = this.entityTurns.get(delta.key);
     const turn = turnId == null ? undefined : this.turns.get(turnId);
     if (delta._tag === "Remove") {
       this.entityTurns.delete(delta.key);
-      if (turnId != null) this.turns.delete(turnId);
+      if (turnId != null &&
+          ![...this.entityTurns.values()].includes(turnId)) {
+        this.turns.delete(turnId);
+      }
     } else if (turn != null && delta._tag === "Status") {
       this.turns.set(turn.id, { ...turn, status: delta.status });
     } else if (turn != null && delta._tag === "Error") {
       this.turns.set(turn.id, { ...turn, error: delta.error });
     }
+  }
+
+  private bindTurn(key: string, turn: Turn): void {
+    const previous = this.entityTurns.get(key);
+    this.entityTurns.set(key, turn.id);
+    if (previous != null && previous !== turn.id &&
+        ![...this.entityTurns.values()].includes(previous)) {
+      this.turns.delete(previous);
+    }
+    this.turns.set(turn.id, turn);
   }
 
   private requestResync(): DesktopChangeResult {

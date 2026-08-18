@@ -10,6 +10,11 @@ import {
 import {
   DesktopAttachment,
 } from "./desktop-attachment.js";
+import { desktopOutcomeDetail } from "./desktop-injection.js";
+import {
+  desktopErrorMessage,
+  DesktopTimeoutError,
+} from "./desktop-errors.js";
 import {
   DesktopIpcConnectError,
 } from "./desktop-ipc-client.js";
@@ -61,26 +66,35 @@ function makePeer(
       try: async () => {
         const { method, params } = ticketPayload(ticket);
         const threadId = String(params.threadId ?? "");
-        const result = await attachment.inject({
-          kind: method === "turn/steer" ? "steer" : "start",
-          threadId,
-          ...(method === "turn/steer"
-            ? { expectedTurnId: String(params.expectedTurnId ?? "") }
-            : {}),
-          clientUserMessageId: String(params.clientUserMessageId ?? ""),
-          input: params.input,
-        });
+        const deliveryId = String(params.clientUserMessageId ?? "");
+        const result = await attachment.inject(method === "turn/steer"
+          ? {
+              kind: "steer",
+              threadId,
+              expectedTurnId: String(params.expectedTurnId ?? ""),
+              clientUserMessageId: deliveryId,
+              input: params.input,
+            }
+          : {
+              kind: "start",
+              threadId,
+              clientUserMessageId: deliveryId,
+              input: params.input,
+            });
         if (result._tag === "NotSubmitted") {
-          throw new RpcNotWritten({ detail: result.reason });
+          throw new RpcNotWritten({ detail: desktopOutcomeDetail(result) });
         }
         if (result._tag === "Ambiguous") {
-          throw new RpcWriteAmbiguous({ detail: result.reason });
+          throw new RpcWriteAmbiguous({ detail: desktopOutcomeDetail(result) });
         }
         if (result._tag === "Rejected") {
           Deferred.unsafeDone(
             ticket.reply,
             Effect.fail(
-              new RpcErrorReply({ code: -32_000, message: result.reason }),
+              new RpcErrorReply({
+                code: -32_000,
+                message: desktopOutcomeDetail(result),
+              }),
             ),
           );
           return;
@@ -97,7 +111,7 @@ function makePeer(
       catch: (cause) => cause instanceof RpcNotWritten ||
           cause instanceof RpcWriteAmbiguous
         ? cause
-        : new RpcWriteAmbiguous({ detail: errorMessage(cause) }),
+        : new RpcWriteAmbiguous({ detail: desktopErrorMessage(cause) }),
     });
 
   const reply: AppServerPeer["reply"] = (ticket, schema, timeout) =>
@@ -133,7 +147,7 @@ function makePeer(
         return { thread: { id: threadId, turns } };
       },
       catch: (cause) => new RpcNotWritten({
-        detail: cause instanceof Error ? cause.message : String(cause),
+        detail: desktopErrorMessage(cause),
       }),
     }).pipe(
       Effect.timeoutFail({
@@ -162,15 +176,15 @@ function makePeer(
           turnId,
           durationMillis(timeout),
         ),
-        catch: (cause) => errorMessage(cause).includes("timed out")
+        catch: (cause) => cause instanceof DesktopTimeoutError
           ? new RpcTimeout({ millis: durationMillis(timeout) })
-          : new RpcDisconnected({ detail: errorMessage(cause) }),
+          : new RpcDisconnected({ detail: desktopErrorMessage(cause) }),
       }),
   };
 }
 
 function connectError(cause: unknown) {
-  const detail = errorMessage(cause);
+  const detail = desktopErrorMessage(cause);
   if (!(cause instanceof DesktopIpcConnectError)) {
     return new TransportIncompatible({
       transport: "desktop" as const,
@@ -233,8 +247,4 @@ export function connectDesktop(
     }),
     (attachment) => Effect.sync(() => attachment.close()),
   ).pipe(Effect.map((attachment) => makePeer(spec, attachment)));
-}
-
-function errorMessage(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }

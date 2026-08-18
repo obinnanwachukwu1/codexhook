@@ -1,124 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DesktopAttachment } from "../src/transport/desktop-attachment.js";
-import type {
-  DesktopTaskChange,
-  DesktopCommand,
-  DesktopCommandReply,
-  DesktopTaskProtocol,
-} from "../src/transport/desktop-task-protocol.js";
-
-type ChangeListener = (threadId: string, change: DesktopTaskChange) => void;
-
-class FakeDesktopProtocol implements DesktopTaskProtocol {
-  connected = true;
-  readonly follows: string[] = [];
-  readonly historyRequests: string[] = [];
-  readonly injections: DesktopCommand[] = [];
-  private readonly changes = new Set<ChangeListener>();
-  private readonly disconnects = new Set<(error: Error) => void>();
-  private readonly snapshots = new Map<string, DesktopTaskChange>();
-  injectBehavior: (
-    command: DesktopCommand,
-  ) => Promise<DesktopCommandReply> = async () => ({
-    _tag: "Rejected",
-    reason: "not configured",
-    notWritten: true,
-  });
-  followBehavior: (threadId: string) => Promise<void> = async () => undefined;
-  historyBehavior: (threadId: string) => Promise<void> = async () => undefined;
-
-  setSnapshot(
-    threadId: string,
-    revision: number,
-    turns: Record<string, {
-      turnId: string;
-      status: "inProgress" | "completed" | "interrupted" | "failed";
-      error: null;
-    }> = {},
-  ): void {
-    this.snapshots.set(threadId, {
-      _tag: "Snapshot",
-      revision,
-      entities: Object.entries(turns).map(([key, turn]) => ({
-        key,
-        turn: { id: turn.turnId, status: turn.status, error: turn.error },
-      })),
-      deliveryIds: [],
-    });
-  }
-
-  emit(threadId: string, change: DesktopTaskChange): void {
-    for (const listener of this.changes) listener(threadId, change);
-  }
-
-  disconnect(): void {
-    this.connected = false;
-    for (const listener of this.disconnects) {
-      listener(new Error("test disconnect"));
-    }
-  }
-
-  close(): void {
-    this.disconnect();
-  }
-
-  async follow(threadId: string): Promise<void> {
-    this.follows.push(threadId);
-    await this.followBehavior(threadId);
-    const snapshot = this.snapshots.get(threadId);
-    if (snapshot != null) this.emit(threadId, snapshot);
-  }
-
-  async inject(command: DesktopCommand): Promise<DesktopCommandReply> {
-    this.injections.push(command);
-    return this.injectBehavior(command);
-  }
-
-  async loadHistory(threadId: string): Promise<void> {
-    this.historyRequests.push(threadId);
-    await this.historyBehavior(threadId);
-  }
-
-  onChange(listener: ChangeListener): () => void {
-    this.changes.add(listener);
-    return () => this.changes.delete(listener);
-  }
-
-  onDisconnect(listener: (error: Error) => void): () => void {
-    this.disconnects.add(listener);
-    return () => this.disconnects.delete(listener);
-  }
-}
-
-function startPatch(
-  baseRevision: number,
-  turnId: string,
-  deliveryIds: ReadonlyArray<string> = [],
-): DesktopTaskChange {
-  return {
-    _tag: "Patches",
-    baseRevision,
-    revision: baseRevision + 1,
-    deltas: [{
-      _tag: "Upsert",
-      entity: {
-        key: turnId,
-        turn: { id: turnId, status: "inProgress", error: null },
-      },
-    }],
-    deliveryIds,
-  };
-}
-
-function startCommand(id = "delivery-1"): DesktopCommand {
-  return {
-    kind: "start",
-    threadId: "thread-1",
-    clientUserMessageId: id,
-    input: [{ type: "text", text: "hello" }],
-  };
-}
+import type { DesktopTaskChange } from "../src/transport/desktop-task-protocol.js";
+import {
+  FakeDesktopProtocol,
+  startCommand,
+  startPatch,
+} from "./support/desktop-protocol-fixture.js";
 
 test("confirms a start only after fenced Desktop state observes it", async () => {
   const protocol = new FakeDesktopProtocol();
@@ -261,6 +149,35 @@ test("does not confirm steer from an unrelated revision", async () => {
   assert.equal(result._tag, "Ambiguous");
 });
 
+test("does not confirm interrupt when the turn completes naturally", async () => {
+  const protocol = new FakeDesktopProtocol();
+  protocol.setSnapshot("thread-1", 4, {
+    active: { turnId: "turn-current", status: "inProgress", error: null },
+  });
+  protocol.injectBehavior = async () => {
+    protocol.emit("thread-1", {
+      _tag: "Patches",
+      baseRevision: 4,
+      revision: 5,
+      deltas: [{ _tag: "Status", key: "active", status: "completed" }],
+      deliveryIds: [],
+    });
+    return { _tag: "Accepted", result: {}, turnId: null };
+  };
+  const attachment = new DesktopAttachment(
+    async () => protocol,
+    protocol,
+    { proofTimeoutMs: 5 },
+  );
+
+  const result = await attachment.inject({
+    kind: "interrupt",
+    threadId: "thread-1",
+    expectedTurnId: "turn-current",
+  });
+  assert.equal(result._tag, "Ambiguous");
+});
+
 test("reports disconnect during injection as ambiguous", async () => {
   const protocol = new FakeDesktopProtocol();
   protocol.setSnapshot("thread-1", 1);
@@ -272,6 +189,39 @@ test("reports disconnect during injection as ambiguous", async () => {
   const result = await attachment.inject(startCommand());
   assert.equal(result._tag, "Ambiguous");
   assert.equal(result.state.connection, "disconnected");
+});
+
+test("does not prove an injection from a replacement connection", async () => {
+  const first = new FakeDesktopProtocol();
+  first.setSnapshot("thread-1", 10);
+  const second = new FakeDesktopProtocol();
+  second.setSnapshot("thread-1", 50, {
+    active: { turnId: "turn-1", status: "inProgress", error: null },
+  });
+  second.setSnapshot("thread-2", 1);
+  let entered: () => void = () => undefined;
+  let release: () => void = () => undefined;
+  const injecting = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  first.injectBehavior = async () => {
+    entered();
+    await gate;
+    return { _tag: "Accepted", result: {}, turnId: "turn-1" };
+  };
+  const attachment = new DesktopAttachment(
+    async () => second,
+    first,
+    { proofTimeoutMs: 5 },
+  );
+  const pending = attachment.inject(startCommand());
+  await injecting;
+  first.disconnect();
+  await attachment.resume("thread-2");
+  release();
+
+  const result = await pending;
+  assert.equal(result._tag, "Ambiguous");
+  assert.equal(result.state.generation, 2);
 });
 
 test("drops a failed follow so the next operation can reconnect", async () => {
@@ -380,4 +330,22 @@ test("closes a protocol that connects after attachment shutdown", async () => {
   finishConnect();
   await assert.rejects(resume, /closed/);
   assert.equal(protocol.connected, false);
+});
+
+test("close detaches listeners and leaves followed state disconnected", async () => {
+  const protocol = new FakeDesktopProtocol();
+  protocol.setSnapshot("thread-1", 1);
+  const attachment = new DesktopAttachment(async () => protocol, protocol);
+  await attachment.resume("thread-1");
+
+  attachment.close();
+  protocol.emit("thread-1", {
+    _tag: "Snapshot",
+    revision: 99,
+    entities: [],
+    deliveryIds: [],
+  });
+
+  assert.equal(attachment.state("thread-1").connection, "disconnected");
+  assert.equal(attachment.state("thread-1").revision, 1);
 });

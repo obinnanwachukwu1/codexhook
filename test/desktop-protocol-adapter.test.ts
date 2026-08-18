@@ -147,7 +147,11 @@ test("Desktop broadcasts decode state deltas and delivery identities", async () 
                     turnId: "turn-1",
                     status: "inProgress",
                     error: null,
-                    message: { clientUserMessageId: "snapshot-delivery" },
+                    message: { clientUserMessageId: "leaf-delivery" },
+                    messages: [
+                      { clientUserMessageId: "array-delivery" },
+                      { nested: { clientUserMessageId: "nested-delivery" } },
+                    ],
                   },
                 },
               },
@@ -174,16 +178,33 @@ test("Desktop broadcasts decode state deltas and delivery identities", async () 
             },
             {
               op: "add",
-              path: ["messages", "byId", "one", "clientUserMessageId"],
+              path: [
+                "turnHistory",
+                "history",
+                "entitiesByKey",
+                "active",
+                "clientUserMessageId",
+              ],
               value: "leaf-delivery",
             },
             {
               op: "add",
-              path: ["messages", "many"],
+              path: [
+                "turnHistory",
+                "history",
+                "entitiesByKey",
+                "active",
+                "messages",
+              ],
               value: [
                 { clientUserMessageId: "array-delivery" },
                 { nested: { clientUserMessageId: "nested-delivery" } },
               ],
+            },
+            {
+              op: "add",
+              path: ["draft", "clientUserMessageId"],
+              value: "outside-entities",
             },
           ],
         },
@@ -191,26 +212,28 @@ test("Desktop broadcasts decode state deltas and delivery identities", async () 
     }));
 
     const [snapshot, patches] = await changes;
-    assert.deepEqual(snapshot, {
-      _tag: "Snapshot",
-      revision: 4,
-      entities: [{
-        key: "active",
-        turn: { id: "turn-1", status: "inProgress", error: null },
-      }],
-      deliveryIds: ["snapshot-delivery"],
-    });
-    assert.deepEqual(patches, {
-      _tag: "Patches",
-      baseRevision: 4,
-      revision: 5,
-      deltas: [{ _tag: "Status", key: "active", status: "completed" }],
-      deliveryIds: [
-        "leaf-delivery",
-        "nested-delivery",
-        "array-delivery",
-      ],
-    });
+    assert.equal(snapshot?._tag, "Snapshot");
+    assert.equal(patches?._tag, "Patches");
+    if (snapshot?._tag !== "Snapshot" || patches?._tag !== "Patches") return;
+    assert.equal(snapshot.revision, 4);
+    assert.deepEqual(snapshot.entities, [{
+      key: "active",
+      turn: { id: "turn-1", status: "inProgress", error: null },
+    }]);
+    assert.equal(patches.baseRevision, 4);
+    assert.equal(patches.revision, 5);
+    assert.deepEqual(patches.deltas, [{
+      _tag: "Status",
+      key: "active",
+      status: "completed",
+    }]);
+    const expectedDeliveries = [
+      "array-delivery",
+      "leaf-delivery",
+      "nested-delivery",
+    ];
+    assert.deepEqual([...snapshot.deliveryIds].sort(), expectedDeliveries);
+    assert.deepEqual([...patches.deliveryIds].sort(), expectedDeliveries);
     protocol.close();
   } finally {
     for (const socket of sockets) socket.destroy();

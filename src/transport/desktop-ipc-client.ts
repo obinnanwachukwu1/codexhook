@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import net from "node:net";
+import {
+  desktopErrorMessage,
+  DesktopTimeoutError,
+} from "./desktop-errors.js";
 
 const MAX_FRAME_BYTES = 256 * 1024 * 1024;
 
@@ -99,10 +103,9 @@ export class DesktopIpcClient {
     } catch (cause) {
       client.close();
       if (cause instanceof DesktopIpcConnectError) throw cause;
-      const message =
-        cause instanceof Error ? cause.message : String(cause);
+      const message = desktopErrorMessage(cause);
       throw new DesktopIpcConnectError(
-        message.includes("timed out")
+        cause instanceof DesktopTimeoutError
           ? "initialize-timeout"
           : "initialize-failed",
         message,
@@ -150,7 +153,9 @@ export class DesktopIpcClient {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(requestId);
-        reject(new Error(`Desktop IPC request timed out: ${method}`));
+        reject(new DesktopTimeoutError(
+          `Desktop IPC request timed out: ${method}`,
+        ));
       }, timeoutMs);
       this.pending.set(requestId, { reject, resolve, timeout });
       try {

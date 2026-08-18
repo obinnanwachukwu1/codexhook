@@ -92,6 +92,36 @@ test("applies status and error patches at a fenced revision", () => {
   assert.equal(state.evidence().activity, "idle");
 });
 
+test("replaces an entity binding without retaining an orphaned active turn", () => {
+  const state = new DesktopThreadState("thread-1");
+  state.beginFollowing(1);
+  state.apply(snapshot(1, {
+    active: { turnId: "temporary", status: "inProgress", error: null },
+  }), 1);
+  state.apply({
+    _tag: "Patches",
+    baseRevision: 1,
+    revision: 2,
+    deltas: [{ _tag: "Bind", key: "active", turnId: "canonical" }],
+    deliveryIds: [],
+  }, 1);
+  state.apply({
+    _tag: "Patches",
+    baseRevision: 2,
+    revision: 3,
+    deltas: [{ _tag: "Status", key: "active", status: "completed" }],
+    deliveryIds: [],
+  }, 1);
+
+  assert.equal(state.turn("temporary"), undefined);
+  assert.equal(state.activeTurn(), undefined);
+  assert.deepEqual(state.turnsSnapshot(), [{
+    id: "canonical",
+    status: "completed",
+    error: null,
+  }]);
+});
+
 test("rejects revision gaps and recovers only from a complete snapshot", () => {
   const state = new DesktopThreadState("thread-1");
   state.beginFollowing(1);
@@ -164,7 +194,7 @@ test("marks an in-flight injection uncertain on disconnect", () => {
   const state = new DesktopThreadState("thread-1");
   state.beginFollowing(1);
   state.apply(snapshot(1), 1);
-  state.beginInjection();
+  state.setInjection("injecting");
   assert.equal(state.evidence().injection, "injecting");
   state.disconnected();
   assert.equal(state.evidence().injection, "uncertain");
