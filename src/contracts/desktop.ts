@@ -1,4 +1,4 @@
-import type { Duration, Effect, Scope } from "effect";
+import { Context, type Duration, type Effect, type Scope } from "effect";
 import type {
   DeliveryId,
   TurnId,
@@ -64,3 +64,8 @@ export interface DesktopProtocol {
     Scope.Scope
   >;
 }
+
+export class Desktop extends Context.Tag("codexhook/Desktop")<
+  Desktop,
+  DesktopProtocol
+>() {}

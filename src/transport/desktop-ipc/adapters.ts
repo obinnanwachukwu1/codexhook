@@ -23,6 +23,7 @@ export interface DesktopHandshake {
 
 export interface DesktopProtocolAdapter {
   readonly id: string;
+  readonly compatibility: { readonly major: number; readonly revision: number };
   readonly methods: {
     readonly follow: string;
     readonly history: string;
@@ -259,6 +260,7 @@ function malformedAccepted(operation: string): never {
 function makeV1Adapter(id: string): DesktopProtocolAdapter {
   return {
     id,
+    compatibility: { major: 1, revision: 1 },
     methods: V1_METHODS,
     version: 1,
     followParams: (threadId) => ({

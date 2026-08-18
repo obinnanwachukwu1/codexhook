@@ -331,6 +331,7 @@ export class DesktopProtocolSession {
       raw.setInitializedClientId(handshake.clientId);
       const adapter = selectDesktopAdapter(handshake);
       const profile = {
+        compatibility: adapter.compatibility,
         capabilities: handshake.capabilities,
         fingerprint: fingerprintDesktopProtocol(handshake, adapter),
       };
