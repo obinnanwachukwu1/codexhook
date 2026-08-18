@@ -19,6 +19,7 @@ export type WriteBehavior =
   | "rejected"
   | "follow-fail"
   | "follow-fail-then-absent"
+  | "follow-fail-then-unconfirmed"
   | "follow-fail-then-visible"
   | "follow-fail-then-close"
   | "follow-fail-then-disconnect-refresh"
@@ -98,6 +99,8 @@ export function fakeTransportPeer(
         (behavior === "follow-fail" ||
           (behavior === "follow-fail-then-absent" &&
             connectionOrdinal === 1) ||
+          (behavior === "follow-fail-then-unconfirmed" &&
+            connectionOrdinal === 1) ||
           behavior === "follow-fail-then-close" ||
           (behavior === "follow-fail-then-disconnect-refresh" &&
             connectionOrdinal === 1) ||
@@ -112,11 +115,20 @@ export function fakeTransportPeer(
         behavior === "follow-fail-then-absent" &&
         spec.id === "desktop" &&
         connectionOrdinal === 2;
+      const leavesFallbackTurnInProgress =
+        behavior === "follow-fail-then-unconfirmed" &&
+        spec.id === "desktop" &&
+        connectionOrdinal === 2;
       const turns =
         spec.id === "desktop" &&
           recorder.completedTurnId != null &&
           !omitsFallbackTurn
-        ? [{ id: recorder.completedTurnId, status: "completed" as const }]
+        ? [{
+            id: recorder.completedTurnId,
+            status: leavesFallbackTurnInProgress
+              ? "inProgress" as const
+              : "completed" as const,
+          }]
         : behavior === "active-ok" || behavior === "busy"
           ? [{ id: "turn-active", status: "inProgress" as const }]
           : [];
@@ -142,6 +154,17 @@ export function fakeTransportPeer(
         connectionOrdinal === 2
       ) {
         return Effect.fail(new RpcTimeout({ millis: 1_000 }));
+      }
+      if (
+        behavior === "follow-fail-then-unconfirmed" &&
+        spec.id === "desktop" &&
+        connectionOrdinal === 2
+      ) {
+        return Effect.succeed({
+          id: turnId,
+          status: "failed" as const,
+          error: { message: "completion could not be confirmed" },
+        });
       }
       return Effect.sync(() => {
         if (turnId === "turn-active") {

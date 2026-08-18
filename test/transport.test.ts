@@ -133,6 +133,27 @@ test("fails after fallback when Desktop cannot expose the completed turn", async
   );
 });
 
+test("a present but unconfirmed fallback turn reports an inconclusive refresh", async () => {
+  const fixture = fakeProvider(
+    { desktop: "follow-fail-then-unconfirmed", daemon: "ok" },
+    [desktop, daemon],
+  );
+  const exit = await runTransportExit(fixture);
+  assert.equal(Exit.isFailure(exit), true);
+  if (Exit.isFailure(exit)) {
+    const failure = Cause.failureOption(exit.cause);
+    assert.equal(
+      Option.isSome(failure) &&
+        failure.value instanceof DesktopVisibilityUnconfirmed &&
+        failure.value.reason === "refresh-failed",
+      true,
+    );
+  }
+  assert.deepEqual(fixture.recorder.writes, [
+    { transport: "daemon", method: "turn/start" },
+  ]);
+});
+
 test("defers visibility when Desktop closes before fallback refresh", async () => {
   const fixture = fakeProvider(
     { desktop: "follow-fail-then-close", daemon: "ok" },
