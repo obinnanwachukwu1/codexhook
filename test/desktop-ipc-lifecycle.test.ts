@@ -70,6 +70,7 @@ test("closing during reconnect cannot resurrect or leak a session", async () => 
   const firstRouter = await listen(endpoint.socketPath, initialize);
   const session = await DesktopProtocolSession.connect(endpoint.socketPath);
   await firstRouter.close();
+  await waitFor(() => !session.alive);
 
   let connected!: () => void;
   const connection = new Promise<void>((resolve) => {
@@ -111,6 +112,7 @@ test("concurrent callers share one reconnect and one lifecycle observation", asy
   const session = await DesktopProtocolSession.connect(endpoint.socketPath);
   await session.followThread("thread-1");
   await firstRouter.close();
+  await waitFor(() => !session.alive);
 
   let follows = 0;
   const secondRouter = await listen(
