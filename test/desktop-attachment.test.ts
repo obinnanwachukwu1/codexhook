@@ -332,6 +332,33 @@ test("closes a protocol that connects after attachment shutdown", async () => {
   assert.equal(protocol.connected, false);
 });
 
+test("close fences a reconnect while subscriptions are restoring", async () => {
+  const first = new FakeDesktopProtocol();
+  first.setSnapshot("thread-1", 1);
+  const second = new FakeDesktopProtocol();
+  let following: () => void = () => undefined;
+  let release: () => void = () => undefined;
+  const entered = new Promise<void>((resolve) => { following = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  second.followBehavior = async () => {
+    following();
+    await gate;
+  };
+  const attachment = new DesktopAttachment(async () => second, first);
+  await attachment.resume("thread-1");
+  first.disconnect();
+  const resume = attachment.resume("thread-2");
+  await entered;
+
+  attachment.close();
+  release();
+
+  await assert.rejects(resume, /closed/);
+  assert.equal(attachment.state("thread-1").connection, "disconnected");
+  assert.equal(attachment.state("thread-2").connection, "disconnected");
+  assert.equal(second.connected, false);
+});
+
 test("close detaches listeners and leaves followed state disconnected", async () => {
   const protocol = new FakeDesktopProtocol();
   protocol.setSnapshot("thread-1", 1);

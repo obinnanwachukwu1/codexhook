@@ -62,6 +62,7 @@ function snapshotEntityValues(value: unknown): Record<string, unknown> {
 function readDelta(value: unknown): ReadonlyArray<DesktopTurnDelta> {
   const patch = record(value);
   const path = Array.isArray(patch?.path) ? patch.path : [];
+  if (!isTurnEntityPath(path)) return [];
   const marker = path.indexOf("entitiesByKey");
   const key = marker < 0 ? undefined : path[marker + 1];
   if (typeof key !== "string") return [];
@@ -133,15 +134,13 @@ function isTurnEntityPath(path: ReadonlyArray<unknown>): boolean {
   );
 }
 
-export function nestedTurnId(value: unknown, depth = 0): string | null {
-  if (depth > 32 || value == null || typeof value !== "object") return null;
-  const source = value as Record<string, unknown>;
-  if (typeof source.turnId === "string") return source.turnId;
-  const turn = record(source.turn);
-  if (typeof turn?.id === "string") return turn.id;
-  for (const child of Object.values(source)) {
-    const found = nestedTurnId(child, depth + 1);
-    if (found != null) return found;
+export function acceptedTurnId(value: unknown): string | null {
+  const result = record(value);
+  if (result == null) return null;
+  const turn = record(result.turn);
+  const submission = record(result.submission);
+  for (const candidate of [result.turnId, turn?.id, submission?.turnId]) {
+    if (typeof candidate === "string" && candidate.length > 0) return candidate;
   }
   return null;
 }

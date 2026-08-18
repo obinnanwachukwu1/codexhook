@@ -156,7 +156,6 @@ export class DesktopAttachment {
     } else {
       for (const state of this.states.values()) state.disconnected();
     }
-    this.connectPromise = null;
   }
 
   private getState(threadId: string): DesktopThreadState {
@@ -184,6 +183,11 @@ export class DesktopAttachment {
       remaining,
       "Desktop follow timed out",
     );
+    if (this.closed) {
+      this.detachProtocol(protocol, true);
+      state.disconnected();
+      throw new Error("Desktop attachment is closed");
+    }
     if (state.attachment === "detached") {
       state.beginFollowing(this.generation);
       try {
@@ -192,6 +196,11 @@ export class DesktopAttachment {
           Math.max(1, deadline - Date.now()),
           "Desktop follow timed out",
         );
+        if (this.closed) {
+          this.detachProtocol(protocol, true);
+          state.disconnected();
+          throw new Error("Desktop attachment is closed");
+        }
       } catch (cause) {
         this.detachProtocol(protocol, true);
         throw cause;
@@ -232,6 +241,15 @@ export class DesktopAttachment {
             candidate.beginFollowing(this.generation);
             await protocol.follow(candidate.threadId);
           }));
+          if (this.closed || this.protocol !== protocol) {
+            this.detachProtocol(protocol, true);
+            for (const candidate of this.states.values()) {
+              candidate.disconnected();
+            }
+            throw new Error(this.closed
+              ? "Desktop attachment is closed"
+              : "Desktop disconnected while restoring subscriptions");
+          }
         } catch (cause) {
           this.detachProtocol(protocol, true);
           throw cause;

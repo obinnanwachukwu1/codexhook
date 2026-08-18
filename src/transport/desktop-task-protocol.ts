@@ -1,6 +1,6 @@
 import { DesktopIpcClient } from "./desktop-ipc-client.js";
 import {
-  nestedTurnId,
+  acceptedTurnId,
   readDesktopChange,
 } from "./desktop-task-decoder.js";
 import type { Turn } from "./protocol.js";
@@ -191,7 +191,7 @@ export class DesktopIpcProtocol implements DesktopTaskProtocol {
     return {
       _tag: "Accepted",
       result: outer?.result,
-      turnId: nestedTurnId(outer?.result),
+      turnId: acceptedTurnId(outer?.result),
     };
   }
 
