@@ -1,4 +1,4 @@
-import type { DesktopWireEnvelope } from "./desktop-protocol/index.js";
+import type { DesktopWireEnvelope } from "./desktop-ipc/index.js";
 import type { Turn } from "./protocol.js";
 
 interface Patch {

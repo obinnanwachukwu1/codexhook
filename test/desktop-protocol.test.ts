@@ -1,91 +1,19 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
-import net from "node:net";
-import os from "node:os";
-import path from "node:path";
 import test from "node:test";
 import {
   DesktopFrameDecoder,
   DesktopProtocolError,
   DesktopProtocolSession,
+  DEFAULT_MAX_INBOUND_FRAME_BYTES,
+  DEFAULT_MAX_OUTBOUND_FRAME_BYTES,
   encodeDesktopFrame,
-} from "../src/transport/desktop-protocol/index.js";
-import type { DesktopWireEnvelope } from "../src/transport/desktop-protocol/index.js";
-
-type MessageHandler = (
-  message: DesktopWireEnvelope,
-  send: (message: unknown) => void,
-  sendRaw: (frame: Buffer) => void,
-) => void;
-
-interface Router {
-  readonly close: () => Promise<void>;
-}
-
-const fixtures = path.join(
-  process.cwd(),
-  "test",
-  "fixtures",
-  "desktop-protocol",
-);
-
-async function fixture(name: string): Promise<unknown> {
-  return JSON.parse(await readFile(path.join(fixtures, name), "utf8"));
-}
-
-async function listen(
-  socketPath: string,
-  initialize: unknown,
-  handler: MessageHandler = () => undefined,
-): Promise<Router> {
-  const sockets = new Set<net.Socket>();
-  const server = net.createServer((socket) => {
-    sockets.add(socket);
-    socket.on("close", () => sockets.delete(socket));
-    const decoder = new DesktopFrameDecoder();
-    const send = (message: unknown) => socket.write(encodeDesktopFrame(message));
-    socket.on("data", (chunk) => {
-      for (const message of decoder.push(chunk)) {
-        if (message.method === "initialize") {
-          if (initialize != null) {
-            send({
-              type: "response",
-              requestId: message.requestId,
-              resultType: "success",
-              result: initialize,
-            });
-          }
-          continue;
-        }
-        handler(message, send, (frame) => socket.write(frame));
-      }
-    });
-  });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(socketPath, resolve);
-  });
-  return {
-    close: async () => {
-      for (const socket of sockets) socket.destroy();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    },
-  };
-}
-
-async function testEndpoint(): Promise<{
-  readonly directory: string;
-  readonly socketPath: string;
-}> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codexhook-protocol-"));
-  return {
-    directory,
-    socketPath: process.platform === "win32"
-      ? `\\\\.\\pipe\\codexhook-protocol-${randomUUID()}`
-      : path.join(directory, "ipc.sock"),
-  };
-}
+} from "../src/transport/desktop-ipc/index.js";
+import type { DesktopWireEnvelope } from "../src/transport/desktop-ipc/index.js";
+import {
+  fixture,
+  listen,
+  testEndpoint,
+} from "./support/desktop-ipc-router.js";
 
 test("selects legacy and explicit v1 adapters across response shapes", async () => {
   for (const entry of [
@@ -130,8 +58,45 @@ test("selects legacy and explicit v1 adapters across response shapes", async () 
       session.close();
     } finally {
       await router.close();
-      await rm(endpoint.directory, { recursive: true, force: true });
+      await endpoint.cleanup();
     }
+  }
+});
+
+test("preserves the minimal handshake and legacy success response semantics", async () => {
+  const endpoint = await testEndpoint();
+  let initializeParams: unknown;
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-legacy.json"),
+    (message, send) => {
+      if (message.method === "thread-follower-start-turn") {
+        send({
+          type: "response",
+          method: "normalized-start-name",
+          requestId: message.requestId,
+          result: { result: { turn: { id: "turn-no-result-type" } } },
+        });
+      }
+    },
+    {
+      onInitialize: (message) => {
+        initializeParams = message.params;
+      },
+    },
+  );
+  try {
+    const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    assert.deepEqual(initializeParams, { clientType: "codexhook" });
+    const receipt = await session.startTurn("thread-1", {}, 1_000);
+    assert.equal(
+      receipt.outcome._tag === "Accepted" && receipt.outcome.value.turnId,
+      "turn-no-result-type",
+    );
+    session.close();
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
   }
 });
 
@@ -150,11 +115,13 @@ test("rejects an explicitly unknown protocol version", async () => {
     );
   } finally {
     await router.close();
-    await rm(endpoint.directory, { recursive: true, force: true });
+    await endpoint.cleanup();
   }
 });
 
 test("bounds and rejects malformed frame lengths, JSON, and envelopes", () => {
+  assert.equal(DEFAULT_MAX_INBOUND_FRAME_BYTES, 256 * 1024 * 1024);
+  assert.equal(DEFAULT_MAX_OUTBOUND_FRAME_BYTES, 16 * 1024 * 1024);
   const combined = Buffer.concat([
     encodeDesktopFrame({ type: "broadcast", params: "a".repeat(120) }),
     encodeDesktopFrame({ type: "broadcast", params: "b".repeat(120) }),
@@ -183,9 +150,27 @@ test("bounds and rejects malformed frame lengths, JSON, and envelopes", () => {
     () => new DesktopFrameDecoder(64).push(invalidJson),
     DesktopProtocolError,
   );
+  let malformedEnvelopes = 0;
+  const decoder = new DesktopFrameDecoder(64, () => {
+    malformedEnvelopes += 1;
+  });
+  assert.deepEqual(decoder.push(encodeDesktopFrame([])), []);
+  assert.equal(malformedEnvelopes, 1);
+});
+
+test("malformed JSON diagnostics do not retain frame contents", () => {
+  const body = Buffer.from('{"message":"private-conversation-text"');
+  const frame = Buffer.allocUnsafe(body.length + 4);
+  frame.writeUInt32LE(body.length, 0);
+  body.copy(frame, 4);
   assert.throws(
-    () => new DesktopFrameDecoder(64).push(encodeDesktopFrame([])),
-    DesktopProtocolError,
+    () => new DesktopFrameDecoder().push(frame),
+    (error: unknown) => {
+      assert.equal(error instanceof DesktopProtocolError, true);
+      assert.equal(String(error).includes("private-conversation-text"), false);
+      assert.equal((error as Error).cause, undefined);
+      return true;
+    },
   );
 });
 
@@ -211,7 +196,7 @@ test("fails an in-flight request when the router sends a malformed frame", async
     );
   } finally {
     await router.close();
-    await rm(endpoint.directory, { recursive: true, force: true });
+    await endpoint.cleanup();
   }
 });
 
@@ -237,7 +222,7 @@ test("times out without retrying an uncertain request", async () => {
     assert.equal(starts, 1);
   } finally {
     await router.close();
-    await rm(endpoint.directory, { recursive: true, force: true });
+    await endpoint.cleanup();
   }
 });
 
@@ -279,7 +264,7 @@ test("correlates concurrent responses that arrive out of order", async () => {
     );
   } finally {
     await router.close();
-    await rm(endpoint.directory, { recursive: true, force: true });
+    await endpoint.cleanup();
   }
 });
 
@@ -288,13 +273,21 @@ test("reconnects future operations after socket replacement without replay", asy
   const initialize = await fixture("initialize-legacy.json");
   const firstRouter = await listen(endpoint.socketPath, initialize);
   const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+  const observations: string[] = [];
+  session.onObservation((observation) => observations.push(observation._tag));
+  await session.followThread("thread-1");
   await firstRouter.close();
 
   let starts = 0;
+  let follows = 0;
   const secondRouter = await listen(
     endpoint.socketPath,
     initialize,
     (message, send) => {
+      if (message.method === "thread-stream-following-changed") {
+        follows += 1;
+        return;
+      }
       if (message.method !== "thread-follower-start-turn") return;
       starts += 1;
       send({
@@ -312,10 +305,12 @@ test("reconnects future operations after socket replacement without replay", asy
       "turn-reconnected",
     );
     assert.equal(starts, 1);
+    assert.equal(follows, 1);
+    assert.equal(observations.includes("Reconnected"), true);
   } finally {
     session.close();
     await secondRouter.close();
-    await rm(endpoint.directory, { recursive: true, force: true });
+    await endpoint.cleanup();
   }
 });
 
@@ -324,11 +319,7 @@ test("rejects an unadvertised capability before writing operation bytes", async 
   let starts = 0;
   const router = await listen(
     endpoint.socketPath,
-    {
-      clientId: "limited-client",
-      protocolVersion: 1,
-      capabilities: ["threadStream"],
-    },
+    await fixture("initialize-limited.json"),
     (message) => {
       if (message.method === "thread-follower-start-turn") starts += 1;
     },
@@ -345,6 +336,6 @@ test("rejects an unadvertised capability before writing operation bytes", async 
     assert.equal(starts, 0);
   } finally {
     await router.close();
-    await rm(endpoint.directory, { recursive: true, force: true });
+    await endpoint.cleanup();
   }
 });

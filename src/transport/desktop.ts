@@ -12,7 +12,7 @@ import {
   DesktopProtocolError,
   DesktopProtocolSession,
   type DesktopKnownRejection,
-} from "./desktop-protocol/index.js";
+} from "./desktop-ipc/index.js";
 import { DesktopThreadState } from "./desktop-state.js";
 import {
   TransportIncompatible,
@@ -45,15 +45,22 @@ function ticketPayload(ticket: RpcTicket): {
 }
 
 function safeIpcRejection(error: DesktopKnownRejection): boolean {
-  return [
-    "no-client-found",
-    "client-not-found",
-    "client-cannot-handle-request",
-    "request-version-mismatch",
-    "no-handler-for-request",
-    "thread-stream-owner-unavailable",
-    "thread-role-timeout",
-  ].includes(error);
+  return error !== "unknown";
+}
+
+function desktopSubmitError(
+  cause: unknown,
+): RpcNotWritten | RpcWriteAmbiguous {
+  if (cause instanceof RpcNotWritten) return cause;
+  if (
+    cause instanceof DesktopProtocolError &&
+    cause.writeState === "not-written"
+  ) {
+    return new RpcNotWritten({ detail: cause.message });
+  }
+  return new RpcWriteAmbiguous({
+    detail: cause instanceof Error ? cause.message : String(cause),
+  });
 }
 
 function makePeer(
@@ -77,7 +84,12 @@ function makePeer(
     if (state == null) {
       state = new DesktopThreadState(threadId);
       states.set(threadId, state);
-      await client.followThread(threadId);
+      try {
+        await client.followThread(threadId);
+      } catch (cause) {
+        if (states.get(threadId) === state) states.delete(threadId);
+        throw cause;
+      }
     }
     await state.waitFor(() => state?.ready === true, 5_000);
     return state;
@@ -132,16 +144,7 @@ function makePeer(
             : appResult;
         Deferred.unsafeDone(ticket.reply, Effect.succeed(result));
       },
-      catch: (cause) =>
-        cause instanceof RpcNotWritten
-          ? cause
-          : cause instanceof DesktopProtocolError &&
-              cause.writeState === "not-written"
-            ? new RpcNotWritten({ detail: cause.message })
-          : new RpcWriteAmbiguous({
-              detail:
-                cause instanceof Error ? cause.message : String(cause),
-            }),
+      catch: desktopSubmitError,
     });
 
   const reply: AppServerPeer["reply"] = (ticket, schema, timeout) =>

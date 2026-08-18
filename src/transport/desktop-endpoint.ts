@@ -2,7 +2,7 @@ import { lstat, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Effect, Option } from "effect";
-import { DesktopProtocolSession } from "./desktop-protocol/index.js";
+import { DesktopProtocolSession } from "./desktop-ipc/index.js";
 import { TransportIncompatible } from "./errors.js";
 import type { TransportSpec } from "./spec.js";
 

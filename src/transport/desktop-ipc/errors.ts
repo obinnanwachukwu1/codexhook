@@ -2,6 +2,7 @@ export type DesktopProtocolFailure =
   | "closed"
   | "frame-invalid"
   | "handshake-malformed"
+  | "invalid-timeout"
   | "pending-limit"
   | "request-timeout"
   | "response-malformed"
@@ -22,9 +23,8 @@ export class DesktopProtocolError extends Error {
     readonly writeState: DesktopWriteState,
     message: string,
     readonly requestId?: string,
-    options?: ErrorOptions,
   ) {
-    super(message, options);
+    super(message);
   }
 }
 

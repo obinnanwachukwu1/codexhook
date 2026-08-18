@@ -1,5 +1,4 @@
 export type DesktopProtocolOperation =
-  | "initialize"
   | "follow-thread"
   | "load-history"
   | "start-turn"
@@ -41,6 +40,11 @@ export interface DesktopWireEnvelope {
   readonly resultType?: "error" | "success";
   readonly type: string;
   readonly version?: number;
+}
+
+export interface DesktopResponseEnvelope extends DesktopWireEnvelope {
+  readonly requestId: string;
+  readonly type: "response";
 }
 
 export type DesktopKnownRejection =
@@ -98,11 +102,15 @@ export type DesktopProtocolObservation =
     }
   | {
       readonly _tag: "MalformedBroadcast";
+    }
+  | {
+      readonly _tag: "MalformedEnvelope";
     };
 
 export interface DesktopProtocolSessionOptions {
   readonly handshakeTimeoutMs?: number;
-  readonly maxFrameBytes?: number;
+  readonly maxInboundFrameBytes?: number;
+  readonly maxOutboundFrameBytes?: number;
   readonly maxPendingRequests?: number;
   readonly maxRequestTimeoutMs?: number;
   readonly minRequestTimeoutMs?: number;

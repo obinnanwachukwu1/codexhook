@@ -12,11 +12,13 @@ import {
 } from "./framing.js";
 import type {
   DesktopProtocolObservation,
+  DesktopResponseEnvelope,
   DesktopWireEnvelope,
 } from "./types.js";
 
 export interface DesktopWireLimits {
-  readonly maxFrameBytes: number;
+  readonly maxInboundFrameBytes: number;
+  readonly maxOutboundFrameBytes: number;
   readonly maxPendingRequests: number;
   readonly maxRequestTimeoutMs: number;
   readonly minRequestTimeoutMs: number;
@@ -30,9 +32,8 @@ export type DesktopObservationListener = (
 ) => void;
 
 interface PendingRequest {
-  readonly method: string;
   readonly reject: (error: DesktopProtocolError) => void;
-  readonly resolve: (message: DesktopWireEnvelope) => void;
+  readonly resolve: (message: DesktopResponseEnvelope) => void;
   readonly timeout: NodeJS.Timeout;
   written: boolean;
 }
@@ -53,15 +54,12 @@ function disconnectedError(
   pending: PendingRequest,
   failure: "closed" | "frame-invalid" | "write-failed",
   message: string,
-  cause?: unknown,
 ): DesktopProtocolError {
   return new DesktopProtocolError(
     failure,
     failure === "frame-invalid" ? "framing" : "operation",
     pending.written ? "unknown" : "not-written",
     message,
-    undefined,
-    cause == null ? undefined : { cause },
   );
 }
 
@@ -78,10 +76,13 @@ export class RawDesktopConnection {
     private readonly onBroadcast: DesktopBroadcastListener,
     private readonly onObservation: DesktopObservationListener,
   ) {
-    this.decoder = new DesktopFrameDecoder(limits.maxFrameBytes);
+    this.decoder = new DesktopFrameDecoder(
+      limits.maxInboundFrameBytes,
+      () => this.onObservation({ _tag: "MalformedEnvelope" }),
+    );
     socket.on("data", (chunk) => this.receive(chunk));
     socket.on("close", () => this.end("closed"));
-    socket.on("error", (cause) => this.end("socket-error", cause));
+    socket.on("error", () => this.end("socket-error"));
   }
 
   static async open(
@@ -113,8 +114,6 @@ export class RawDesktopConnection {
         "connect",
         "not-written",
         safeSocketError(cause),
-        undefined,
-        { cause },
       );
     }
     return new RawDesktopConnection(
@@ -135,9 +134,11 @@ export class RawDesktopConnection {
   }
 
   close(): void {
+    if (this.ended) return;
     this.ended = true;
     this.socket.destroy();
     this.rejectAll("closed", "Desktop IPC connection closed");
+    this.onObservation({ _tag: "Disconnected", reason: "closed" });
   }
 
   async broadcast(
@@ -159,7 +160,7 @@ export class RawDesktopConnection {
       sourceClientId: this.clientId,
       params,
       version,
-    }, this.limits.maxFrameBytes);
+    }, this.limits.maxOutboundFrameBytes);
     await new Promise<void>((resolve, reject) => {
       this.socket.write(frame, (cause) => {
         if (cause == null) resolve();
@@ -169,8 +170,6 @@ export class RawDesktopConnection {
             "operation",
             "unknown",
             "Desktop IPC broadcast write failed",
-            undefined,
-            { cause },
           ));
         }
       });
@@ -182,7 +181,7 @@ export class RawDesktopConnection {
     params: unknown,
     version: number,
     timeoutMs: number,
-  ): Promise<DesktopWireEnvelope> {
+  ): Promise<DesktopResponseEnvelope> {
     const invalid = this.validateRequest(timeoutMs);
     if (invalid != null) return Promise.reject(invalid);
     const requestId = randomUUID();
@@ -200,7 +199,6 @@ export class RawDesktopConnection {
         ));
       }, timeoutMs);
       const pending: PendingRequest = {
-        method,
         reject,
         resolve,
         timeout,
@@ -217,7 +215,7 @@ export class RawDesktopConnection {
           method,
           params,
           timeoutMs,
-        }, this.limits.maxFrameBytes);
+        }, this.limits.maxOutboundFrameBytes);
       } catch (cause) {
         clearTimeout(timeout);
         this.pending.delete(requestId);
@@ -235,20 +233,18 @@ export class RawDesktopConnection {
             active,
             "write-failed",
             "Desktop IPC request write failed",
-            cause,
           ));
         });
         // Crossing socket.write is the submission barrier. Any later failure is
         // ambiguous and must never cause the protocol layer to replay the call.
         pending.written = true;
-      } catch (cause) {
+      } catch {
         clearTimeout(timeout);
         this.pending.delete(requestId);
         reject(disconnectedError(
           pending,
           "write-failed",
           "Desktop IPC request write failed",
-          cause,
         ));
       }
     });
@@ -269,7 +265,7 @@ export class RawDesktopConnection {
       timeoutMs > this.limits.maxRequestTimeoutMs
     ) {
       return new DesktopProtocolError(
-        "request-timeout",
+        "invalid-timeout",
         "operation",
         "not-written",
         "Desktop IPC request timeout is outside bounds",
@@ -289,8 +285,8 @@ export class RawDesktopConnection {
     let messages: ReadonlyArray<DesktopWireEnvelope>;
     try {
       messages = this.decoder.push(chunk);
-    } catch (cause) {
-      this.end("protocol-error", cause);
+    } catch {
+      this.end("protocol-error");
       this.socket.destroy();
       return;
     }
@@ -317,17 +313,7 @@ export class RawDesktopConnection {
     }
     this.pending.delete(message.requestId);
     clearTimeout(pending.timeout);
-    if (message.method != null && message.method !== pending.method) {
-      pending.reject(new DesktopProtocolError(
-        "response-malformed",
-        "operation",
-        "written",
-        "Desktop IPC response method did not match its request",
-        message.requestId,
-      ));
-      return;
-    }
-    pending.resolve(message);
+    pending.resolve(message as DesktopResponseEnvelope);
   }
 
   private writeDiscoveryResponse(requestId: string | undefined): void {
@@ -337,16 +323,13 @@ export class RawDesktopConnection {
         type: "client-discovery-response",
         requestId,
         response: { canHandle: false },
-      }, this.limits.maxFrameBytes));
+      }, this.limits.maxOutboundFrameBytes));
     } catch {
       this.socket.destroy();
     }
   }
 
-  private end(
-    reason: "closed" | "socket-error" | "protocol-error",
-    cause?: unknown,
-  ): void {
+  private end(reason: "closed" | "socket-error" | "protocol-error"): void {
     if (this.ended) return;
     this.ended = true;
     this.rejectAll(
@@ -354,7 +337,6 @@ export class RawDesktopConnection {
       reason === "protocol-error"
         ? "Desktop IPC protocol framing failed"
         : "Desktop IPC connection closed",
-      cause,
     );
     this.onObservation({ _tag: "Disconnected", reason });
   }
@@ -362,11 +344,10 @@ export class RawDesktopConnection {
   private rejectAll(
     failure: "closed" | "frame-invalid",
     message: string,
-    cause?: unknown,
   ): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
-      pending.reject(disconnectedError(pending, failure, message, cause));
+      pending.reject(disconnectedError(pending, failure, message));
     }
     this.pending.clear();
   }

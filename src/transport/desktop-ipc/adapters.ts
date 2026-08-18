@@ -7,18 +7,10 @@ import type {
   DesktopProtocolFingerprint,
   DesktopStartResult,
   DesktopSteerResult,
-  DesktopWireEnvelope,
 } from "./types.js";
 
 export const DESKTOP_INITIALIZE_PARAMS = {
   clientType: "codexhook",
-  protocolVersions: [1],
-  capabilities: [
-    "completeHistory",
-    "startTurn",
-    "steerTurn",
-    "threadStream",
-  ],
 } as const;
 
 export interface DesktopHandshake {
@@ -31,12 +23,7 @@ export interface DesktopHandshake {
 
 export interface DesktopProtocolAdapter {
   readonly id: string;
-  readonly versions: {
-    readonly follow: number;
-    readonly history: number;
-    readonly start: number;
-    readonly steer: number;
-  };
+  readonly version: number;
   decodeStart(value: unknown): DesktopStartResult;
   decodeSteer(value: unknown): DesktopSteerResult;
   followParams(threadId: string): unknown;
@@ -93,7 +80,7 @@ function explicitProtocolVersion(value: Record<string, unknown>): number | null 
 function advertisedCapabilities(
   value: Record<string, unknown>,
 ): DesktopCapabilities {
-  const candidate = value.serverCapabilities ?? value.capabilities;
+  const candidate = value.serverCapabilities;
   if (candidate == null) {
     return {
       source: "legacy-inferred",
@@ -223,14 +210,6 @@ export function normalizeDesktopRejection(
     "unknown";
 }
 
-export function decodeDesktopBroadcast(
-  message: DesktopWireEnvelope,
-): DesktopWireEnvelope | null {
-  return message.type === "broadcast" && typeof message.method === "string"
-    ? message
-    : null;
-}
-
 function applicationResult(value: unknown): unknown {
   const outer = record(value);
   if (outer == null) return value;
@@ -242,6 +221,30 @@ function applicationResult(value: unknown): unknown {
 function turnId(value: unknown): string | null {
   const result = record(value);
   if (result == null) return null;
+  const immediate = turnIdFast(result);
+  if (immediate != null) return immediate;
+  const queue: Array<{ readonly depth: number; readonly value: unknown }> = [
+    { depth: 0, value: result },
+  ];
+  let visited = 0;
+  while (queue.length > 0 && visited < 256) {
+    const current = queue.shift();
+    if (current == null || current.depth >= 8) continue;
+    visited += 1;
+    const item = record(current.value);
+    if (item == null) continue;
+    if (item !== result) {
+      const found = turnIdFast(item);
+      if (found != null) return found;
+    }
+    for (const child of Object.values(item)) {
+      queue.push({ depth: current.depth + 1, value: child });
+    }
+  }
+  return null;
+}
+
+function turnIdFast(result: Record<string, unknown>): string | null {
   const turn = record(result.turn);
   const submission = record(result.submission);
   for (const candidate of [result.turnId, turn?.id, submission?.turnId]) {
@@ -264,7 +267,7 @@ function malformedAccepted(operation: string): never {
 function makeV1Adapter(id: string): DesktopProtocolAdapter {
   return {
     id,
-    versions: { follow: 1, history: 1, start: 1, steer: 1 },
+    version: 1,
     followParams: (threadId) => ({
       conversationId: threadId,
       hostId: "local",
