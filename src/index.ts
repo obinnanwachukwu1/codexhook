@@ -4,6 +4,8 @@ export * from "./duration.js";
 export * from "./registry.js";
 export * from "./delivery/compose.js";
 export * from "./delivery/delivery.js";
+export * from "./delivery/routing-contracts.js";
+export * from "./delivery/coordinator.js";
 export * from "./server.js";
 export * from "./transport/errors.js";
 export * from "./transport/spec.js";
