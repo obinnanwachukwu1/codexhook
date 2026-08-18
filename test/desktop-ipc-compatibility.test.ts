@@ -161,3 +161,18 @@ test("malformed JSON diagnostics do not retain frame contents", () => {
     },
   );
 });
+
+test("owns incomplete frame bytes instead of aliasing caller memory", () => {
+  const frame = encodeDesktopFrame({
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+  });
+  const firstFragment = Buffer.from(frame.subarray(0, 3));
+  const decoder = new DesktopFrameDecoder();
+  assert.deepEqual(decoder.push(firstFragment), []);
+
+  firstFragment.fill(0xff);
+
+  const [message] = decoder.push(frame.subarray(3));
+  assert.equal(message?.method, "thread-stream-state-changed");
+});

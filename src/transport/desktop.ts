@@ -133,10 +133,14 @@ function makePeer(
           );
           return;
         }
-        const appResult = response.outcome.value.result;
         const observedTurnId = response.outcome.value.turnId;
         if (observedTurnId != null) {
           states.get(threadId)?.observeTurn(observedTurnId);
+        }
+        if (method !== "turn/steer" && observedTurnId == null) {
+          throw new RpcWriteAmbiguous({
+            detail: "Desktop accepted start without a turn id",
+          });
         }
         const result =
           method === "turn/steer"
@@ -145,7 +149,13 @@ function makePeer(
                   observedTurnId ??
                   String(params.expectedTurnId ?? ""),
               }
-            : appResult;
+            : {
+                turn: {
+                  id: observedTurnId,
+                  status: "inProgress" as const,
+                  error: null,
+                },
+              };
         Deferred.unsafeDone(ticket.reply, Effect.succeed(result));
       },
       catch: desktopSubmitError,

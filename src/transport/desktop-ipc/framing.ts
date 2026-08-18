@@ -115,7 +115,7 @@ export class DesktopFrameDecoder {
       else messages.push(envelope);
     }
     const remaining = data.subarray(offset);
-    this.buffer = offset === 0 ? data : Buffer.from(remaining);
+    this.buffer = Buffer.from(remaining);
     return messages;
   }
 }
