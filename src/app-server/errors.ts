@@ -1,7 +1,6 @@
 import { Data } from "effect";
 export type CanonicalQueryFailureCode =
-  | "not-written"
-  | "write-ambiguous"
+  | "request-ambiguous"
   | "request-rejected"
   | "disconnected"
   | "timeout"
@@ -15,7 +14,15 @@ export class CanonicalQueryFailure extends Data.TaggedError(
   readonly code: CanonicalQueryFailureCode;
 }> {}
 
-export type CanonicalQueryError = CanonicalQueryFailure;
+export type CanonicalPlaneUnavailableCause =
+  | "desktop-plane"
+  | "remote-code-mode-host"
+  | "non-local-socket"
+  | "incomplete-metadata"
+  | "platform-mismatch"
+  | "store-mismatch"
+  | "no-candidate"
+  | "candidates-rejected";
 
 export class CanonicalPlaneUnavailable extends Data.TaggedError(
   "CanonicalPlaneUnavailable",
@@ -24,7 +31,8 @@ export class CanonicalPlaneUnavailable extends Data.TaggedError(
     | "no-local-app-server"
     | "scope-unavailable"
     | "scope-mismatch";
-  readonly detail: string;
+  readonly cause: CanonicalPlaneUnavailableCause;
+  readonly rejectedCandidates: ReadonlyArray<"app-bundled" | "cli" | "daemon">;
 }> {}
 
 export type MutationOperation =

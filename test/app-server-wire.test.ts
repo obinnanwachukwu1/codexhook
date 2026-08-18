@@ -27,6 +27,8 @@ function wire(initializeResult: unknown) {
   const input = new PassThrough();
   const writes: WireMessage[] = [];
   let alive = true;
+  let exitListener: ((code: number | null, signal: string | null) => void) |
+    undefined;
   const connection: WireConnection = {
     input,
     isAlive: () => alive,
@@ -44,7 +46,9 @@ function wire(initializeResult: unknown) {
       }
     },
     onError: () => undefined,
-    onExit: () => undefined,
+    onExit: (listener) => {
+      exitListener = listener;
+    },
   };
   return {
     connection,
@@ -52,6 +56,7 @@ function wire(initializeResult: unknown) {
     writes,
     close: () => {
       alive = false;
+      exitListener?.(0, null);
       input.end();
     },
   };
@@ -122,4 +127,59 @@ test("wire notifications are projected without blocking replies", async () => {
     true,
   );
   fixture.close();
+});
+
+test("wire unsubscribe suppresses already queued notifications", async () => {
+  const fixture = wire({
+    userAgent: "codex_cli_rs/0.147.0",
+    codexHome: "/home/user/.codex",
+    platformFamily: "unix",
+    platformOs: "linux",
+  });
+  const events = await Effect.runPromise(Effect.scoped(
+    Effect.gen(function* () {
+      const peer = yield* connectWirePeer(
+        spec,
+        fixture.connection,
+        quietLogger(),
+      );
+      const observed: WireNotification[] = [];
+      const unsubscribe = peer.onNotification((event) => observed.push(event));
+      fixture.input.write(`${JSON.stringify({
+        method: "turn/completed",
+        params: { threadId: "task-1" },
+      })}\n`);
+      unsubscribe();
+      yield* Effect.promise(tick);
+      return observed;
+    }),
+  ));
+  assert.deepEqual(events, []);
+  fixture.close();
+});
+
+test("wire notification subscribers observe disconnect once", async () => {
+  const fixture = wire({
+    userAgent: "codex_cli_rs/0.147.0",
+    codexHome: "/home/user/.codex",
+    platformFamily: "unix",
+    platformOs: "linux",
+  });
+  const closes = await Effect.runPromise(Effect.scoped(
+    Effect.gen(function* () {
+      const peer = yield* connectWirePeer(
+        spec,
+        fixture.connection,
+        quietLogger(),
+      );
+      let observed = 0;
+      peer.onNotification(() => undefined, () => {
+        observed += 1;
+      });
+      fixture.close();
+      yield* Effect.promise(tick);
+      return observed;
+    }),
+  ));
+  assert.equal(closes, 1);
 });

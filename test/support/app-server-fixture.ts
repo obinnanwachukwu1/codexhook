@@ -21,6 +21,8 @@ export interface FakeAppServerPeer {
   readonly requests: RecordedRequest[];
   readonly submissions: string[];
   emit(message: WireNotification): void;
+  close(): void;
+  setAlive(alive: boolean): void;
 }
 
 export type AppServerHandler = (
@@ -77,12 +79,18 @@ export function fakeAppServerPeer(
       | "timeout"
       | "disconnected"
       | "malformed";
+    readonly replyNever?: boolean;
     readonly serverInfo?: AppServerPeer["serverInfo"];
   } = {},
 ): FakeAppServerPeer {
   const requests: RecordedRequest[] = [];
   const submissions: string[] = [];
   const listeners = new Set<(message: WireNotification) => void>();
+  const closeListeners = new Map<
+    (message: WireNotification) => void,
+    () => void
+  >();
+  let alive = true;
   let sequence = 0;
   const peer: AppServerPeer = {
     spec: options.spec ?? {
@@ -100,10 +108,14 @@ export function fakeAppServerPeer(
           platformOs: "linux",
         }
       : options.serverInfo,
-    isAlive: Effect.succeed(true),
-    onNotification: (listener) => {
+    isAlive: Effect.sync(() => alive),
+    onNotification: (listener, onClose = () => undefined) => {
       listeners.add(listener);
-      return () => listeners.delete(listener);
+      closeListeners.set(listener, onClose);
+      return () => {
+        listeners.delete(listener);
+        closeListeners.delete(listener);
+      };
     },
     notify: () => Effect.void,
     prepare: (method, params) => {
@@ -129,6 +141,7 @@ export function fakeAppServerPeer(
       return Effect.void;
     },
     reply: <A, I>(ticket: { readonly method: string }, schema: Schema.Schema<A, I>) => {
+      if (options.replyNever) return Effect.never;
       switch (options.replyFailure) {
         case "rejected":
           return Effect.fail(new RpcErrorReply({ code: -32602, message: "rejected" }));
@@ -153,7 +166,25 @@ export function fakeAppServerPeer(
     requests,
     submissions,
     emit: (message) => {
-      for (const listener of listeners) listener(message);
+      const snapshot = [...listeners];
+      queueMicrotask(() => {
+        for (const listener of snapshot) {
+          if (listeners.has(listener)) listener(message);
+        }
+      });
+    },
+    close: () => {
+      if (!alive) return;
+      alive = false;
+      const snapshot = [...closeListeners.values()];
+      listeners.clear();
+      closeListeners.clear();
+      queueMicrotask(() => {
+        for (const listener of snapshot) listener();
+      });
+    },
+    setAlive: (value) => {
+      alive = value;
     },
   };
 }

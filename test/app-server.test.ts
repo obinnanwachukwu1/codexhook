@@ -1,13 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Cause, Effect, Exit, Option } from "effect";
+import { Cause, Effect, Exit, Fiber } from "effect";
 import { CanonicalAppServerClient } from "../src/app-server/client.js";
-import { APP_SERVER_COMPATIBILITY } from "../src/app-server/compatibility.js";
-import {
-  CanonicalPlaneUnavailable,
-  CanonicalQueryFailure,
-} from "../src/app-server/errors.js";
-import { confirmLocalPlane as confirmLocalService } from "../src/app-server/service.js";
+import { CanonicalQueryFailure } from "../src/app-server/errors.js";
 import {
   canonicalThread as thread,
   canonicalTurn as turn,
@@ -23,7 +18,13 @@ test("lists every local source across active and archived pages", async () => {
     assert.equal(params.sourceKinds.includes("exec"), true);
     assert.equal(params.sourceKinds.includes("appServer"), true);
     if (params.archived) {
-      return { data: [thread("archived", { custom: "desktop" }, 2)], nextCursor: null };
+      return {
+        data: [
+          thread("archived", { custom: "desktop" }, 2),
+          thread("cli", "cli", 1),
+        ],
+        nextCursor: null,
+      };
     }
     if (params.cursor == null) {
       return { data: [thread("cli", "cli", 3)], nextCursor: "next" };
@@ -43,6 +44,28 @@ test("lists every local source across active and archived pages", async () => {
   assert.equal(fixture.requests.length, 3);
 });
 
+test("reports generated app-server and subagent provenance without raw payloads", async () => {
+  const sources = [
+    thread("app", "appServer", 4),
+    thread("subagent", { subAgent: { threadId: "private" } }, 3),
+    thread("missing", undefined, 2),
+    thread("internal", { internal: { private: true } }, 1),
+  ];
+  const fixture = fakePeer((_method, raw) => ({
+    data: (raw as { archived: boolean }).archived ? [] : sources,
+    nextCursor: null,
+  }));
+  const tasks = await Effect.runPromise(
+    new CanonicalAppServerClient(fixture.peer).listTasks(),
+  );
+  assert.deepEqual(tasks.map((task) => task.provenance), [
+    { status: "known", origin: "app-server" },
+    { status: "known", origin: "subagent" },
+    { status: "unavailable" },
+    { status: "unknown", kind: "internal" },
+  ]);
+});
+
 test("rejects repeated pagination cursors", async () => {
   const fixture = fakePeer(() => ({ data: [], nextCursor: "same" }));
   const failure = await Effect.runPromise(Effect.flip(
@@ -50,6 +73,19 @@ test("rejects repeated pagination cursors", async () => {
   ));
   assert.equal(failure instanceof CanonicalQueryFailure, true);
   assert.equal(failure.code, "pagination");
+});
+
+test("bounds pagination even when every cursor is unique", async () => {
+  let page = 0;
+  const fixture = fakePeer(() => ({
+    data: [],
+    nextCursor: `page-${++page}`,
+  }));
+  const failure = await Effect.runPromise(Effect.flip(
+    new CanonicalAppServerClient(fixture.peer).listTasks(),
+  ));
+  assert.equal(failure.code, "pagination");
+  assert.equal(fixture.requests.length <= 2_000, true);
 });
 
 test("hydrates complete full-detail history and verifies client ids", async () => {
@@ -78,21 +114,52 @@ test("hydrates complete full-detail history and verifies client ids", async () =
     client.verifyClientMessage("task-1", "delivery-1"),
   );
   assert.equal(verified.status, "confirmed");
+  const existingTurn = await Effect.runPromise(
+    client.verifyTurn("task-1", "turn-2"),
+  );
+  const absentTurn = await Effect.runPromise(
+    client.verifyTurn("task-1", "turn-missing"),
+  );
+  assert.equal(existingTurn.status, "confirmed");
+  assert.deepEqual(absentTurn, { status: "absent" });
 });
 
-test("projects canonical notifications without raw params", () => {
+test("projects canonical notifications and scopes their lifetime", async () => {
   const fixture = fakePeer(() => ({}));
   const client = new CanonicalAppServerClient(fixture.peer);
   const events: unknown[] = [];
-  const unsubscribe = client.subscribe((event) => events.push(event));
-  fixture.emit({ method: "turn/started", params: { threadId: "task-1" } });
-  unsubscribe();
+  await Effect.runPromise(Effect.scoped(
+    client.subscribe((event) => events.push(event)).pipe(
+      Effect.zipRight(Effect.sync(() => {
+        fixture.emit({
+          method: "turn/started",
+          params: { threadId: "task-1" },
+        });
+      })),
+      Effect.zipRight(Effect.promise(tick)),
+    ),
+  ));
   fixture.emit({ method: "turn/completed", params: { threadId: "task-1" } });
+  await tick();
   assert.deepEqual(events, [{
+    type: "event",
     method: "turn/started",
     threadId: "task-1",
     turnId: null,
   }]);
+});
+
+test("signals canonical event-stream closure", async () => {
+  const fixture = fakePeer(() => ({}));
+  const events: unknown[] = [];
+  await Effect.runPromise(Effect.scoped(
+    new CanonicalAppServerClient(fixture.peer)
+      .subscribe((event) => events.push(event)).pipe(
+        Effect.zipRight(Effect.sync(fixture.close)),
+        Effect.zipRight(Effect.promise(tick)),
+      ),
+  ));
+  assert.deepEqual(events, [{ type: "closed" }]);
 });
 
 test("does not turn partial history into a negative verification", async () => {
@@ -179,98 +246,18 @@ test("never replays mutations and reports submission truth", async () => {
   }
 });
 
-test("requires matching local initialize provenance", async () => {
-  const local = fakePeer(() => ({}));
-  const service = await Effect.runPromise(confirmLocalService(local.peer, "linux"));
-  assert.equal(service.identity.scope, "local-machine");
-  assert.equal(service.identity.provenance, "confirmed");
-
-  const mismatch = fakePeer(() => ({}), {
-    serverInfo: {
-      userAgent: "codex",
-      codexHome: "/home/user/.codex",
-      platformFamily: "unix",
-      platformOs: "macos",
-    },
-  });
-  const mismatchExit = await Effect.runPromiseExit(
-    confirmLocalService(mismatch.peer, "linux"),
+test("crosses the submission barrier exactly once before interruption", async () => {
+  const fixture = fakePeer(() => ({}), { replyNever: true });
+  const fiber = Effect.runFork(
+    new CanonicalAppServerClient(fixture.peer)
+      .interruptTurn("task-1", "turn-1"),
   );
-  assert.equal(Exit.isFailure(mismatchExit), true);
-  if (Exit.isFailure(mismatchExit)) {
-    const failure = Cause.failureOption(mismatchExit.cause);
-    assert.equal(
-      Option.isSome(failure) &&
-        failure.value instanceof CanonicalPlaneUnavailable &&
-        failure.value.reason === "scope-mismatch",
-      true,
-    );
-  }
-  const remote = fakePeer(() => ({}), {
-    spec: {
-      _tag: "ChildProcess",
-      id: "cli",
-      executable: "/usr/bin/codex",
-      args: ["app-server", "--code-mode-host=wss://remote.invalid"],
-      approvals: "decline",
-    },
-  });
-  const remoteFailure = await Effect.runPromise(Effect.flip(
-    confirmLocalService(remote.peer, "linux"),
-  ));
-  assert.equal(remoteFailure.reason, "scope-mismatch");
+  await tick();
+  const exit = await Effect.runPromise(Fiber.interrupt(fiber));
+  assert.deepEqual(fixture.submissions, ["turn/interrupt"]);
+  assert.equal(Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause), true);
 });
 
-test("accepts local platform metadata on every supported OS", async () => {
-  const cases = [
-    ["linux", "unix", "linux", "/home/user/.codex"],
-    ["darwin", "unix", "macos", "/Users/user/.codex"],
-    ["win32", "windows", "windows", "C:\\Users\\user\\.codex"],
-  ] as const;
-  for (const [platform, family, os, codexHome] of cases) {
-    const fixture = fakePeer(() => ({}), {
-      serverInfo: {
-        userAgent: "codex",
-        codexHome,
-        platformFamily: family,
-        platformOs: os,
-      },
-    });
-    const service = await Effect.runPromise(
-      confirmLocalService(fixture.peer, platform),
-    );
-    assert.equal(service.identity.platformOs, os);
-  }
-});
-
-test("rejects remote Windows named-pipe paths", async () => {
-  const fixture = fakePeer(() => ({}), {
-    spec: {
-      _tag: "UnixSocket",
-      id: "daemon",
-      socketPath: "\\\\remote-host\\pipe\\codex",
-      approvals: "decline",
-    },
-    serverInfo: {
-      userAgent: "codex",
-      codexHome: "C:\\Users\\user\\.codex",
-      platformFamily: "windows",
-      platformOs: "windows",
-    },
-  });
-  const failure = await Effect.runPromise(Effect.flip(
-    confirmLocalService(fixture.peer, "win32"),
-  ));
-  assert.equal(failure.reason, "scope-unavailable");
-});
-
-test("declares the schema-backed app-server compatibility surface", () => {
-  assert.deepEqual(APP_SERVER_COMPATIBILITY.requiredMethods, [
-    "thread/list",
-    "thread/read",
-    "thread/turns/list",
-    "turn/start",
-    "turn/steer",
-    "turn/interrupt",
-  ]);
-});
+function tick(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}

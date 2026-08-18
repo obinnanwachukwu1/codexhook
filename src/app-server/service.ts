@@ -1,10 +1,13 @@
+import os from "node:os";
 import path from "node:path";
 import {
+  Cause,
   Context,
   Effect,
   ExecutionStrategy,
   Exit,
   Layer,
+  Option,
   Scope,
 } from "effect";
 import type { TransportId } from "../types.js";
@@ -12,7 +15,9 @@ import type { AppServerPeer } from "../transport/rpc.js";
 import { TransportProvider } from "../transport/provider.js";
 import type { TransportSpec } from "../transport/spec.js";
 import { CanonicalAppServerClient } from "./client.js";
+import { APP_SERVER_COMPATIBILITY } from "./compatibility.js";
 import { CanonicalPlaneUnavailable } from "./errors.js";
+import type { AppServerCompatibility } from "./compatibility.js";
 
 export interface LocalPlaneIdentity {
   readonly scope: "local-machine";
@@ -32,9 +37,16 @@ export interface CanonicalAppServerService {
         readonly status: "unavailable";
         readonly reason: "disconnected";
       }
+    | {
+        readonly status: "unavailable";
+        readonly reason: CanonicalPlaneUnavailable["reason"];
+        readonly cause: CanonicalPlaneUnavailable["cause"];
+        readonly rejectedCandidates: CanonicalPlaneUnavailable["rejectedCandidates"];
+      }
   >;
-  readonly identity: LocalPlaneIdentity;
-  readonly client: CanonicalAppServerClient;
+  readonly identity: LocalPlaneIdentity | null;
+  readonly client: CanonicalAppServerClient | null;
+  readonly compatibility: AppServerCompatibility;
 }
 
 export class CanonicalAppServer extends Context.Tag(
@@ -68,18 +80,42 @@ function localSocketPath(
   if (platform !== "win32") return path.posix.isAbsolute(pathname);
   const normalized = pathname.toLowerCase();
   return normalized.startsWith("\\\\.\\pipe\\") ||
-    normalized.startsWith("\\\\?\\pipe\\");
+    normalized.startsWith("\\\\?\\pipe\\") ||
+    /^[a-z]:[\\/]/i.test(pathname);
+}
+
+function normalizeStorePath(
+  pathname: string,
+  platform: NodeJS.Platform,
+): string {
+  const normalized = platform === "win32"
+    ? path.win32.resolve(pathname).toLowerCase()
+    : path.posix.resolve(pathname);
+  return normalized.replace(/[\\/]+$/, "");
+}
+
+export function localCodexHome(
+  environment: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  homeDirectory: string = os.homedir(),
+): string {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  return pathApi.resolve(
+    environment.CODEX_HOME ?? pathApi.join(homeDirectory, ".codex"),
+  );
 }
 
 export function confirmLocalPlane(
   peer: AppServerPeer,
   platform: NodeJS.Platform = process.platform,
+  expectedCodexHome: string = localCodexHome(process.env, platform),
 ): Effect.Effect<CanonicalAppServerService, CanonicalPlaneUnavailable> {
   return Effect.gen(function* () {
     if (peer.spec._tag === "Desktop") {
       return yield* new CanonicalPlaneUnavailable({
         reason: "scope-unavailable",
-        detail: "Desktop IPC is not the canonical app-server plane",
+        cause: "desktop-plane",
+        rejectedCandidates: [],
       });
     }
     if (
@@ -90,7 +126,8 @@ export function confirmLocalPlane(
     ) {
       return yield* new CanonicalPlaneUnavailable({
         reason: "scope-mismatch",
-        detail: "remote code-mode app-server targets are not supported",
+        cause: "remote-code-mode-host",
+        rejectedCandidates: [],
       });
     }
     if (
@@ -99,20 +136,16 @@ export function confirmLocalPlane(
     ) {
       return yield* new CanonicalPlaneUnavailable({
         reason: "scope-unavailable",
-        detail: "app-server socket path is not an absolute local endpoint",
+        cause: "non-local-socket",
+        rejectedCandidates: [],
       });
     }
     const info = peer.serverInfo;
-    if (
-      info?.userAgent == null ||
-      info.codexHome == null ||
-      info.platformFamily == null ||
-      info.platformOs == null ||
-      !absoluteForPlatform(info.codexHome, platform)
-    ) {
+    if (info == null || !absoluteForPlatform(info.codexHome, platform)) {
       return yield* new CanonicalPlaneUnavailable({
         reason: "scope-unavailable",
-        detail: "app-server did not provide complete local scope metadata",
+        cause: "incomplete-metadata",
+        rejectedCandidates: [],
       });
     }
     const expected = expectedPlatform(platform);
@@ -122,7 +155,18 @@ export function confirmLocalPlane(
     ) {
       return yield* new CanonicalPlaneUnavailable({
         reason: "scope-mismatch",
-        detail: "app-server platform does not match the local machine",
+        cause: "platform-mismatch",
+        rejectedCandidates: [],
+      });
+    }
+    if (
+      normalizeStorePath(info.codexHome, platform) !==
+        normalizeStorePath(expectedCodexHome, platform)
+    ) {
+      return yield* new CanonicalPlaneUnavailable({
+        reason: "scope-mismatch",
+        cause: "store-mismatch",
+        rejectedCandidates: [],
       });
     }
     const identity: LocalPlaneIdentity = {
@@ -143,6 +187,7 @@ export function confirmLocalPlane(
       ),
       identity,
       client: new CanonicalAppServerClient(peer),
+      compatibility: APP_SERVER_COMPATIBILITY,
     };
   });
 }
@@ -163,7 +208,7 @@ function connectFirstLocal(
   candidates: ReadonlyArray<
     Exclude<TransportSpec, { readonly _tag: "Desktop" }>
   >,
-  failures: string[] = [],
+  failures: Array<Exclude<TransportId, "desktop">> = [],
 ): Effect.Effect<
   CanonicalAppServerService,
   CanonicalPlaneUnavailable,
@@ -174,9 +219,8 @@ function connectFirstLocal(
     return Effect.fail(
       new CanonicalPlaneUnavailable({
         reason: "no-local-app-server",
-        detail: failures.length === 0
-          ? "no local app-server candidate is installed"
-          : `local candidates rejected: ${failures.join(", ")}`,
+        cause: failures.length === 0 ? "no-candidate" : "candidates-rejected",
+        rejectedCandidates: failures,
       }),
     );
   }
@@ -193,6 +237,11 @@ function connectFirstLocal(
     );
     if (Exit.isSuccess(attempt)) return attempt.value;
     yield* Scope.close(child, attempt);
+    if (Option.isNone(Cause.failureOption(attempt.cause))) {
+      return yield* Effect.failCause(
+        attempt.cause as Cause.Cause<CanonicalPlaneUnavailable>,
+      );
+    }
     return yield* connectFirstLocal(provider, rest, [
       ...failures,
       candidate.id,
@@ -202,13 +251,25 @@ function connectFirstLocal(
 
 export const CanonicalAppServerLive: Layer.Layer<
   CanonicalAppServer,
-  CanonicalPlaneUnavailable,
+  never,
   TransportProvider
 > = Layer.scoped(
   CanonicalAppServer,
   Effect.gen(function* () {
     const provider = yield* TransportProvider;
     const candidates = localCandidates(yield* provider.candidates);
-    return yield* connectFirstLocal(provider, candidates);
+    return yield* connectFirstLocal(provider, candidates).pipe(
+      Effect.catchAll((failure) => Effect.succeed({
+        availability: Effect.succeed({
+          status: "unavailable" as const,
+          reason: failure.reason,
+          cause: failure.cause,
+          rejectedCandidates: failure.rejectedCandidates,
+        }),
+        identity: null,
+        client: null,
+        compatibility: APP_SERVER_COMPATIBILITY,
+      })),
+    );
   }),
 );

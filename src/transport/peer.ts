@@ -83,6 +83,7 @@ export function connectWirePeer(
       Effect.suspend(() => {
         if (!alive) return Effect.void;
         alive = false;
+        notifications.close();
         const failure = new RpcDisconnected({ detail });
         const pendingWaiters = [...pending.values()];
         const turnWaiters = [...turns.values()];
@@ -312,20 +313,19 @@ export function connectWirePeer(
         down(`exited code=${String(code)} signal=${String(signal)}`),
       );
     });
-    yield* Effect.addFinalizer(() =>
-      Effect.sync(() => {
-        alive = false;
-        readline.close();
-      }),
-    );
-
+    yield* Effect.addFinalizer(() => Effect.sync(() => {
+      alive = false;
+      notifications.close();
+      readline.close();
+    }));
     const peer: AppServerPeer = {
       spec,
       get serverInfo() {
         return serverInfo;
       },
       isAlive: Effect.sync(() => alive && connection.isAlive()),
-      onNotification: (listener) => notifications.subscribe(listener),
+      onNotification: (listener, onClose = () => undefined) =>
+        notifications.subscribe(listener, onClose),
       notify,
       prepare,
       submit,

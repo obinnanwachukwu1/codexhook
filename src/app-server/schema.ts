@@ -1,9 +1,4 @@
 import { Schema } from "effect";
-import {
-  TurnStartResult,
-  TurnSteerResult,
-} from "../transport/protocol.js";
-
 // Omission defaults to interactive sources, so the generated v2 enum must be
 // explicit to include exec, app-server, and subagent tasks from the local store.
 export const ALL_LOCAL_SOURCE_KINDS = [
@@ -19,19 +14,20 @@ export const ALL_LOCAL_SOURCE_KINDS = [
   "unknown",
 ] as const;
 
-const InternalSource = Schema.Struct({
-  internal: Schema.Unknown,
-});
 const CustomSource = Schema.Struct({ custom: Schema.String });
-const SubagentSource = Schema.Struct({ subagent: Schema.Unknown });
+const SubagentSource = Schema.Struct({ subAgent: Schema.Unknown });
 
 export const SessionSource = Schema.Union(
-  Schema.Literal("cli", "vscode", "exec", "mcp", "unknown"),
+  Schema.Literal("cli", "vscode", "exec", "appServer", "unknown"),
   CustomSource,
-  InternalSource,
   SubagentSource,
 );
 export type SessionSource = typeof SessionSource.Type;
+
+// These generated protocol fields form the mutation/verification correlation
+// contract. Keep them together so a future binding update cannot drift one side.
+export const CLIENT_MESSAGE_ID_PARAM = "clientUserMessageId" as const;
+export const USER_MESSAGE_CLIENT_ID_FIELD = "clientId" as const;
 
 export const CanonicalTurn = Schema.Struct({
   id: Schema.String,
@@ -81,6 +77,4 @@ export const ThreadTurnsListResponse = Schema.Struct({
   backwardsCursor: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
-export const TurnStartResponse = TurnStartResult;
-export const TurnSteerResponse = TurnSteerResult;
 export const TurnInterruptResponse = Schema.Unknown;

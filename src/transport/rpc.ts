@@ -47,6 +47,7 @@ export interface AppServerPeer {
   readonly isAlive: Effect.Effect<boolean>;
   readonly onNotification: (
     listener: (message: WireNotification) => void,
+    onClose?: () => void,
   ) => () => void;
   readonly notify: (
     method: string,

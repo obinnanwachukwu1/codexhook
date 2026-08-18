@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Effect, Layer, Option } from "effect";
+import { Cause, Effect, Exit, Layer, Option } from "effect";
 import {
   CanonicalAppServer,
   CanonicalAppServerLive,
+  localCodexHome,
 } from "../src/app-server/service.js";
 import {
   TransportProvider,
@@ -27,6 +28,19 @@ const second: TransportSpec = {
   approvals: "decline",
 };
 
+function localServerInfo() {
+  return {
+    userAgent: "codex",
+    codexHome: localCodexHome(),
+    platformFamily: process.platform === "win32" ? "windows" : "unix",
+    platformOs: process.platform === "win32"
+      ? "windows"
+      : process.platform === "darwin"
+        ? "macos"
+        : process.platform,
+  };
+}
+
 test("closes a rejected candidate before connecting the next", async () => {
   let live = 0;
   let maxLive = 0;
@@ -36,12 +50,7 @@ test("closes a rejected candidate before connecting the next", async () => {
   }).peer;
   const accepted = fakeAppServerPeer(() => ({}), {
     spec: second,
-    serverInfo: {
-      userAgent: "codex",
-      codexHome: "/Users/user/.codex",
-      platformFamily: "unix",
-      platformOs: "macos",
-    },
+    serverInfo: localServerInfo(),
   }).peer;
   const provider: TransportProviderService = {
     candidates: Effect.succeed([first, second]),
@@ -67,7 +76,69 @@ test("closes a rejected candidate before connecting the next", async () => {
       return service.identity;
     }).pipe(Effect.provide(layer)),
   );
-  assert.equal(identity.transport, "cli");
+  assert.equal(identity?.transport, "cli");
   assert.equal(maxLive, 1);
   assert.equal(live, 0);
+});
+
+test("represents missing local app-server candidates as availability", async () => {
+  const provider: TransportProviderService = {
+    candidates: Effect.succeed([]),
+    desktopCandidate: Effect.succeed(Option.none()),
+    connect: () => Effect.die("unexpected connect"),
+  };
+  const layer = CanonicalAppServerLive.pipe(
+    Layer.provide(Layer.succeed(TransportProvider, provider)),
+  );
+  const service = await Effect.runPromise(
+    CanonicalAppServer.pipe(Effect.provide(layer)),
+  );
+  assert.equal(service.identity, null);
+  assert.equal(service.client, null);
+  assert.deepEqual(await Effect.runPromise(service.availability), {
+    status: "unavailable",
+    reason: "no-local-app-server",
+    cause: "no-candidate",
+    rejectedCandidates: [],
+  });
+});
+
+test("reports every rejected canonical candidate without free text", async () => {
+  const provider: TransportProviderService = {
+    candidates: Effect.succeed([first, second]),
+    desktopCandidate: Effect.succeed(Option.none()),
+    connect: (spec) => Effect.succeed(
+      fakeAppServerPeer(() => ({}), { spec, serverInfo: null }).peer,
+    ),
+  };
+  const layer = CanonicalAppServerLive.pipe(
+    Layer.provide(Layer.succeed(TransportProvider, provider)),
+  );
+  const service = await Effect.runPromise(
+    CanonicalAppServer.pipe(Effect.provide(layer)),
+  );
+  assert.deepEqual(await Effect.runPromise(service.availability), {
+    status: "unavailable",
+    reason: "no-local-app-server",
+    cause: "candidates-rejected",
+    rejectedCandidates: ["app-bundled", "cli"],
+  });
+});
+
+test("does not misclassify provider defects as unavailable candidates", async () => {
+  const provider: TransportProviderService = {
+    candidates: Effect.succeed([first]),
+    desktopCandidate: Effect.succeed(Option.none()),
+    connect: () => Effect.die("provider defect"),
+  };
+  const layer = CanonicalAppServerLive.pipe(
+    Layer.provide(Layer.succeed(TransportProvider, provider)),
+  );
+  const exit = await Effect.runPromiseExit(
+    CanonicalAppServer.pipe(Effect.provide(layer)),
+  );
+  assert.equal(Exit.isFailure(exit), true);
+  if (Exit.isFailure(exit)) {
+    assert.equal(Cause.pretty(exit.cause).includes("provider defect"), true);
+  }
 });
