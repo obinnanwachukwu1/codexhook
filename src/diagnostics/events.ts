@@ -123,7 +123,10 @@ export function attemptFailedEvent(
   if (error._tag === "TransportUnavailable" && transport === "desktop") {
     return { ...classifyDeliveryFailure(error), transport };
   }
-  if (attemptStage === "resume" || attemptStage === "await") {
+  if (
+    error._tag === "TransportUnavailable" &&
+    (attemptStage === "resume" || attemptStage === "await")
+  ) {
     return {
       stage: "state_synchronization",
       outcome: "failed",
@@ -174,12 +177,10 @@ export function canonicalFoundEvent(): DiagnosticEvent {
   };
 }
 
-export function canonicalUnknownEvent(
-  outcome: "deferred" | "failed",
-): DiagnosticEvent {
+export function canonicalUnknownEvent(): DiagnosticEvent {
   return {
     stage: "canonical_verification",
-    outcome,
+    outcome: "deferred",
     code: "canonical.unknown",
     transport: "desktop",
   };

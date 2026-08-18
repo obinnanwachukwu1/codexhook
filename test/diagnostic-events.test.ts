@@ -133,7 +133,7 @@ test("canonical item and Desktop state fixtures map to explicit journal states",
     detail: "turn not exposed",
   }));
   assert.deepEqual(
-    [canonicalFoundEvent(), absent, canonicalUnknownEvent("deferred")]
+    [canonicalFoundEvent(), absent, canonicalUnknownEvent()]
       .map((event) => ({ code: event.code, outcome: event.outcome })),
     [
       { code: "canonical.found", outcome: "succeeded" },
@@ -197,6 +197,15 @@ test("attempt failures classify attachment, resume, and malformed protocol stage
       detail: "invalid response",
     }),
   );
+  const malformedResume = attemptFailedEvent(
+    "daemon",
+    "resume",
+    new TransportIncompatible({
+      transport: "daemon",
+      stage: "malformed",
+      detail: "invalid resume response",
+    }),
+  );
   assert.deepEqual(desktop, {
     stage: "attachment",
     outcome: "unavailable",
@@ -214,5 +223,11 @@ test("attempt failures classify attachment, resume, and malformed protocol stage
     outcome: "unavailable",
     code: "protocol.malformed_response",
     transport: "app-bundled",
+  });
+  assert.deepEqual(malformedResume, {
+    stage: "protocol",
+    outcome: "unavailable",
+    code: "protocol.malformed_response",
+    transport: "daemon",
   });
 });

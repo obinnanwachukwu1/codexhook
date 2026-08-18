@@ -241,7 +241,7 @@ export function deliverWithFallback(
                     diagnostics,
                     visibility === "confirmed"
                       ? canonicalFoundEvent()
-                      : canonicalUnknownEvent("deferred"),
+                      : canonicalUnknownEvent(),
                   );
                   if (failures.length > 0) {
                     recordDiagnostic(
