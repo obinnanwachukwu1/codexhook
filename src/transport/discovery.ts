@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import os from "node:os";
 import { promisify } from "node:util";
 import path from "node:path";
-import type { TransportSpec } from "./spec.js";
+import type { AppServerTransportSpec } from "./spec.js";
 
 const DARWIN_BUNDLED_CODEX =
   "/Applications/ChatGPT.app/Contents/Resources/codex";
@@ -126,7 +126,7 @@ async function runningDaemon(
   codexExecutable: string,
   environment: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
-): Promise<TransportSpec | null> {
+): Promise<AppServerTransportSpec | null> {
   try {
     const command = commandInvocation(
       codexExecutable,
@@ -175,7 +175,7 @@ async function executableFile(pathname: string): Promise<boolean> {
 export async function discoverStandalone(
   environment: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
-): Promise<ReadonlyArray<TransportSpec>> {
+): Promise<ReadonlyArray<AppServerTransportSpec>> {
   const explicit = environment.CODEXHOOK_CODEX_PATH;
   if (explicit != null && explicit.length > 0) {
     if (!(await executable(explicit))) return [];
@@ -197,7 +197,7 @@ export async function discoverStandalone(
     ];
   }
 
-  const specs: TransportSpec[] = [];
+  const specs: AppServerTransportSpec[] = [];
   const bundled = await bundledCodex(environment, platform);
   const cli = await commandOnPath("codex", environment, platform);
   const probeExecutable = cli ?? bundled;
