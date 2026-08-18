@@ -199,6 +199,17 @@ function mutationOutcome<A>(
   };
 }
 
+function unexpectedMutationOutcome(
+  request: LocalSubmissionRequest,
+): RouteSubmissionOutcome<"app-server"> {
+  return {
+    _tag: "Ambiguous",
+    route: "app-server",
+    deliveryId: request.deliveryId,
+    diagnostic: diagnostic("write-ambiguous", "submit-app-server"),
+  };
+}
+
 export function localCodexService(
   canonical: CanonicalAppServerService,
 ): LocalCodexService {
@@ -263,49 +274,60 @@ export function localCodexService(
       }
       if (request.mode === "queue") {
         return query(usable.readTask(request.task.threadId)).pipe(
-          Effect.flatMap(() => usable.startTurn({
-            threadId: request.task.threadId,
-            clientUserMessageId: request.deliveryId,
-            input: [{ type: "text", text: request.message }],
-          }, request.replyTimeout)),
-          Effect.map((result) => mutationOutcome(
-            request,
-            "start",
-            result,
-            (value) => value.turn.id,
-          )),
-          Effect.catchAllCause(() => Effect.succeed(
-            unavailableOutcome(request, "app-server-unavailable"),
-          )),
+          Effect.matchCauseEffect({
+            onFailure: () => Effect.succeed(
+              unavailableOutcome(request, "app-server-unavailable"),
+            ),
+            onSuccess: () => usable.startTurn({
+              threadId: request.task.threadId,
+              clientUserMessageId: request.deliveryId,
+              input: [{ type: "text", text: request.message }],
+            }, request.replyTimeout).pipe(
+              Effect.map((result) => mutationOutcome(
+                request,
+                "start",
+                result,
+                (value) => value.turn.id,
+              )),
+              Effect.catchAllCause(() => Effect.succeed(
+                unexpectedMutationOutcome(request),
+              )),
+            ),
+          }),
         );
       }
       return query(usable.readTaskHistory(request.task.threadId)).pipe(
-        Effect.flatMap((task) => {
-          const active = task.thread.turns.filter(
-            (turn) => turn.status === "inProgress",
-          );
-          if (active.length !== 1) {
-            return Effect.succeed(
-              unavailableOutcome(request, "request-rejected"),
+        Effect.matchCauseEffect({
+          onFailure: () => Effect.succeed(
+            unavailableOutcome(request, "app-server-unavailable"),
+          ),
+          onSuccess: (task) => {
+            const active = task.thread.turns.filter(
+              (turn) => turn.status === "inProgress",
             );
-          }
-          return usable.steerTurn({
-            threadId: request.task.threadId,
-            expectedTurnId: active[0]!.id,
-            clientUserMessageId: request.deliveryId,
-            input: [{ type: "text", text: request.message }],
-          }, request.replyTimeout).pipe(
-            Effect.map((result) => mutationOutcome(
-              request,
-              "steer",
-              result,
-              (value) => value.turnId,
-            )),
-          );
+            if (active.length !== 1) {
+              return Effect.succeed(
+                unavailableOutcome(request, "request-rejected"),
+              );
+            }
+            return usable.steerTurn({
+              threadId: request.task.threadId,
+              expectedTurnId: active[0]!.id,
+              clientUserMessageId: request.deliveryId,
+              input: [{ type: "text", text: request.message }],
+            }, request.replyTimeout).pipe(
+              Effect.map((result) => mutationOutcome(
+                request,
+                "steer",
+                result,
+                (value) => value.turnId,
+              )),
+              Effect.catchAllCause(() => Effect.succeed(
+                unexpectedMutationOutcome(request),
+              )),
+            );
+          },
         }),
-        Effect.catchAllCause(() => Effect.succeed(
-          unavailableOutcome(request, "app-server-unavailable"),
-        )),
       );
     },
   };

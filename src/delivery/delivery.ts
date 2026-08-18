@@ -17,11 +17,10 @@ import {
   type WebhookRecord,
 } from "../types.js";
 import {
-  disposition,
-  type DeliveryError,
-  type TransportError,
-} from "../transport/errors.js";
-import { CodexTransport } from "../transport/transport.js";
+  LocalDeliveryCoordinator,
+  type DeliveryOutcome,
+} from "../contracts/delivery.js";
+import { LocalCodex } from "../contracts/local-codex.js";
 import { composeMessage } from "./compose.js";
 
 const MAX_LANES = 1_000;
@@ -61,19 +60,14 @@ export class Delivery extends Context.Tag("codexhook/Delivery")<
   DeliveryService
 >() {}
 
-function failureSubmission(error: DeliveryError): string {
-  return error._tag === "NoTransportAvailable"
-    ? "not-submitted"
-    : disposition(error as TransportError).submission;
-}
-
 export function DeliveryLive(
   logger = new Logger(),
-): Layer.Layer<Delivery, never, CodexTransport> {
+): Layer.Layer<Delivery, never, LocalCodex | LocalDeliveryCoordinator> {
   return Layer.scoped(
     Delivery,
     Effect.gen(function* () {
-      const transport = yield* CodexTransport;
+      const local = yield* LocalCodex;
+      const coordinator = yield* LocalDeliveryCoordinator;
       const layerScope = yield* Effect.scope;
       const lanes = yield* SynchronizedRef.make(
         HashMap.empty<ThreadId, Lane>(),
@@ -91,26 +85,43 @@ export function DeliveryLive(
           threadId: job.request.threadId,
           mode: job.request.mode,
         });
-        return transport.deliver(job.request).pipe(
+        return local.resolveTask(job.request.threadId).pipe(
+          Effect.flatMap((task) => coordinator.deliver({
+            task,
+            deliveryId: job.request.deliveryId,
+            message: job.request.message,
+            mode: job.request.mode,
+            idleTimeout: Duration.decode(job.request.idleTimeout),
+            turnTimeout: Duration.decode(job.request.turnTimeout),
+          })),
           Effect.match({
-            onSuccess: (outcome) => {
+            onSuccess: (outcome: DeliveryOutcome) => {
               logger.info("delivery_finished", {
                 deliveryId: job.request.deliveryId,
                 hookId: job.hookId,
                 threadId: job.request.threadId,
                 status: outcome._tag,
-                transport: outcome.transport,
+                ...(outcome._tag === "ConfirmedDesktop"
+                  ? { route: "desktop" }
+                  : outcome._tag === "ConfirmedAppServer"
+                    ? { route: "app-server" }
+                    : outcome._tag === "Unavailable"
+                      ? {}
+                      : { route: outcome.route }),
+                ...(outcome._tag === "ConfirmedDesktop" ||
+                    outcome._tag === "ConfirmedAppServer"
+                  ? {}
+                  : { diagnosticCode: outcome.diagnostic.code }),
                 durationMs: Date.now() - startedAt,
               });
             },
-            onFailure: (error) => {
+            onFailure: (failure) => {
               logger.error("delivery_failed", {
                 deliveryId: job.request.deliveryId,
                 hookId: job.hookId,
                 threadId: job.request.threadId,
-                errorTag: error._tag,
-                submission: failureSubmission(error),
-                error: String(error),
+                stage: "resolve-task",
+                diagnosticCode: failure.diagnostic.code,
                 durationMs: Date.now() - startedAt,
               });
             },

@@ -108,11 +108,12 @@ The webhook responds with `202` after accepting a hit. Delivery continues in
 the background.
 
 Queue delivery is FIFO for each task. Steer delivery targets the active turn.
-On macOS and Windows, codexhook uses the open Codex app when that task is
-active. If the app cannot accept the message, codexhook falls back to a local
-Codex runtime. When the app is open, codexhook confirms that the task can see
-the fallback turn before recording the delivery as complete. Linux uses a
-running Codex app-server daemon or the Codex CLI.
+Codexhook resolves every task through the machine's canonical Codex app-server,
+including tasks created by the CLI. When compatible Desktop IPC is available,
+it is the preferred write route. Codexhook uses the app-server only after
+Desktop proves that no task write occurred; an uncertain Desktop write is
+observed through the app-server event stream and is never submitted twice.
+Linux and Desktop-unavailable machines use the same canonical app-server plane.
 
 Delivery is best effort and has no retry queue. A limited-use hook is spent
 when its HTTP request is accepted, even when the message later fails to arrive.

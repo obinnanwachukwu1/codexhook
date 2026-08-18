@@ -5,6 +5,7 @@ export * from "./duration.js";
 export * from "./registry.js";
 export * from "./delivery/compose.js";
 export * from "./delivery/delivery.js";
+export { LocalDeliveryCoordinatorLive } from "./delivery/coordinator.js";
 export * from "./server.js";
 export * from "./daemon.js";
 export * from "./transport/errors.js";

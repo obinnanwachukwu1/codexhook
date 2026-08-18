@@ -7,6 +7,7 @@ import {
 } from "../src/transport/desktop-contract.js";
 import type { DesktopProtocolProfile } from "../src/transport/desktop-ipc/index.js";
 import type { TransportProviderService } from "../src/transport/provider.js";
+import { TransportIncompatible } from "../src/transport/errors.js";
 
 function profile(
   capabilities: DesktopProtocolProfile["capabilities"],
@@ -80,4 +81,28 @@ test("reports an absent Desktop without opening a connection", async () => {
   const exit = await Effect.runPromiseExit(Effect.scoped(service.connect));
   assert.equal(Exit.isFailure(exit), true);
   assert.equal(connects, 0);
+});
+
+test("reports provider discovery failures as unavailable, not incompatible", async () => {
+  const provider: TransportProviderService = {
+    candidates: Effect.succeed([]),
+    appServerCandidates: Effect.succeed([]),
+    desktopCandidate: Effect.fail(new TransportIncompatible({
+      transport: "desktop",
+      stage: "capabilities",
+      detail: "private path detail must not escape",
+    })),
+    connect: () => Effect.die("not used"),
+  };
+  assert.deepEqual(
+    await Effect.runPromise(desktopProtocolService(provider).availability),
+    {
+      status: "unavailable",
+      diagnostic: {
+        code: "desktop-unavailable",
+        stage: "probe-desktop",
+        route: "desktop",
+      },
+    },
+  );
 });

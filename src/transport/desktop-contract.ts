@@ -269,8 +269,8 @@ export function desktopProtocolService(
         }), Effect.catchAll((cause) => Effect.succeed(unavailableFrom(cause)))),
       })),
       Effect.catchAll(() => Effect.succeed({
-        status: "incompatible" as const,
-        diagnostic: diagnostic("desktop-incompatible", "probe-desktop"),
+        status: "unavailable" as const,
+        diagnostic: diagnostic("desktop-unavailable", "probe-desktop"),
       })),
     ),
     connect: provider.desktopCandidate.pipe(
