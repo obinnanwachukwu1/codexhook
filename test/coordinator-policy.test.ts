@@ -22,6 +22,14 @@ const uncertain = {
   _tag: "Uncertain",
   diagnostic: { code: "write-ambiguous" },
 } as const satisfies DeliveryReceipt;
+const timedOut = {
+  _tag: "Uncertain",
+  diagnostic: { code: "timeout" },
+} as const satisfies DeliveryReceipt;
+const internalFailure = {
+  _tag: "Uncertain",
+  diagnostic: { code: "internal" },
+} as const satisfies DeliveryReceipt;
 const found = { _tag: "Found", turnId } as const satisfies DeliveryEvidence;
 const absent = { _tag: "Absent" } as const satisfies DeliveryEvidence;
 const unresolved = {
@@ -30,7 +38,12 @@ const unresolved = {
 } as const satisfies DeliveryEvidence;
 
 test("desktop evidence decision table is exhaustive and pure", () => {
-  const receipts = [acknowledged, uncertain] as const;
+  const receipts = [
+    acknowledged,
+    uncertain,
+    timedOut,
+    internalFailure,
+  ] as const;
   const desktopEvidence = [found, absent, unresolved] as const;
   const canonicalEvidence = [found, absent, unresolved] as const;
   for (const receipt of receipts) {
@@ -44,7 +57,9 @@ test("desktop evidence decision table is exhaustive and pure", () => {
         const expected = canonicalProof._tag === "Found"
           ? "Confirm"
           : canonicalProof._tag === "Absent"
-            ? "Fallback"
+            ? receipt === timedOut || receipt === internalFailure
+              ? "Ambiguous"
+              : "Fallback"
             : "Ambiguous";
         assert.equal(
           result._tag,
@@ -177,6 +192,8 @@ test("app-server receipts report all four submission truths", async (t) => {
     { receipt: uncertain, canonical: found, expected: "ConfirmedAppServer" },
     { receipt: uncertain, canonical: absent, expected: "Unavailable" },
     { receipt: uncertain, canonical: unresolved, expected: "Ambiguous" },
+    { receipt: timedOut, canonical: absent, expected: "Ambiguous" },
+    { receipt: internalFailure, canonical: absent, expected: "Ambiguous" },
   ];
   for (const [index, entry] of cases.entries()) {
     await t.test(`${index}-${entry.expected}`, async () => {

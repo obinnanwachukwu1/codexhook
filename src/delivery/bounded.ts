@@ -3,6 +3,7 @@ import type { TurnRequest } from "../types.js";
 import type {
   DeliveryEvidence,
   DeliveryReceipt,
+  DesktopRouteState,
   RoutingDiagnostic,
 } from "./routing-contracts.js";
 
@@ -42,6 +43,22 @@ export function boundedReceipt(
       duration: timeout,
       onTimeout: () => ({ _tag: "Uncertain", diagnostic: TIMEOUT }),
       onSuccess: (receipt) => receipt,
+    }),
+  );
+}
+
+export function boundedRouteState(
+  effect: Effect.Effect<DesktopRouteState>,
+  timeout: TurnRequest["turnTimeout"],
+): Effect.Effect<DesktopRouteState> {
+  return effect.pipe(
+    Effect.disconnect,
+    Effect.catchAllDefect(() =>
+      Effect.succeed({ _tag: "Unhealthy" as const })),
+    Effect.timeoutTo({
+      duration: timeout,
+      onTimeout: () => ({ _tag: "Unhealthy" }),
+      onSuccess: (state) => state,
     }),
   );
 }

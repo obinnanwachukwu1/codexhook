@@ -253,6 +253,100 @@ test("a stalled desktop injection times out and later commands remain usable", a
   }
 });
 
+test("a timed-out native desktop write cannot fall back after absence", async () => {
+  const completed = latch<void>();
+  const fixture = coordinatorFixture({
+    desktopReceipt: () => Effect.promise(() => new Promise((resolve) => {
+      setTimeout(() => {
+        completed.resolve();
+        resolve({
+          _tag: "Acknowledged" as const,
+          turnId: TurnId("turn-late"),
+        });
+      }, 30);
+    })),
+    desktopEvidence: () => Effect.succeed({ _tag: "Absent" }),
+    canonicalEvidence: () => Effect.succeed({ _tag: "Absent" }),
+  });
+  try {
+    const result = await fixture.deliver(request(
+      "delivery-late",
+      "thread-1",
+      "10 millis",
+    ));
+    assert.equal(result._tag, "Ambiguous");
+    assert.deepEqual(fixture.recorder.localDeliveries, []);
+    assert.equal((await fixture.circuitState(request().threadId))._tag, "Open");
+
+    await completed.promise;
+    assert.deepEqual(fixture.recorder.localDeliveries, []);
+  } finally {
+    await fixture.runtime.dispose();
+  }
+});
+
+test("a timed-out native app-server write remains ambiguous after absence", async () => {
+  const completed = latch<void>();
+  const fixture = coordinatorFixture({
+    routeState: () => Effect.succeed({ _tag: "Unattached" }),
+    localReceipt: () => Effect.promise(() => new Promise((resolve) => {
+      setTimeout(() => {
+        completed.resolve();
+        resolve({
+          _tag: "Acknowledged" as const,
+          turnId: TurnId("turn-app-late"),
+        });
+      }, 30);
+    })),
+    canonicalEvidence: () => Effect.succeed({ _tag: "Absent" }),
+  });
+  try {
+    const result = await fixture.deliver(request(
+      "delivery-app-late",
+      "thread-1",
+      "10 millis",
+    ));
+    assert.equal(result._tag, "Ambiguous");
+    assert.equal(result.proof.appServerReceipt?._tag, "Uncertain");
+    assert.equal((await fixture.circuitState(request().threadId))._tag,
+      "Closed");
+    await completed.promise;
+  } finally {
+    await fixture.runtime.dispose();
+  }
+});
+
+test("a hung desktop health probe cannot retain the task gate", async () => {
+  const entered = latch<void>();
+  let routeCalls = 0;
+  const fixture = coordinatorFixture({
+    routeState: () => {
+      routeCalls += 1;
+      if (routeCalls === 1) {
+        entered.resolve();
+        return Effect.never;
+      }
+      return Effect.succeed({ _tag: "Unattached" });
+    },
+  });
+  try {
+    const first = fixture.deliver(request(
+      "delivery-health-timeout",
+      "thread-1",
+      "10 millis",
+    ));
+    await entered.promise;
+    const second = fixture.deliver(request("delivery-after-health-timeout"));
+    const results = await Promise.all([first, second]);
+    assert.equal(results.every((result) =>
+      result._tag === "ConfirmedAppServer"), true);
+    assert.deepEqual(fixture.recorder.localDeliveries,
+      ["delivery-health-timeout", "delivery-after-health-timeout"]);
+  } finally {
+    await fixture.runtime.dispose();
+  }
+});
+
 test("same-task app-server writes are serialized", async () => {
   const entered = latch<void>();
   const release = latch<void>();

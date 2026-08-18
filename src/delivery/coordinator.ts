@@ -1,12 +1,11 @@
 import { Context, Effect, Exit, Layer } from "effect";
 import { Logger } from "../logger.js";
 import type { ThreadId, TurnRequest } from "../types.js";
+import { boundedEvidence, boundedReceipt, boundedRouteState, INTERNAL } from "./bounded.js";
 import {
-  boundedEvidence,
-  boundedReceipt,
-  INTERNAL,
-} from "./bounded.js";
-import { decideDesktopEvidence } from "./coordinator-policy.js";
+  decideDesktopEvidence,
+  unsettledWriteDiagnostic,
+} from "./coordinator-policy.js";
 import {
   CanonicalDeliveryPort,
   type CoordinatedDeliveryResult,
@@ -199,6 +198,16 @@ export function DeliveryCoordinatorLive(
             };
           }
           if (canonical._tag === "Absent") {
+            const unsettled = unsettledWriteDiagnostic(receipt);
+            if (unsettled != null) {
+              return {
+                ...delivery,
+                _tag: "Ambiguous",
+                route: "app-server",
+                diagnostic: unsettled,
+                proof: reconciled,
+              } as const;
+            }
             return {
               ...delivery,
               _tag: "Unavailable",
@@ -225,9 +234,9 @@ export function DeliveryCoordinatorLive(
           if (circuits.has(request.threadId)) {
             return { _tag: "DirectAppServer", desktopReceipt: null };
           }
-          const state = yield* desktop.routeState(request.threadId).pipe(
-            Effect.catchAllDefect(() =>
-              Effect.succeed({ _tag: "Unhealthy" as const })),
+          const state = yield* boundedRouteState(
+            desktop.routeState(request.threadId),
+            request.turnTimeout,
           );
           // Keep these states distinct: public adapters retain why desktop was
           // skipped even though both states currently route through app-server.
