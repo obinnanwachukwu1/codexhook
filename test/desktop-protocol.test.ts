@@ -51,6 +51,7 @@ test("selects legacy and explicit v1 adapters across response shapes", async () 
       if (receipt.outcome._tag === "Accepted") {
         assert.equal(receipt.outcome.value.turnId, entry.turnId);
       }
+      assert.equal(JSON.stringify(receipt).includes("details"), false);
       session.close();
     } finally {
       await router.close();
@@ -111,14 +112,16 @@ test("encodes every v1 operation with its compatibility-specific shape", async (
         resultType: "success",
         result: message.method === "thread-follower-start-turn"
           ? { result: { turn: { id: "turn-start" } } }
-          : {},
+          : message.method === "thread-follower-load-complete-history"
+            ? { conversationState: { privateFixtureField: true } }
+            : {},
       });
     },
   );
   try {
     const session = await DesktopProtocolSession.connect(endpoint.socketPath);
     await session.followThread("thread-1");
-    await session.loadCompleteHistory("thread-1", 1_000);
+    const history = await session.loadCompleteHistory("thread-1", 1_000);
     await session.startTurn("thread-1", { input: "start" }, 1_000);
     const steer = await session.steerTurn(
       "thread-1",
@@ -141,6 +144,7 @@ test("encodes every v1 operation with its compatibility-specific shape", async (
       conversationId: "thread-1",
       input: "steer",
     });
+    assert.equal(JSON.stringify(history).includes("conversationState"), false);
     assert.equal(
       steer.outcome._tag === "Accepted" && steer.outcome.value.turnId,
       null,
@@ -289,10 +293,18 @@ test("reconnects future operations after socket replacement without replay", asy
   const firstRouter = await listen(endpoint.socketPath, initialize);
   const session = await DesktopProtocolSession.connect(endpoint.socketPath);
   const observations: string[] = [];
-  session.onObservation((observation) => observations.push(observation._tag));
+  let disconnected!: () => void;
+  const disconnection = new Promise<void>((resolve) => {
+    disconnected = resolve;
+  });
+  session.onObservation((observation) => {
+    observations.push(observation._tag);
+    if (observation._tag === "Disconnected") disconnected();
+  });
   await session.followThread("thread-1");
   await firstRouter.close();
-  assert.equal(session.alive, true);
+  await disconnection;
+  assert.equal(session.alive, false);
 
   let starts = 0;
   let follows = 0;

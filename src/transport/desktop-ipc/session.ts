@@ -99,7 +99,7 @@ export class DesktopProtocolSession {
   }
 
   get alive(): boolean {
-    return !this.closing;
+    return !this.closing && this.connection?.raw.alive === true;
   }
 
   get profile(): DesktopProtocolProfile {
@@ -148,7 +148,7 @@ export class DesktopProtocolSession {
   async loadCompleteHistory(
     threadId: string,
     timeoutMs: number,
-  ): Promise<DesktopRequestReceipt<unknown>> {
+  ): Promise<DesktopRequestReceipt<void>> {
     const connection = await this.ready("completeHistory");
     const response = await connection.raw.request(
       connection.adapter.methods.history,
@@ -156,7 +156,12 @@ export class DesktopProtocolSession {
       connection.adapter.version,
       timeoutMs,
     );
-    return this.receipt(connection, "load-history", response, (value) => value);
+    return this.receipt(
+      connection,
+      "load-history",
+      response,
+      () => undefined,
+    );
   }
 
   async startTurn(

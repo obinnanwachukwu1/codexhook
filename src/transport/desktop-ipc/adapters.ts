@@ -295,11 +295,11 @@ function makeV1Adapter(id: string): DesktopProtocolAdapter {
       const result = applicationResult(value);
       const observedTurnId = turnId(result);
       if (observedTurnId == null) return malformedAccepted("start-turn");
-      return { result, turnId: observedTurnId };
+      return { turnId: observedTurnId };
     },
     decodeSteer: (value) => {
       const result = applicationResult(value);
-      return { result, turnId: turnId(result) };
+      return { turnId: turnId(result) };
     },
   };
 }

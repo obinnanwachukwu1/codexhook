@@ -79,12 +79,10 @@ export interface DesktopWriteReceipt {
 }
 
 export interface DesktopStartResult {
-  readonly result: unknown;
   readonly turnId: string;
 }
 
 export interface DesktopSteerResult {
-  readonly result: unknown;
   readonly turnId: string | null;
 }
 
