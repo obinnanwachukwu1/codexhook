@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { Cause, Effect, Exit, Option } from "effect";
 import { connectDesktop } from "../src/transport/desktop.js";
-import { isAbsentDesktopEndpointError } from "../src/transport/desktop-ipc-client.js";
+import { isAbsentDesktopEndpointError } from "../src/transport/desktop-protocol/index.js";
 import { TransportIncompatible } from "../src/transport/errors.js";
 import type { TransportSpec } from "../src/transport/spec.js";
 

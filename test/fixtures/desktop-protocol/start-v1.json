@@ -1,0 +1,14 @@
+{
+  "response": {
+    "result": {
+      "submission": {
+        "turnId": "turn-versioned"
+      },
+      "turn": {
+        "id": "turn-versioned",
+        "status": "inProgress",
+        "error": null
+      }
+    }
+  }
+}

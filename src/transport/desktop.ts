@@ -9,9 +9,10 @@ import {
   Scope,
 } from "effect";
 import {
-  DesktopIpcClient,
-  DesktopIpcConnectError,
-} from "./desktop-ipc-client.js";
+  DesktopProtocolError,
+  DesktopProtocolSession,
+  type DesktopKnownRejection,
+} from "./desktop-protocol/index.js";
 import { DesktopThreadState } from "./desktop-state.js";
 import {
   TransportIncompatible,
@@ -29,13 +30,6 @@ import {
 } from "./rpc.js";
 import type { TransportSpec } from "./spec.js";
 
-const IPC_VERSION = {
-  start: 1,
-  steer: 1,
-  following: 1,
-  history: 1,
-} as const;
-
 function durationMillis(value: Duration.DurationInput): number {
   return Duration.toMillis(Duration.decode(value));
 }
@@ -50,41 +44,21 @@ function ticketPayload(ticket: RpcTicket): {
   };
 }
 
-function nestedTurnId(value: unknown): string | null {
-  if (value == null || typeof value !== "object") return null;
-  const record = value as Record<string, unknown>;
-  if (typeof record.turnId === "string") return record.turnId;
-  const turn = record.turn;
-  if (
-    turn != null &&
-    typeof turn === "object" &&
-    typeof (turn as { readonly id?: unknown }).id === "string"
-  ) {
-    return (turn as { readonly id: string }).id;
-  }
-  for (const child of Object.values(record)) {
-    const found = nestedTurnId(child);
-    if (found != null) return found;
-  }
-  return null;
-}
-
-function safeIpcRejection(error: string | undefined): boolean {
-  if (error == null) return false;
+function safeIpcRejection(error: DesktopKnownRejection): boolean {
   return [
     "no-client-found",
     "client-not-found",
     "client-cannot-handle-request",
     "request-version-mismatch",
     "no-handler-for-request",
-    "thread stream owner became unavailable",
+    "thread-stream-owner-unavailable",
     "thread-role-timeout",
-  ].some((value) => error.includes(value));
+  ].includes(error);
 }
 
 function makePeer(
   spec: Extract<TransportSpec, { readonly _tag: "Desktop" }>,
-  client: DesktopIpcClient,
+  client: DesktopProtocolSession,
 ): AppServerPeer {
   const states = new Map<string, DesktopThreadState>();
   client.onBroadcast((message) => {
@@ -92,12 +66,7 @@ function makePeer(
       state.apply(message);
       if (state.takeResyncRequest()) {
         void client
-          .request(
-            "thread-follower-load-complete-history",
-            { conversationId: state.threadId },
-            IPC_VERSION.history,
-            30_000,
-          )
+          .loadCompleteHistory(state.threadId, 30_000)
           .catch(() => undefined);
       }
     }
@@ -108,11 +77,7 @@ function makePeer(
     if (state == null) {
       state = new DesktopThreadState(threadId);
       states.set(threadId, state);
-      client.broadcast(
-        "thread-stream-following-changed",
-        { conversationId: threadId, hostId: "local", following: true },
-        IPC_VERSION.following,
-      );
+      await client.followThread(threadId);
     }
     await state.waitFor(() => state?.ready === true, 5_000);
     return state;
@@ -132,27 +97,13 @@ function makePeer(
         const { method, params } = ticketPayload(ticket);
         const threadId = String(params.threadId ?? "");
         const { threadId: _, ...input } = params;
-        const ipcMethod =
-          method === "turn/steer"
-            ? "thread-follower-steer-turn"
-            : "thread-follower-start-turn";
-        const ipcParams =
-          method === "turn/steer"
-            ? { conversationId: threadId, ...input }
-            : { conversationId: threadId, turnStartParams: input };
-        const response = await client.request(
-          ipcMethod,
-          ipcParams,
-          method === "turn/steer"
-            ? IPC_VERSION.steer
-            : IPC_VERSION.start,
-          30_000,
-        );
-        if (response.resultType === "error") {
-          if (safeIpcRejection(response.error)) {
+        const response = method === "turn/steer"
+          ? await client.steerTurn(threadId, input, 30_000)
+          : await client.startTurn(threadId, input, 30_000);
+        if (response.outcome._tag === "Rejected") {
+          if (safeIpcRejection(response.outcome.rejection)) {
             throw new RpcNotWritten({
-              detail:
-                response.error ?? "Desktop confirmed no submission",
+              detail: `Desktop confirmed no submission (${response.outcome.rejection})`,
             });
           }
           Deferred.unsafeDone(
@@ -160,17 +111,14 @@ function makePeer(
             Effect.fail(
               new RpcErrorReply({
                 code: -32_000,
-                message: response.error ?? "Desktop rejected the request",
+                message: "Desktop rejected the request",
               }),
             ),
           );
           return;
         }
-        const outer = response.result as
-          | { readonly result?: unknown }
-          | undefined;
-        const appResult = outer?.result;
-        const observedTurnId = nestedTurnId(appResult);
+        const appResult = response.outcome.value.result;
+        const observedTurnId = response.outcome.value.turnId;
         if (observedTurnId != null) {
           states.get(threadId)?.observeTurn(observedTurnId);
         }
@@ -187,6 +135,9 @@ function makePeer(
       catch: (cause) =>
         cause instanceof RpcNotWritten
           ? cause
+          : cause instanceof DesktopProtocolError &&
+              cause.writeState === "not-written"
+            ? new RpcNotWritten({ detail: cause.message })
           : new RpcWriteAmbiguous({
               detail:
                 cause instanceof Error ? cause.message : String(cause),
@@ -303,11 +254,11 @@ export function connectDesktop(
 > {
   return Effect.acquireRelease(
     Effect.tryPromise({
-      try: () => DesktopIpcClient.connect(spec.socketPath),
+      try: () => DesktopProtocolSession.connect(spec.socketPath),
       catch: (cause) => {
         const detail =
           cause instanceof Error ? cause.message : String(cause);
-        if (!(cause instanceof DesktopIpcConnectError)) {
+        if (!(cause instanceof DesktopProtocolError)) {
           return new TransportIncompatible({
             transport: "desktop",
             stage: "initialize",
@@ -328,14 +279,17 @@ export function connectDesktop(
             detail,
           });
         }
-        if (cause.failure === "initialize-timeout") {
+        if (cause.failure === "request-timeout") {
           return new TransportUnavailable({
             transport: "desktop",
             reason: "handshake-timeout",
             detail,
           });
         }
-        if (cause.failure === "initialize-failed") {
+        if (
+          cause.failure === "closed" ||
+          cause.failure === "write-failed"
+        ) {
           return new TransportUnavailable({
             transport: "desktop",
             reason: "exited",
@@ -344,7 +298,9 @@ export function connectDesktop(
         }
         return new TransportIncompatible({
           transport: "desktop",
-          stage: "malformed",
+          stage: cause.failure === "unsupported-capability"
+            ? "capabilities"
+            : "malformed",
           detail,
         });
       },

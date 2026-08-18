@@ -2,7 +2,7 @@ import { lstat, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Effect, Option } from "effect";
-import { DesktopIpcClient } from "./desktop-ipc-client.js";
+import { DesktopProtocolSession } from "./desktop-protocol/index.js";
 import { TransportIncompatible } from "./errors.js";
 import type { TransportSpec } from "./spec.js";
 
@@ -106,10 +106,7 @@ export const desktopProbe: Effect.Effect<Option.Option<DesktopSpec>> =
         onNone: () => Effect.succeed(Option.none()),
         onSome: (candidate) =>
           Effect.tryPromise(async () => {
-            const client = await DesktopIpcClient.connect(
-              candidate.socketPath,
-            );
-            client.close();
+            await DesktopProtocolSession.probe(candidate.socketPath);
             return Option.some(candidate);
           }),
       }),
