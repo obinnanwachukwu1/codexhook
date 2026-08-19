@@ -1,6 +1,6 @@
 {
   "name": "codexhook",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "HTTP callbacks for Codex tasks.",
   "keywords": [
     "codex",
