@@ -45,6 +45,8 @@ export interface DesktopWireEnvelope {
   readonly requestId?: string;
   readonly result?: unknown;
   readonly resultType?: string;
+  readonly sourceClientId?: string;
+  readonly targetClientId?: string;
   readonly type: string;
   readonly version?: number;
 }

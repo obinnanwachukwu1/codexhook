@@ -93,6 +93,15 @@ export function DeliveryLive(
           mode: job.request.mode,
         });
         return local.resolveTask(job.request.threadId).pipe(
+          Effect.tap((task) => Effect.sync(() => logger.info(
+            "delivery_task_resolved",
+            {
+              deliveryId: job.request.deliveryId,
+              hookId: job.hookId,
+              threadId: job.request.threadId,
+              origin: task.origin,
+            },
+          ))),
           Effect.flatMap((task) => coordinator.deliver({
             task,
             deliveryId: job.request.deliveryId,
@@ -221,12 +230,12 @@ export function DeliveryLive(
           if (job.request.mode !== "steer") {
             return yield* offer(job.request.threadId, job);
           }
-          return yield* Effect.uninterruptible(
+          return yield* Effect.uninterruptibleMask((restore) =>
             Effect.gen(function* () {
               const accepted = yield* reserveSteer;
               if (!accepted) return false;
               yield* Effect.forkIn(
-                runJob(job).pipe(
+                restore(runJob(job)).pipe(
                   Effect.ensuring(
                     SynchronizedRef.update(control, (current) => ({
                       ...current,

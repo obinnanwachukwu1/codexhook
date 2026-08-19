@@ -1,12 +1,4 @@
 import {
-  decodeDesktopHandshake,
-  DESKTOP_INITIALIZE_PARAMS,
-  fingerprintDesktopProtocol,
-  normalizeDesktopRejection,
-  selectDesktopAdapter,
-  type DesktopProtocolAdapter,
-} from "./adapters.js";
-import {
   desktopReconnectError,
   DesktopProtocolError,
 } from "./errors.js";
@@ -18,7 +10,6 @@ import type {
   DesktopProtocolProfile,
   DesktopProtocolSessionOptions,
   DesktopRequestReceipt,
-  DesktopResponseEnvelope,
   DesktopStartResult,
   DesktopSteerResult,
   DesktopWireEnvelope,
@@ -29,13 +20,27 @@ import {
   type DesktopBroadcastListener,
   type DesktopObservationListener,
 } from "./wire.js";
+import { desktopRequestReceipt } from "./session-receipt.js";
+import { followDesktopThread } from "./session-follow.js";
+import {
+  reconnectStageTimeout,
+  waitForReconnect,
+} from "./session-deadline.js";
+import {
+  negotiateDesktopConnection,
+  type NegotiatedConnection,
+} from "./session-negotiate.js";
+import {
+  dropRejectedOwner,
+  mutationDeadline,
+  remainingRequestTimeout,
+  requestDeadline,
+  requestTarget,
+} from "./session-request.js";
+import { DesktopThreadOwners } from "./thread-owners.js";
+import { refreshDesktopOwner } from "./session-owner-refresh.js";
+import { requireDesktopCapability } from "./session-capability.js";
 import type { Socket } from "node:net";
-
-interface NegotiatedConnection {
-  readonly adapter: DesktopProtocolAdapter;
-  readonly profile: DesktopProtocolProfile;
-  readonly raw: RawDesktopConnection;
-}
 
 export class DesktopProtocolSession {
   private readonly broadcasts = new Set<DesktopBroadcastListener>();
@@ -44,11 +49,11 @@ export class DesktopProtocolSession {
   private readonly followedThreads = new Set<string>();
   private readonly limits: SessionLimits;
   private readonly observations = new Set<DesktopObservationListener>();
+  private readonly threadOwners = new DesktopThreadOwners();
   private openingRaw: RawDesktopConnection | null = null;
   private openingSocket: Socket | null = null;
   private reconnecting: Promise<NegotiatedConnection> | null = null;
   private readonly createConnection: (() => Socket) | undefined;
-
   private constructor(
     private readonly socketPath: string,
     options: DesktopProtocolSessionOptions,
@@ -111,6 +116,7 @@ export class DesktopProtocolSession {
 
   close(): void {
     this.closing = true;
+    this.threadOwners.close();
     this.connection?.raw.close();
     this.openingSocket?.destroy();
     this.openingRaw?.close();
@@ -129,12 +135,12 @@ export class DesktopProtocolSession {
 
   async followThread(threadId: string): Promise<DesktopWriteReceipt> {
     const connection = await this.ready("threadStream");
-    await connection.raw.broadcast(
-      connection.adapter.methods.follow,
-      connection.adapter.followParams(threadId),
-      connection.adapter.version,
+    await followDesktopThread(
+      connection,
+      this.followedThreads,
+      this.threadOwners,
+      threadId,
     );
-    this.followedThreads.add(threadId);
     return {
       fingerprint: connection.profile.fingerprint,
       operation: "follow-thread",
@@ -146,19 +152,31 @@ export class DesktopProtocolSession {
     threadId: string,
     timeoutMs: number,
   ): Promise<DesktopRequestReceipt<void>> {
-    const connection = await this.ready("completeHistory");
+    const deadline = requestDeadline(this.limits, timeoutMs);
+    const connection = await this.ready("completeHistory", deadline);
+    const target = await requestTarget(
+      this.threadOwners,
+      this.followedThreads,
+      this.limits,
+      threadId,
+      deadline,
+      false,
+    );
     const response = await connection.raw.request(
       connection.adapter.methods.history,
       connection.adapter.historyParams(threadId),
       connection.adapter.version,
-      timeoutMs,
+      remainingRequestTimeout(this.limits, deadline),
+      target,
     );
-    return this.receipt(
-      connection,
+    const receipt = desktopRequestReceipt(
+      connection.profile,
       "load-history",
       response,
       () => undefined,
     );
+    dropRejectedOwner(this.threadOwners, threadId, receipt);
+    return receipt;
   }
 
   async startTurn(
@@ -166,19 +184,39 @@ export class DesktopProtocolSession {
     params: Record<string, unknown>,
     timeoutMs: number,
   ): Promise<DesktopRequestReceipt<DesktopStartResult>> {
-    const connection = await this.ready("startTurn");
+    const deadline = mutationDeadline(this.limits, timeoutMs);
+    const connection = await this.ready("startTurn", deadline);
+    await refreshDesktopOwner(
+      connection,
+      this.followedThreads,
+      this.threadOwners,
+      this.limits,
+      threadId,
+      deadline,
+    );
+    const target = await requestTarget(
+      this.threadOwners,
+      this.followedThreads,
+      this.limits,
+      threadId,
+      deadline,
+      true,
+    );
     const response = await connection.raw.request(
       connection.adapter.methods.start,
       connection.adapter.startParams(threadId, params),
       connection.adapter.version,
-      timeoutMs,
+      remainingRequestTimeout(this.limits, deadline),
+      target,
     );
-    return this.receipt(
-      connection,
+    const receipt = desktopRequestReceipt(
+      connection.profile,
       "start-turn",
       response,
       (value) => connection.adapter.decodeStart(value),
     );
+    dropRejectedOwner(this.threadOwners, threadId, receipt);
+    return receipt;
   }
 
   async steerTurn(
@@ -186,68 +224,52 @@ export class DesktopProtocolSession {
     params: Record<string, unknown>,
     timeoutMs: number,
   ): Promise<DesktopRequestReceipt<DesktopSteerResult>> {
-    const connection = await this.ready("steerTurn");
+    const deadline = mutationDeadline(this.limits, timeoutMs);
+    const connection = await this.ready("steerTurn", deadline);
+    await refreshDesktopOwner(
+      connection,
+      this.followedThreads,
+      this.threadOwners,
+      this.limits,
+      threadId,
+      deadline,
+    );
+    const target = await requestTarget(
+      this.threadOwners,
+      this.followedThreads,
+      this.limits,
+      threadId,
+      deadline,
+      true,
+    );
     const response = await connection.raw.request(
       connection.adapter.methods.steer,
       connection.adapter.steerParams(threadId, params),
       connection.adapter.version,
-      timeoutMs,
+      remainingRequestTimeout(this.limits, deadline),
+      target,
     );
-    return this.receipt(
-      connection,
+    const receipt = desktopRequestReceipt(
+      connection.profile,
       "steer-turn",
       response,
       (value) => connection.adapter.decodeSteer(value),
     );
-  }
-
-  private receipt<A>(
-    connection: NegotiatedConnection,
-    operation: DesktopRequestReceipt<A>["operation"],
-    response: DesktopResponseEnvelope,
-    decode: (value: unknown) => A,
-  ): DesktopRequestReceipt<A> {
-    if (
-      response.resultType != null &&
-      response.resultType !== "success" &&
-      response.resultType !== "error"
-    ) {
-      throw new DesktopProtocolError(
-        "response-malformed",
-        "operation",
-        "written",
-        "Desktop IPC response has an unknown result type",
-      );
-    }
-    return {
-      fingerprint: connection.profile.fingerprint,
-      operation,
-      requestId: response.requestId,
-      outcome: response.resultType === "error"
-        ? {
-            _tag: "Rejected",
-            rejection: normalizeDesktopRejection(response.error),
-          }
-        : { _tag: "Accepted", value: decode(response.result) },
-    };
+    dropRejectedOwner(this.threadOwners, threadId, receipt);
+    return receipt;
   }
 
   private async ready(
     capability: DesktopProtocolCapability,
+    deadline?: number,
   ): Promise<NegotiatedConnection> {
-    const connection = await this.ensureConnection();
-    if (!connection.profile.capabilities[capability]) {
-      throw new DesktopProtocolError(
-        "unsupported-capability",
-        "operation",
-        "not-written",
-        `Desktop IPC does not advertise ${capability}`,
-      );
-    }
+    const connection = await this.ensureConnection(deadline);
+    if (this.closing) throw this.closedError();
+    requireDesktopCapability(connection, capability);
     return connection;
   }
 
-  private async ensureConnection(): Promise<NegotiatedConnection> {
+  private async ensureConnection(deadline?: number): Promise<NegotiatedConnection> {
     if (this.closing) {
       throw this.closedError();
     }
@@ -262,23 +284,43 @@ export class DesktopProtocolSession {
       active.raw.close();
     }
     if (this.reconnecting == null) {
-      this.reconnecting = this.open(true).finally(() => {
-        this.reconnecting = null;
+      if (deadline != null) remainingRequestTimeout(this.limits, deadline);
+      const reconnectDeadline = deadline ??
+        Date.now() + this.limits.handshakeTimeoutMs;
+      const reconnecting = this.open(true, reconnectDeadline).then(
+        (connection) => {
+          if (this.closing) {
+            connection.raw.close();
+            throw this.closedError();
+          }
+          if (this.connection !== connection) {
+            this.connection = connection;
+            this.emit({ _tag: "Reconnected", profile: connection.profile });
+          }
+          return connection;
+        },
+      );
+      const tracked = reconnecting.finally(() => {
+        if (this.reconnecting === tracked) this.reconnecting = null;
       });
+      this.reconnecting = tracked;
     }
-    const connection = await this.reconnecting;
+    const connection = await waitForReconnect(
+      this.limits,
+      this.reconnecting,
+      deadline,
+    );
     if (this.closing) {
       connection.raw.close();
       throw this.closedError();
     }
-    if (this.connection !== connection) {
-      this.connection = connection;
-      this.emit({ _tag: "Reconnected", profile: connection.profile });
-    }
-    return this.connection;
+    return connection;
   }
 
-  private async open(reconnected: boolean): Promise<NegotiatedConnection> {
+  private async open(
+    reconnected: boolean,
+    deadline?: number,
+  ): Promise<NegotiatedConnection> {
     if (this.closing) throw this.closedError();
     const raw = await RawDesktopConnection.open(
       this.socketPath,
@@ -286,7 +328,7 @@ export class DesktopProtocolSession {
       (message) => this.receiveBroadcast(message),
       (observation) => this.emit(observation),
       {
-        connectTimeoutMs: this.limits.handshakeTimeoutMs,
+        connectTimeoutMs: reconnectStageTimeout(this.limits, deadline),
         ...(this.createConnection == null
           ? {}
           : { createConnection: this.createConnection }),
@@ -302,64 +344,17 @@ export class DesktopProtocolSession {
       throw this.closedError();
     }
     try {
-      const response = await raw.request(
-        "initialize",
-        DESKTOP_INITIALIZE_PARAMS,
-        0,
-        this.limits.handshakeTimeoutMs,
+      return await negotiateDesktopConnection(
+        raw,
+        reconnectStageTimeout(this.limits, deadline),
+        reconnected,
+        this.followedThreads,
+        (observation) => this.emit(observation),
+        () => {
+          if (this.closing) throw this.closedError();
+        },
+        deadline,
       );
-      if (this.closing) throw this.closedError();
-      if (response.resultType === "error") {
-        throw new DesktopProtocolError(
-          "handshake-malformed",
-          "handshake",
-          "not-written",
-          "Desktop IPC initialize request was rejected",
-        );
-      }
-      if (
-        response.resultType != null && response.resultType !== "success"
-      ) {
-        throw new DesktopProtocolError(
-          "handshake-malformed",
-          "handshake",
-          "not-written",
-          "Desktop IPC initialize response has an unknown result type",
-        );
-      }
-      const handshake = decodeDesktopHandshake(response.result);
-      raw.setInitializedClientId(handshake.clientId);
-      const adapter = selectDesktopAdapter(handshake);
-      const profile = {
-        compatibility: adapter.compatibility,
-        capabilities: handshake.capabilities,
-        fingerprint: fingerprintDesktopProtocol(handshake, adapter),
-      };
-      if (reconnected) {
-        this.emit({ _tag: "Reconnecting", profile });
-        if (
-          this.followedThreads.size > 0 &&
-          !profile.capabilities.threadStream
-        ) {
-          throw desktopReconnectError(
-            "Desktop IPC reconnect cannot restore followed tasks",
-          );
-        }
-        try {
-          for (const threadId of this.followedThreads) {
-            await raw.broadcast(
-              adapter.methods.follow,
-              adapter.followParams(threadId),
-              adapter.version,
-            );
-          }
-        } catch {
-          throw desktopReconnectError(
-            "Desktop IPC reconnect could not restore followed tasks",
-          );
-        }
-      }
-      return { adapter, profile, raw };
     } catch (cause) {
       raw.close();
       if (reconnected) {
@@ -382,9 +377,9 @@ export class DesktopProtocolSession {
       this.emit({ _tag: "MalformedBroadcast" });
       return;
     }
+    this.threadOwners.observe(message, this.followedThreads);
     for (const listener of this.broadcasts) listener(message);
   }
-
   private closedError(): DesktopProtocolError {
     return new DesktopProtocolError(
       "closed",
@@ -395,6 +390,11 @@ export class DesktopProtocolSession {
   }
 
   private emit(observation: DesktopProtocolObservation): void {
+    if (observation._tag === "Disconnected") {
+      this.threadOwners.reset(this.followedThreads);
+    } else if (observation._tag === "Reconnecting") {
+      this.threadOwners.reset();
+    }
     for (const listener of this.observations) listener(observation);
   }
 }

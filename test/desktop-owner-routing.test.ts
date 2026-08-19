@@ -1,0 +1,360 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { DesktopProtocolSession } from "../src/transport/desktop-ipc/index.js";
+import { followDesktopThread } from
+  "../src/transport/desktop-ipc/session-follow.js";
+import { DesktopThreadOwners } from
+  "../src/transport/desktop-ipc/thread-owners.js";
+import {
+  fixture,
+  listen,
+  testEndpoint,
+} from "./support/desktop-ipc-router.js";
+
+test("targets followed task operations to the state snapshot owner", async () => {
+  const owners = new DesktopThreadOwners();
+  owners.observe({
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "unfollowed-claim",
+    params: {
+      conversationId: "thread-1",
+      change: { type: "snapshot", revision: 0 },
+    },
+  }, new Set());
+  assert.equal(owners.target("thread-1"), undefined);
+
+  const endpoint = await testEndpoint();
+  const targets: Array<string | undefined> = [];
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message, send) => {
+      if (message.method === "thread-stream-following-changed") {
+        send({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          sourceClientId: "desktop-owner-1",
+          version: 11,
+          params: {
+            conversationId: "thread-1",
+            change: { type: "snapshot", revision: 1 },
+          },
+        });
+        send({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          sourceClientId: "spoofed-owner",
+          version: 11,
+          params: {
+            conversationId: "thread-1",
+            change: { type: "snapshot", revision: 2 },
+          },
+        });
+        return;
+      }
+      if (message.method !== "thread-follower-steer-turn") return;
+      targets.push(message.targetClientId);
+      send({
+        type: "response",
+        requestId: message.requestId,
+        resultType: "success",
+        result: {},
+      });
+    },
+  );
+  try {
+    const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await session.followThread("thread-1");
+    await session.steerTurn("thread-1", { input: [] }, 1_000);
+    assert.deepEqual(targets, ["desktop-owner-1"]);
+    session.close();
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
+});
+
+test("never writes an unfollowed task mutation", async () => {
+  const endpoint = await testEndpoint();
+  let mutations = 0;
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message) => {
+      if (
+        message.method === "thread-follower-start-turn" ||
+        message.method === "thread-follower-steer-turn"
+      ) mutations += 1;
+    },
+  );
+  try {
+    const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await assert.rejects(
+      session.startTurn("thread-1", {}, 1_000),
+      (error: unknown) =>
+        error instanceof Error &&
+        "failure" in error &&
+        error.failure === "task-not-followed" &&
+        "writeState" in error &&
+        error.writeState === "not-written",
+    );
+    await assert.rejects(
+      session.steerTurn("thread-1", {}, 1_000),
+      (error: unknown) =>
+        error instanceof Error &&
+        "failure" in error &&
+        error.failure === "task-not-followed",
+    );
+    assert.equal(mutations, 0);
+    session.close();
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
+});
+
+test("a failed repeated follow preserves existing owner state", async () => {
+  const followed = new Set(["thread-1"]);
+  const owners = new DesktopThreadOwners();
+  owners.observe({
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-owner",
+    params: {
+      conversationId: "thread-1",
+      change: { type: "snapshot", revision: 1 },
+    },
+  }, followed);
+  await assert.rejects(followDesktopThread({
+    adapter: {
+      methods: { follow: "follow", history: "history", start: "start", steer: "steer" },
+      version: 1,
+      followParams: () => ({}),
+    },
+    raw: {
+      broadcast: async () => {
+        throw new Error("synthetic write failure");
+      },
+    },
+  }, followed, owners, "thread-1"));
+  assert.equal(followed.has("thread-1"), true);
+  assert.equal(owners.target("thread-1"), "desktop-owner");
+});
+
+test("an owner refresh follow is bounded before mutation", async () => {
+  const followed = new Set(["thread-1"]);
+  const owners = new DesktopThreadOwners();
+  const began = Date.now();
+  await assert.rejects(followDesktopThread({
+    adapter: {
+      methods: { follow: "follow", history: "history", start: "start", steer: "steer" },
+      version: 1,
+      followParams: () => ({}),
+    },
+    raw: { broadcast: () => new Promise<void>(() => undefined) },
+  }, followed, owners, "thread-1", 20), (error: unknown) =>
+    error instanceof Error &&
+    "failure" in error &&
+    error.failure === "request-timeout"
+  );
+  assert.equal(Date.now() - began < 250, true);
+});
+
+test("a closed owner registry rejects later waiters immediately", async () => {
+  const owners = new DesktopThreadOwners();
+  owners.close();
+  assert.deepEqual(await owners.wait("thread-1", 120_000), { _tag: "Closed" });
+});
+
+test("close wakes every pending owner waiter without writing", async () => {
+  const endpoint = await testEndpoint();
+  let mutations = 0;
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message) => {
+      if (
+        message.method === "thread-follower-start-turn" ||
+        message.method === "thread-follower-steer-turn"
+      ) mutations += 1;
+    },
+  );
+  try {
+    const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await session.followThread("thread-1");
+    const pending = [
+      session.startTurn("thread-1", {}, 1_000),
+      session.steerTurn("thread-1", {}, 1_000),
+    ];
+    await new Promise((resolve) => setImmediate(resolve));
+    const closedAt = Date.now();
+    session.close();
+    const results = await Promise.allSettled(pending);
+    assert.equal(Date.now() - closedAt < 250, true);
+    assert.deepEqual(results.map((result) => result.status), [
+      "rejected",
+      "rejected",
+    ]);
+    for (const result of results) {
+      assert.equal(
+        result.status === "rejected" &&
+          result.reason instanceof Error &&
+          "failure" in result.reason &&
+          result.reason.failure === "closed",
+        true,
+      );
+    }
+    assert.equal(mutations, 0);
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
+});
+
+test("disconnect wakes pending owner waiters without writing", async () => {
+  const endpoint = await testEndpoint();
+  let mutations = 0;
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message) => {
+      if (message.method === "thread-follower-start-turn") mutations += 1;
+    },
+  );
+  const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+  try {
+    await session.followThread("thread-1");
+    const pending = session.startTurn("thread-1", {}, 1_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    const disconnectedAt = Date.now();
+    await router.close();
+    await assert.rejects(pending, (error: unknown) =>
+      error instanceof Error &&
+      "failure" in error &&
+      error.failure === "reconnect-failed" &&
+      "writeState" in error && error.writeState === "not-written"
+    );
+    assert.equal(Date.now() - disconnectedAt < 250, true);
+    assert.equal(mutations, 0);
+  } finally {
+    session.close();
+    await endpoint.cleanup();
+  }
+});
+
+test("never writes a followed task without snapshot owner evidence", async () => {
+  const endpoint = await testEndpoint();
+  let starts = 0;
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message, send) => {
+      if (message.method === "thread-stream-following-changed") {
+        send({
+          type: "broadcast",
+          method: "thread-stream-state-changed",
+          params: {
+            conversationId: "thread-1",
+            change: { type: "snapshot", revision: 1 },
+          },
+        });
+        return;
+      }
+      if (message.method === "thread-follower-start-turn") starts += 1;
+    },
+  );
+  try {
+    const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await session.followThread("thread-1");
+    const began = Date.now();
+    await assert.rejects(
+      session.startTurn("thread-1", {}, 30 * 60 * 1_000),
+      (error: unknown) =>
+        error instanceof Error &&
+        "failure" in error &&
+        error.failure === "owner-unroutable" &&
+        "writeState" in error &&
+        error.writeState === "not-written",
+    );
+    assert.equal(Date.now() - began < 250, true);
+    assert.equal(starts, 0);
+    session.close();
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
+});
+
+test("routing rejection requires fresh owner evidence before another write", async () => {
+  const endpoint = await testEndpoint();
+  let publish!: (owner: string) => void;
+  let follows = 0;
+  let starts = 0;
+  const router = await listen(
+    endpoint.socketPath,
+    await fixture("initialize-v1.json"),
+    (message, send) => {
+      publish = (owner) => send({
+        type: "broadcast",
+        method: "thread-stream-state-changed",
+        sourceClientId: owner,
+        params: {
+          conversationId: "thread-1",
+          change: { type: "snapshot", revision: starts + 1 },
+        },
+      });
+      if (message.method === "thread-stream-following-changed") {
+        follows += 1;
+        publish(follows === 1 ? "desktop-owner-1" : "desktop-owner-2");
+        return;
+      }
+      if (message.method === "thread-follower-load-complete-history") {
+        assert.equal(message.targetClientId, undefined);
+        send({
+          type: "response",
+          requestId: message.requestId,
+          resultType: "success",
+          result: {},
+        });
+        return;
+      }
+      if (message.method !== "thread-follower-start-turn") return;
+      starts += 1;
+      assert.equal(
+        message.targetClientId,
+        starts === 1 ? "desktop-owner-1" : "desktop-owner-2",
+      );
+      send(starts === 1
+        ? {
+            type: "response",
+            requestId: message.requestId,
+            resultType: "error",
+            error: "no-handler-for-request",
+          }
+        : {
+            type: "response",
+            requestId: message.requestId,
+            resultType: "success",
+            result: { result: { turnId: "turn-2" } },
+          });
+    },
+  );
+  try {
+    const session = await DesktopProtocolSession.connect(endpoint.socketPath);
+    await session.followThread("thread-1");
+    const rejected = await session.startTurn("thread-1", {}, 1_000);
+    assert.equal(rejected.outcome._tag, "Rejected");
+    assert.equal(starts, 1);
+    const history = await session.loadCompleteHistory("thread-1", 1_000);
+    assert.equal(history.outcome._tag, "Accepted");
+    const accepted = await session.startTurn("thread-1", {}, 1_000);
+    assert.equal(accepted.outcome._tag, "Accepted");
+    assert.equal(starts, 2);
+    assert.equal(follows, 2);
+    session.close();
+  } finally {
+    await router.close();
+    await endpoint.cleanup();
+  }
+});

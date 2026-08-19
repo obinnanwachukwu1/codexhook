@@ -336,3 +336,47 @@ test("steer dispatches immediately up to its in-flight bound", async () => {
     await service.dispose();
   }
 });
+
+test("steer workers restore interruptibility after atomic admission", async () => {
+  const { entries, logger } = memoryLogger();
+  const timeoutFailure = sanitizeDiagnostic({
+    code: "timeout",
+    stage: "resolve-task",
+    route: "app-server",
+  });
+  const coordinator = LocalDeliveryCoordinator.of({
+    policy: PHASE_ONE_DELIVERY_POLICY,
+    deliver: () => Effect.die("must not coordinate"),
+  });
+  const service = runtime(
+    coordinator,
+    logger,
+    () => Effect.never.pipe(
+      Effect.timeoutFail({
+        duration: "10 millis",
+        onTimeout: () => ({
+          _tag: "LocalCodexFailure" as const,
+          diagnostic: timeoutFailure,
+        }),
+      }),
+    ),
+  );
+  try {
+    const accepted = await service.runPromise(
+      Effect.flatMap(Delivery, (delivery) =>
+        delivery.submit(hook("steer"), "bounded task resolution")
+      ),
+    );
+    assert.equal(Option.isSome(accepted), true);
+    await waitFor(() => entries.some((entry) =>
+      entry.event === "delivery_failed"
+    ));
+    const failed = entries.find((entry) => entry.event === "delivery_failed");
+    assert.equal(failed?.diagnosticCode, "timeout");
+    assert.equal((await service.runPromise(
+      Effect.flatMap(Delivery, (delivery) => delivery.snapshot),
+    )).steerDepth, 0);
+  } finally {
+    await service.dispose();
+  }
+});

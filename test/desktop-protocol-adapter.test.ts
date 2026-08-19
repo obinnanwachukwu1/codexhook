@@ -12,6 +12,7 @@ import {
 import {
   fixture,
   listen,
+  sendOwnerSnapshot,
   testEndpoint,
 } from "./support/desktop-ipc-router.js";
 
@@ -54,6 +55,16 @@ test("Desktop steer preserves expected-turn and delivery identity fields", async
             resultType: "success",
             result: { clientId: "test-client" },
           }));
+        } else if (message.method === "thread-stream-following-changed") {
+          socket.write(frame({
+            type: "broadcast",
+            method: "thread-stream-state-changed",
+            sourceClientId: "test-client",
+            params: {
+              conversationId: "thread-1",
+              change: { type: "snapshot", revision: 1 },
+            },
+          }));
         } else if (message.method === "thread-follower-steer-turn") {
           observed = message.params;
           socket.write(frame({
@@ -73,15 +84,35 @@ test("Desktop steer preserves expected-turn and delivery identity fields", async
 
   try {
     const protocol = await DesktopIpcProtocol.connect(socketPath);
+    await protocol.follow("thread-1");
     await protocol.inject({
       kind: "steer",
       threadId: "thread-1",
       expectedTurnId: "turn-active",
       clientUserMessageId: "delivery-1",
-      input: [],
+      input: [
+        { type: "text", text: "steered " },
+        { type: "image", url: "ignored" },
+        { type: "text", text: "message" },
+      ],
+      createdAt: 123,
     });
     assert.equal(observed?.expectedTurnId, "turn-active");
     assert.equal(observed?.clientUserMessageId, "delivery-1");
+    assert.deepEqual(observed?.restoreMessage, {
+      id: "delivery-1",
+      text: "steered message",
+      context: {
+        prompt: "steered message",
+        addedFiles: [],
+        fileAttachments: [],
+        ideContext: null,
+        imageAttachments: [],
+        workspaceRoots: [],
+      },
+      cwd: null,
+      createdAt: 123,
+    });
     assert.equal("turnId" in (observed ?? {}), false);
     protocol.close();
   } finally {
@@ -261,6 +292,7 @@ async function rejectedStart(error: string) {
     endpoint.socketPath,
     await fixture("initialize-v1.json"),
     (message, send) => {
+      if (sendOwnerSnapshot(message, send)) return;
       if (message.method !== "thread-follower-start-turn") return;
       send({
         type: "response",
@@ -273,6 +305,7 @@ async function rejectedStart(error: string) {
   try {
     const protocol = await DesktopIpcProtocol.connect(endpoint.socketPath);
     try {
+      await protocol.follow("thread-1");
       return await protocol.inject({
         kind: "start",
         threadId: "thread-1",

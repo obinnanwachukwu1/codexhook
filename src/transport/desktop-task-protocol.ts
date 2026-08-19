@@ -3,6 +3,7 @@ import {
   DesktopProtocolSession,
   type DesktopKnownRejection,
   type DesktopProtocolProfile,
+  type DesktopProtocolSessionOptions,
 } from "./desktop-ipc/index.js";
 import { readDesktopChange } from "./desktop-task-decoder.js";
 import type { Turn } from "./protocol.js";
@@ -63,6 +64,7 @@ export type DesktopCommand =
       readonly expectedTurnId: string;
       readonly clientUserMessageId: string;
       readonly input: unknown;
+      readonly createdAt: number;
       readonly timeoutMs?: number;
     };
 
@@ -131,11 +133,12 @@ export class DesktopIpcProtocol implements DesktopTaskProtocol {
     socketPath: string,
     signal?: AbortSignal,
     onCreate?: (protocol: DesktopIpcProtocol) => void,
+    options: DesktopProtocolSessionOptions = {},
   ): Promise<DesktopIpcProtocol> {
     let protocol: DesktopIpcProtocol | null = null;
     await DesktopProtocolSession.connect(
       socketPath,
-      {},
+      options,
       signal,
       (session) => {
         protocol = new DesktopIpcProtocol(session);
@@ -169,22 +172,26 @@ export class DesktopIpcProtocol implements DesktopTaskProtocol {
   }
 
   async loadHistory(threadId: string): Promise<boolean> {
-    const reply = await this.session.loadCompleteHistory(threadId, 30_000);
+    const reply = await this.session.loadCompleteHistory(
+      threadId,
+      30_000,
+    );
     return reply.outcome._tag === "Accepted";
   }
 
   async inject(command: DesktopCommand): Promise<DesktopCommandReply> {
     try {
+      const timeoutMs = command.timeoutMs ?? 30_000;
       const reply = command.kind === "start"
         ? await this.session.startTurn(
             command.threadId,
             commandParams(command),
-            command.timeoutMs ?? 30_000,
+            timeoutMs,
           )
         : await this.session.steerTurn(
             command.threadId,
             commandParams(command),
-            command.timeoutMs ?? 30_000,
+            timeoutMs,
           );
       if (reply.outcome._tag === "Rejected") {
         return rejection(reply.outcome.rejection);
@@ -231,11 +238,38 @@ function commandParams(command: DesktopCommand) {
       input: command.input,
     };
   }
+  const prompt = inputText(command.input);
   return {
     expectedTurnId: command.expectedTurnId,
     clientUserMessageId: command.clientUserMessageId,
     input: command.input,
+    restoreMessage: {
+      id: command.clientUserMessageId,
+      text: prompt,
+      context: {
+        prompt,
+        addedFiles: [],
+        fileAttachments: [],
+        ideContext: null,
+        imageAttachments: [],
+        workspaceRoots: [],
+      },
+      cwd: null,
+      createdAt: command.createdAt,
+    },
   };
+}
+
+function inputText(input: unknown): string {
+  if (!Array.isArray(input)) return "";
+  return input.flatMap((value) =>
+    value != null &&
+      typeof value === "object" &&
+      (value as { readonly type?: unknown }).type === "text" &&
+      typeof (value as { readonly text?: unknown }).text === "string"
+      ? [(value as { readonly text: string }).text]
+      : []
+  ).join("");
 }
 
 function rejection(reason: DesktopKnownRejection): DesktopCommandReply {

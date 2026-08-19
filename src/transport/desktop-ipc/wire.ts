@@ -5,10 +5,7 @@ import {
   isAbsentDesktopEndpointError,
   safeSocketError,
 } from "./errors.js";
-import {
-  DesktopFrameDecoder,
-  encodeDesktopFrame,
-} from "./framing.js";
+import { DesktopFrameDecoder, encodeDesktopFrame } from "./framing.js";
 import { desktopEndpointIdentity } from "./endpoint-identity.js";
 import type {
   DesktopProtocolObservation,
@@ -231,6 +228,7 @@ export class RawDesktopConnection {
     params: unknown,
     version: number,
     timeoutMs: number,
+    targetClientId?: string,
   ): Promise<DesktopResponseEnvelope> {
     const invalid = this.validateRequest(timeoutMs);
     if (invalid != null) return Promise.reject(invalid);
@@ -264,6 +262,7 @@ export class RawDesktopConnection {
           method,
           params,
           timeoutMs,
+          ...(targetClientId == null ? {} : { targetClientId }),
         }, this.limits.maxOutboundFrameBytes);
       } catch (cause) {
         clearTimeout(timeout);

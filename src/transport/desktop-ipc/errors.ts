@@ -4,12 +4,14 @@ export type DesktopProtocolFailure =
   | "frame-invalid"
   | "handshake-malformed"
   | "invalid-timeout"
+  | "owner-unroutable"
   | "pending-limit"
   | "reconnect-failed"
   | "request-timeout"
   | "response-malformed"
   | "socket-failed"
   | "socket-unavailable"
+  | "task-not-followed"
   | "unknown-protocol-version"
   | "unsupported-capability"
   | "write-failed";
@@ -24,14 +26,22 @@ export class DesktopProtocolError extends Error {
     readonly stage: "connect" | "framing" | "handshake" | "operation",
     readonly writeState: DesktopWriteState,
     message: string,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
   }
 }
 
-export function desktopReconnectError(message: string): DesktopProtocolError {
+export function desktopReconnectError(
+  message: string,
+  cause?: unknown,
+): DesktopProtocolError {
   return new DesktopProtocolError(
-    "reconnect-failed", "operation", "not-written", message,
+    "reconnect-failed",
+    "operation",
+    "not-written",
+    message,
+    cause === undefined ? undefined : { cause },
   );
 }
 

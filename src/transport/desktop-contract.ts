@@ -217,8 +217,8 @@ function desktopSession(
     }),
     submit: (request) => Effect.uninterruptible(
       Effect.tryPromise({
-        try: () => attachment.inject(request.mode === "queue"
-          ? {
+        try: () => {
+          return attachment.inject(request.mode === "queue" ? {
               kind: "start",
               threadId: request.task.threadId,
               clientUserMessageId: request.deliveryId,
@@ -231,8 +231,10 @@ function desktopSession(
               expectedTurnId: request.expectedTurnId,
               clientUserMessageId: request.deliveryId,
               input: [{ type: "text", text: request.message }],
+              createdAt: Date.now(),
               timeoutMs: Duration.toMillis(request.replyTimeout),
-            }),
+            });
+        },
         catch: () => null,
       }).pipe(Effect.match({
         onFailure: () => ({
